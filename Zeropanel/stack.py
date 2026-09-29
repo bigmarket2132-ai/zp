@@ -1,0 +1,2079 @@
+try:
+    import crypt
+except ImportError:
+    crypt = None
+import ipaddress
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from Zeropanel.config import CONFIG, FILEBROWSER_CUSTOM_JS
+
+from .default_page import DEFAULT_PAGE_CONTENT
+from .error_pages import DEFAULT_ERROR_PAGES
+from .mail import ensure_mailbox_storage, mailbox_storage_path, mailbox_storage_size_bytes, sanitize_mailbox_component
+from .snappymail import SNAPPYMAIL_APP_VERSION, SNAPPYMAIL_IMAGE, ensure_snappymail_layout, load_snappymail_state
+
+
+DEFAULT_SSH_MOTD = "\n".join([
+    "        ", "        ", "        ",
+    "         -.         ............        ",
+    "      ...-           .............      ",
+    "   .--====  .........    ............   ",
+    ".:--=-:. ...............  ...........   ",
+    "       ..................  ..........   ",
+    "      ....................  .........   ",
+    "      ..................... ........    ",
+    "     .:...................  ........   ",
+    "     :::::::..............  .........   ",
+    "     .:::::::::::.......  ........::   ",
+    "   .  ::::::::::::::...  .::::::::::   ",
+    "   :  .:::::::::::::::.  :::::::::::   ",
+    "  .::  .::::::::::::::::. .:::::::::   ",
+    "  ::::   :::::::::::::::::  ::::::::   ",
+    "  :::::.   :::::::::::::::::  :::::::: ",
+    " .:::::::.    ..:::..     ::::::::::   ",
+    "   .::::::::..       ..:::::::::::::   ",
+    "       .:::::::::::::::::::::::::.     ",
+    "             ..::::::::::::::.         ",
+    "        ",
+    "WELCOME TO Zeropanel",
+    "",
+])
+
+
+STACK_SERVICES = [
+    "web",
+    "redis",
+    "filebrowser",
+    "phpmyadmin",
+    "mailserver",
+    "mailproxy",
+    "db",
+    "pg",
+    "adminer",
+]
+
+SUPPORTED_PHP_VERSIONS = {"74", "80", "81", "82", "83", "84"}
+PHP_LEGACY_IMAGES = {
+    "74": "litespeedtech/openlitespeed:1.7.14-lsphp74",
+    "80": "litespeedtech/openlitespeed:1.7.14-lsphp80",
+    "81": "litespeedtech/openlitespeed:1.8.4-lsphp81",
+}
+
+SHA512_CRYPT_SALT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./"
+
+
+def build_account_runtime(account, public_host="127.0.0.1", port_base=18000):
+    account = dict(account) if hasattr(account, "keys") else account
+    account_id = int(account["id"])
+    slot = port_base + (account_id * 10)
+    # Every account needs an isolated host-port range. Production accounts
+    # used to share 110/143/465/etc., which made the second mailserver fail to
+    # start and left its SnappyMail mailbox authentication unavailable.
+    import os
+    use_dev_mail_ports = True
+    mail_port_offset = (account_id - 1) * 10 if use_dev_mail_ports else 0
+    username = account["username"]
+    base = {
+        "public_host": public_host,
+        "web_port": slot,
+        "filebrowser_port": slot + 1,
+        "phpmyadmin_port": slot + 2,
+        "db_port": slot + 3,
+        "sftp_port": slot + 4,
+        "ftp_port": 20000 + account_id,
+        "ftp_passive_min": 30000 + (account_id * 2),
+        "ftp_passive_max": 30001 + (account_id * 2),
+        "smtp_port": 1587 + mail_port_offset if use_dev_mail_ports else 587,
+        "smtp_tls_port": 1465 + mail_port_offset if use_dev_mail_ports else 465,
+        # SMTP port 25 is the public inbound mail edge. Submission and
+        # mailbox protocols remain account-isolated on their per-account
+        # host ports, but MX delivery must be reachable on the host's
+        # standard SMTP port.
+        "smtp_inbound_port": 25,
+        "imap_port": 1143 + mail_port_offset if use_dev_mail_ports else 143,
+        "imap_tls_port": 1993 + mail_port_offset if use_dev_mail_ports else 993,
+        "pop_port": 1110 + mail_port_offset if use_dev_mail_ports else 110,
+        "pop_tls_port": 1995 + mail_port_offset if use_dev_mail_ports else 995,
+        "sieve_port": 1190 + mail_port_offset if use_dev_mail_ports else 4190,
+        "pg_port": slot + 8,
+        "adminer_port": slot + 9,
+        "sftp_host": public_host,
+        "sftp_user": username,
+        "web_url": f"http://web-{username}.localhost",
+        "filebrowser_url": f"http://files-{username}.localhost",
+        "phpmyadmin_url": f"http://pma-{username}.localhost",
+        "adminer_url": f"http://adminer-{username}.localhost",
+        "mail_host": f"mail-{username}.localhost" if public_host == "127.0.0.1" else f"mail.{username}.{public_host}",
+        # Every account mailserver is also attached to the shared edge
+        # network.  The generic Docker alias `mailserver` therefore resolves
+        # to multiple accounts; SnappyMail must use the unique container name.
+        "mail_backend_host": f"mp-{username}-mailserver",
+        "mail_backend_imap_port": 993,
+        "mail_backend_smtp_port": 465,
+        "mail_backend_sieve_port": 4190,
+        "mail_webmail_backend_url": f"http://mail-{username}.localhost" if public_host == "127.0.0.1" else f"https://mail.{username}.{public_host}",
+        "mail_webmail_url": f"http://mail-{username}.localhost/webmail" if public_host == "127.0.0.1" else f"http://mail.{username}.{public_host}/webmail",
+        "mail_webmail_login_url": f"http://mail-{username}.localhost/webmail/login" if public_host == "127.0.0.1" else f"http://mail.{username}.{public_host}/webmail/login",
+        "mail_edge_host": "mail.mango.test" if public_host == "127.0.0.1" else f"mail.{public_host}",
+        "mail_edge_url": "http://mail.mango.test" if public_host == "127.0.0.1" else f"http://mail.{public_host}",
+        "mail_edge_webmail_url": "http://mail.mango.test/webmail" if public_host == "127.0.0.1" else f"http://mail.{public_host}/webmail",
+        "mail_edge_login_url": "http://mail.mango.test/webmail/login" if public_host == "127.0.0.1" else f"http://mail.{public_host}/webmail/login",
+        "redis_host": "redis",
+        "redis_port": 6379,
+        "object_cache_backend": "redis",
+        "opcode_cache_backend": "opcache",
+        "db_host": public_host,
+        "db_name": "{}_app".format(username),
+        "db_user": "{}_app".format(username),
+        "db_password": "dev-db-password-change-me",
+        "db_root_password": "dev-root-password-change-me",
+        "sftp_password": account.get("ssh_password") or "dev-sftp-password",
+        "filebrowser_password": "dev-fb-password",
+        "filebrowser_secret_path": "files",
+        "phpmyadmin_secret_path": "db",
+    }
+    
+    if public_host and public_host not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+        # Use the same hyphenated hostname as the Caddy route and certificate.
+        # The dotted form is retained only as a legacy compatibility alias.
+        base["filebrowser_url"] = f"https://files-{username}.{public_host}"
+        # Keep tool hostnames hyphenated.  The edge's TLS routes and
+        # certificates use pma-<account>.<public-host>; the old dotted form
+        # could load over HTTP but failed with ERR_SSL_PROTOCOL_ERROR when a
+        # browser upgraded it to HTTPS.
+        base["phpmyadmin_url"] = f"https://pma-{username}.{public_host}"
+        base["adminer_url"] = f"https://adminer-{username}.{public_host}"
+        base["mail_host"] = f"mail.{username}.{public_host}"
+        base["mail_backend_host"] = f"mp-{username}-mailserver"
+        base["mail_backend_imap_port"] = 993
+        base["mail_backend_smtp_port"] = 465
+        base["mail_backend_sieve_port"] = 4190
+        base["mail_webmail_backend_url"] = f"https://mail.{username}.{public_host}"
+        base["mail_webmail_url"] = f"https://mail.{username}.{public_host}/webmail"
+        base["mail_webmail_login_url"] = f"https://mail.{username}.{public_host}/webmail/login"
+        base["mail_edge_host"] = f"mail.{public_host}"
+        base["mail_edge_url"] = f"http://mail.{public_host}"
+        base["mail_edge_webmail_url"] = f"http://mail.{public_host}/webmail"
+        base["mail_edge_login_url"] = f"http://mail.{public_host}/webmail/login"
+
+    return base
+
+
+def account_paths(account):
+    base = Path(account["base_path"])
+    return {
+        "base": base,
+        "domains": base / "domains",
+        "databases": base / "databases",
+        "mail": base / "mail",
+        "backups": base / "backups",
+        "git": base / "git",
+        "ssl": base / "ssl",
+        "redis": base / ".runtime" / "stack" / "redis",
+        "runtime": base / ".runtime",
+        "stack": base / ".runtime" / "stack",
+        "compose": base / ".runtime" / "stack" / "docker-compose.yml",
+        "account_json": base / "account.json",
+        "apache_vhosts": base / ".runtime" / "stack" / "apache-vhosts.conf",
+    }
+
+
+ACCOUNT_SUSPENSION_MARKER = ".Zeropanel-suspended"
+SUSPENSION_HTACCESS_BLOCK = (
+    "# BEGIN Zeropanel Suspension Gate\n"
+    "RewriteRule ^_Zeropanel_errors/ - [L]\n"
+    "RewriteCond %{DOCUMENT_ROOT}/.Zeropanel-suspended -f\n"
+    "RewriteRule ^ /_Zeropanel_errors/suspended.html [L]\n"
+    "# END Zeropanel Suspension Gate\n"
+)
+
+
+def sync_account_suspension_marker(account, suspended=None):
+    """Synchronize filesystem-only suspension gates for an account and its sites."""
+    base_path = Path(account["base_path"])
+    marker = base_path / ACCOUNT_SUSPENSION_MARKER
+    account_status = account["status"] if "status" in account.keys() else None
+    is_suspended = suspended if suspended is not None else account_status in {"suspended", "hard_suspended"}
+    if is_suspended:
+        base_path.mkdir(parents=True, exist_ok=True)
+        marker.write_text("suspended\n", encoding="utf-8")
+        marker.chmod(0o644)
+    else:
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+    # OpenLiteSpeed evaluates this marker relative to each vhost's document
+    # root. Keep these mirrors filesystem-only so every request is gated
+    # without a database lookup, including domains with independent caches.
+    domains_root = base_path / "domains"
+    if domains_root.is_dir():
+        for document_root in domains_root.glob("*/public_html"):
+            document_marker = document_root / ACCOUNT_SUSPENSION_MARKER
+            htaccess = document_root / ".htaccess"
+            if is_suspended:
+                document_root.mkdir(parents=True, exist_ok=True)
+                document_marker.write_text("suspended\n", encoding="utf-8")
+                document_marker.chmod(0o644)
+                try:
+                    htaccess_content = htaccess.read_text(encoding="utf-8") if htaccess.exists() else ""
+                    if SUSPENSION_HTACCESS_BLOCK not in htaccess_content:
+                        htaccess.write_text(SUSPENSION_HTACCESS_BLOCK + htaccess_content, encoding="utf-8")
+                except OSError:
+                    pass
+            else:
+                try:
+                    document_marker.unlink()
+                except FileNotFoundError:
+                    pass
+                try:
+                    if htaccess.exists():
+                        htaccess_content = htaccess.read_text(encoding="utf-8")
+                        if SUSPENSION_HTACCESS_BLOCK in htaccess_content:
+                            remaining = htaccess_content.replace(SUSPENSION_HTACCESS_BLOCK, "", 1)
+                            if remaining:
+                                htaccess.write_text(remaining, encoding="utf-8")
+                            else:
+                                htaccess.unlink()
+                except OSError:
+                    pass
+    # Migrate vhosts generated before the document-root marker rule was
+    # introduced. This is deliberately a small text migration and does not
+    # restart the account stack; the caller can reload the web worker when
+    # required by its deployment path.
+    vhosts_root = base_path / ".runtime" / "stack" / "vhosts"
+    if vhosts_root.is_dir():
+        old_condition = f"  RewriteCond             /home/{account['username']}/.Zeropanel-suspended -f"
+        for vhconf in vhosts_root.glob("*/vhconf.conf"):
+            try:
+                content = vhconf.read_text(encoding="utf-8")
+                if old_condition in content:
+                    content = content.replace(
+                        "  RewriteCond             %{REQUEST_URI} !^/_Zeropanel_errors/\n"
+                        + old_condition
+                        + "\n  RewriteRule             ^ /_Zeropanel_errors/suspended.html [L]",
+                        "  RewriteRule             ^/_Zeropanel_errors/ - [L]\n"
+                        "  RewriteCond             %{DOCUMENT_ROOT}/.Zeropanel-suspended -f\n"
+                        "  RewriteRule             ^/(.*)$ /_Zeropanel_errors/suspended.html [L]",
+                    )
+                    vhconf.write_text(content, encoding="utf-8")
+            except OSError:
+                continue
+    return marker
+
+
+def render_account_metadata(account, plan, node, websites, runtime):
+    return {
+        "account_id": account["id"],
+        "username": account["username"],
+        "status": account["status"],
+        "base_path": account["base_path"],
+        "plan": {
+            "id": plan["id"],
+            "name": plan["name"],
+            "cpu_limit": plan["cpu_limit"],
+            "memory_mb": plan["memory_mb"],
+            "storage_mb": plan["storage_mb"],
+            "inode_limit": plan["inode_limit"],
+            "max_websites": plan["max_websites"],
+            "max_databases": plan["max_databases"],
+            "max_mailboxes": plan["max_mailboxes"],
+            "max_cron_jobs": plan["max_cron_jobs"],
+            "daily_email_limit": plan["daily_email_limit"],
+            "backup_retention_days": plan["backup_retention_days"],
+        },
+        "node": {
+            "id": node["id"],
+            "name": node["name"],
+            "hostname": node["hostname"],
+            "quota_backend": node["quota_backend"],
+        },
+        "runtime": runtime,
+        "websites": [
+            {
+                "id": website["id"],
+                "domain": website["domain"],
+                "document_root": website["document_root"],
+                "php_version": website["php_version"],
+                "ssl_status": website["ssl_status"],
+                "status": website["status"],
+                "analytics_enabled": int(website.get("analytics_enabled", 1) or 0),
+            }
+            for website in websites
+        ],
+    }
+
+
+def render_mailserver_accounts(mailboxes, mail_policy=None):
+    lines = []
+    quotas = []
+    aliases = []
+    mail_policy = mail_policy or {}
+    for alias in mail_policy.get("aliases") or []:
+        source = str(alias.get("source_email") or "").strip().lower()
+        destination = str(alias.get("destination_email") or "").strip().lower()
+        if source and destination and str(alias.get("status") or "active") == "active":
+            aliases.append(f"{source} {destination}")
+    for forwarder in mail_policy.get("forwarders") or []:
+        source = str(forwarder.get("source_email") or "").strip().lower()
+        destination = str(forwarder.get("destination_email") or "").strip().lower()
+        if source and destination and str(forwarder.get("status") or "active") == "active":
+            aliases.append(f"{source} {destination}")
+    for domain in mail_policy.get("domains") or []:
+        if int(domain.get("catch_all_enabled") or 0) and domain.get("catch_all_destination"):
+            domain_name = str(domain.get("name") or "").strip().lower()
+            destination = str(domain.get("catch_all_destination") or "").strip().lower()
+            if domain_name and destination:
+                aliases.append(f"@{domain_name} {destination}")
+    for mailbox in mailboxes or []:
+        email = str(mailbox.get("email") or "").strip().lower()
+        if not email:
+            continue
+        password = str(mailbox.get("password") or "").strip()
+        if not password:
+            continue
+        password_hash = mailserver_password_hash(password)
+        lines.append(f"{email}|{password_hash}")
+        quota_mb = int(mailbox.get("quota_mb") or 0)
+        if quota_mb > 0:
+            quotas.append(f"{email}:{quota_mb * 1024 * 1024}")
+    return {
+        "accounts": "\n".join(lines) + ("\n" if lines else ""),
+        "quotas": "\n".join(quotas) + ("\n" if quotas else ""),
+        "aliases": "\n".join(aliases) + ("\n" if aliases else ""),
+    }
+
+
+def mailserver_password_hash(password):
+    password = str(password or "")
+    salt = "".join(secrets.choice(SHA512_CRYPT_SALT_CHARS) for _ in range(16))
+    try:
+        result = subprocess.run(
+            ["openssl", "passwd", "-6", "-salt", salt, "-stdin"],
+            input=password,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        password_hash = result.stdout.strip()
+        if password_hash.startswith("$6$") and password_hash.count("$") >= 3:
+            return password_hash
+    except (OSError, subprocess.CalledProcessError):
+        pass
+
+    fallback_salt = f"$6${salt}"
+    password_hash = crypt.crypt(password, fallback_salt) if crypt is not None else None
+    if password_hash and password_hash.startswith("$6$") and password_hash.count("$") >= 3:
+        return password_hash
+    try:
+        from passlib.hash import sha512_crypt
+
+        password_hash = sha512_crypt.using(salt=salt).hash(password)
+        if password_hash.startswith("$6$") and password_hash.count("$") >= 3:
+            return password_hash
+    except ImportError:
+        pass
+    raise RuntimeError("mailserver_password_hash_failed")
+
+
+def ensure_mailserver_tls(mailserver_config_dir, mail_host):
+    ssl_dir = Path(mailserver_config_dir) / "ssl"
+    ca_dir = ssl_dir / "demoCA"
+    ssl_dir.mkdir(parents=True, exist_ok=True)
+    ca_dir.mkdir(parents=True, exist_ok=True)
+    cert_path = ssl_dir / f"{mail_host}-cert.pem"
+    key_path = ssl_dir / f"{mail_host}-key.pem"
+    ca_cert_path = ca_dir / "cacert.pem"
+    if cert_path.exists() and key_path.exists() and ca_cert_path.exists():
+        return {"cert": cert_path, "key": key_path, "ca_cert": ca_cert_path, "created": False}
+
+    openssl = shutil.which("openssl")
+    if not openssl and os.name == "nt":
+        return {"cert": cert_path, "key": key_path, "ca_cert": ca_cert_path, "created": False}
+
+    subprocess.run(
+        [
+            openssl or "openssl",
+            "req",
+            "-x509",
+            "-nodes",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-days",
+            "3650",
+            "-subj",
+            f"/CN={mail_host}",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    ca_cert_path.write_text(cert_path.read_text(encoding="utf-8"), encoding="utf-8")
+    key_path.chmod(0o600)
+    cert_path.chmod(0o644)
+    ca_cert_path.chmod(0o644)
+    return {"cert": cert_path, "key": key_path, "ca_cert": ca_cert_path, "created": True}
+
+
+def render_mail_edge_manifest(runtime, mailboxes, mail_policy=None):
+    mail_policy = mail_policy or {}
+    mailbox_map = []
+    for mailbox in mailboxes or []:
+        mailbox_map.append(
+            {
+                "id": mailbox.get("id"),
+                "email": mailbox.get("email"),
+                "account_id": mailbox.get("account_id"),
+                "mail_domain_id": mailbox.get("mail_domain_id"),
+                "storage_path": mailbox.get("storage_path"),
+                "quota_mb": mailbox.get("quota_mb"),
+                "status": mailbox.get("status"),
+                "edge_host": runtime.get("mail_edge_host"),
+                "edge_url": runtime.get("mail_edge_url"),
+                "edge_webmail_url": runtime.get("mail_edge_webmail_url"),
+                "edge_login_url": runtime.get("mail_edge_login_url"),
+            }
+        )
+    domain_map = []
+    for domain in mail_policy.get("domains") or []:
+        domain_map.append(
+            {
+                "id": domain.get("id"),
+                "name": domain.get("name"),
+                "status": domain.get("status"),
+                "mail_domain_id": domain.get("mail_domain_id"),
+                "catch_all_enabled": int(domain.get("catch_all_enabled") or 0),
+                "catch_all_destination": domain.get("catch_all_destination") or "",
+            }
+        )
+    return {
+        "provider": "shared-mail-edge",
+        "edge_host": runtime.get("mail_edge_host"),
+        "edge_url": runtime.get("mail_edge_url"),
+        "edge_webmail_url": runtime.get("mail_edge_webmail_url"),
+        "edge_login_url": runtime.get("mail_edge_login_url"),
+        "mail_host": runtime.get("mail_host"),
+        "mail_webmail_backend_url": runtime.get("mail_webmail_backend_url"),
+        "mailboxes": mailbox_map,
+        "domains": domain_map,
+    }
+
+
+def ensure_account_layout(account, plan, node, websites, runtime=None, mailboxes=None, mail_policy=None, default_page_content=None):
+    runtime = runtime or build_account_runtime(account)
+    # Keep the plan's PHP worker quota attached to the vhost render context.
+    # The account row itself intentionally does not duplicate plan settings.
+    vhost_account = dict(account)
+    vhost_account["php_workers"] = plan.get("php_workers", 3) if hasattr(plan, "get") else plan["php_workers"]
+    vhost_account["php_timeout"] = plan.get("php_timeout", 120) if hasattr(plan, "get") else (plan["php_timeout"] if "php_timeout" in plan else 120)
+    mailboxes = mailboxes or []
+    mail_policy = mail_policy or {}
+    paths = account_paths(account)
+    for key in ["base", "domains", "databases", "mail", "backups", "git", "ssl", "redis", "runtime", "stack"]:
+        paths[key].mkdir(parents=True, exist_ok=True)
+    sync_account_suspension_marker(account)
+        
+    (paths["base"] / "pg_databases").mkdir(parents=True, exist_ok=True)
+    (paths["mail"] / "mailboxes").mkdir(parents=True, exist_ok=True)
+    (paths["mail"] / "spool" / "incoming").mkdir(parents=True, exist_ok=True)
+    (paths["mail"] / "spool" / "outgoing").mkdir(parents=True, exist_ok=True)
+
+    for website in websites:
+        root = Path(website["document_root"])
+        root.mkdir(parents=True, exist_ok=True)
+        logs = root.parent / "logs"
+        tmp = root.parent / "tmp"
+        logs.mkdir(parents=True, exist_ok=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        # File Browser runs as the account UID, while PHP/OLS runs as the
+        # web user. Setgid + group-write keeps directories created by either
+        # service writable by the other, including move/rename operations.
+        for p in [root.parent, root, logs, tmp]:
+            try:
+                os.chmod(p, 0o2777)
+            except Exception:
+                pass
+        # Repair existing subdirectories as well. This makes the policy
+        # effective for sites created before setgid permissions were added.
+        try:
+            for current, dirs, _files in os.walk(root):
+                if Path(current).is_symlink():
+                    dirs[:] = []
+                    continue
+                os.chmod(current, 0o2777)
+                for name in dirs:
+                    child = Path(current) / name
+                    if not child.is_symlink():
+                        os.chmod(child, 0o2777)
+        except OSError:
+            pass
+        index = root / "index.php"
+        if not index.exists():
+            # Only drop the placeholder when the directory is truly empty.
+            # If the user has already uploaded any non-hidden files (index.html,
+            # WordPress, a zip, etc.) leave the directory untouched.
+            has_user_files = any(
+                p for p in root.iterdir() if not p.name.startswith(".")
+            ) if root.exists() else False
+            if not has_user_files:
+                tmpl = default_page_content or DEFAULT_PAGE_CONTENT
+                content = tmpl.replace("{domain}", website["domain"])
+                index.write_text(content, encoding="utf-8")
+                try:
+                    os.chmod(index, 0o666)
+                except Exception:
+                    pass
+
+    mailbox_map = []
+    for mailbox in mailboxes:
+        mailbox_path = Path(str(mailbox.get("storage_path") or ""))
+        if not mailbox_path.is_absolute():
+            mailbox_path = mailbox_storage_path(paths["base"], mailbox.get("email") or "mailbox@example.invalid")
+        ensure_mailbox_storage(mailbox_path)
+        mailbox_map.append(
+            {
+                "id": mailbox.get("id"),
+                "email": mailbox.get("email"),
+                "local_part": mailbox.get("local_part", ""),
+                "domain": mailbox.get("domain", ""),
+                "quota_mb": mailbox.get("quota_mb"),
+                "status": mailbox.get("status"),
+                "storage_path": str(mailbox_path),
+                "storage_bytes": mailbox_storage_size_bytes(mailbox_path),
+            }
+        )
+
+    metadata = render_account_metadata(account, plan, node, websites, runtime)
+    paths["account_json"].write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    (paths["stack"] / "quota.json").write_text(json.dumps(metadata["plan"], indent=2) + "\n", encoding="utf-8")
+    (paths["mail"] / "mailboxes.json").write_text(json.dumps(mailbox_map, indent=2) + "\n", encoding="utf-8")
+    (paths["mail"] / "plane.json").write_text(
+        json.dumps(
+            {
+                "provider": "snappymail",
+                "mail_host": runtime.get("mail_host"),
+                "mail_webmail_url": runtime.get("mail_webmail_url"),
+                "mail_webmail_login_url": runtime.get("mail_webmail_login_url"),
+                "mail_root": str(paths["mail"]),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (paths["mail"] / "policy.json").write_text(
+        json.dumps(
+            {
+                "provider": "snappymail",
+                "mail_host": runtime.get("mail_host"),
+                "daily_email_limit": mail_policy.get("daily_email_limit", plan["daily_email_limit"]),
+                "domains": mail_policy.get("domains", []),
+                "aliases": mail_policy.get("aliases", []),
+                "forwarders": mail_policy.get("forwarders", []),
+                "autoresponders": mail_policy.get("autoresponders", []),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (paths["mail"] / "routing.json").write_text(
+        json.dumps(
+            {
+                "mail_host": runtime.get("mail_host"),
+                "mailboxes": mailbox_map,
+                "mail_root": str(paths["mail"]),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (paths["stack"] / "mail-edge.json").write_text(
+        json.dumps(render_mail_edge_manifest(runtime, mailbox_map, mail_policy), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    mailserver_dir = paths["stack"] / "mailserver"
+    mailserver_dir.mkdir(parents=True, exist_ok=True)
+    mailserver_config_dir = mailserver_dir / "config"
+    mailserver_state_dir = mailserver_dir / "state"
+    mailserver_logs_dir = mailserver_dir / "logs"
+    mailserver_config_dir.mkdir(parents=True, exist_ok=True)
+    mailserver_state_dir.mkdir(parents=True, exist_ok=True)
+    mailserver_logs_dir.mkdir(parents=True, exist_ok=True)
+    ensure_mailserver_tls(mailserver_config_dir, runtime.get("mail_host") or f"mail-{account['username']}.localhost")
+    mailserver_payload = render_mailserver_accounts(mailboxes, mail_policy)
+    (mailserver_config_dir / "postfix-accounts.cf").write_text(mailserver_payload["accounts"], encoding="utf-8")
+    (mailserver_config_dir / "postfix-virtual.cf").write_text(mailserver_payload["aliases"], encoding="utf-8")
+    (mailserver_config_dir / "dovecot-quotas.cf").write_text(mailserver_payload["quotas"], encoding="utf-8")
+    opendkim_dir = mailserver_config_dir / "opendkim"
+    opendkim_keys_dir = opendkim_dir / "keys"
+    opendkim_keys_dir.mkdir(parents=True, exist_ok=True)
+    key_table = []
+    signing_table = []
+    for dkim in mail_policy.get("dkim") or []:
+        domain_name = sanitize_mailbox_component(dkim.get("domain"), "domain")
+        selector = sanitize_mailbox_component(dkim.get("selector"), "mango")
+        private_key = str(dkim.get("private_key") or "").strip()
+        if not domain_name or not private_key:
+            continue
+        domain_key_dir = opendkim_keys_dir / domain_name
+        domain_key_dir.mkdir(parents=True, exist_ok=True)
+        (domain_key_dir / f"{selector}.private").write_text(private_key + "\n", encoding="utf-8")
+        key_table.append(f"{selector}._domainkey.{domain_name} {domain_name}:{selector}:/etc/opendkim/keys/{domain_name}/{selector}.private")
+        signing_table.append(f"*@{domain_name} {selector}._domainkey.{domain_name}")
+    (opendkim_dir / "KeyTable").write_text("\n".join(key_table) + ("\n" if key_table else ""), encoding="utf-8")
+    (opendkim_dir / "SigningTable").write_text("\n".join(signing_table) + ("\n" if signing_table else ""), encoding="utf-8")
+    (opendkim_dir / "TrustedHosts").write_text("127.0.0.1\n::1\n172.16.0.0/12\n", encoding="utf-8")
+    (mailserver_config_dir / "fail2ban-jail.cf").write_text(
+        "\n".join(
+            [
+                "[DEFAULT]",
+                "bantime = 1h",
+                "findtime = 10m",
+                "maxretry = 3",
+                "banaction = nftables-multiport",
+                "",
+                "[dovecot]",
+                "enabled = true",
+                "filter = dovecot",
+                "logpath = /var/log/mail/mail.log",
+                "backend = auto",
+                "port = pop3,pop3s,imap,imaps,submission,465,sieve",
+                "action = nftables-multiport[name=dovecot, port=\"25,110,143,465,587,993,995,4190\", protocol=tcp]",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mail_identity = runtime.get("mail_host") or f"mail-{account['username']}.localhost"
+    (mailserver_config_dir / "postfix-main.cf").write_text(
+        "\n".join(
+            [
+                # Keep the SMTP identity tied to the account hostname even
+                # if an existing container is recreated from an older image
+                # or retains stale container metadata.  This is deliberately
+                # account-scoped; it does not depend on the number of sites
+                # attached to the account.
+                f"myhostname = {mail_identity}",
+                f"smtp_helo_name = {mail_identity}",
+                "message_size_limit = 26214400",
+                "mailbox_size_limit = 0",
+                "recipient_delimiter = +",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    snappymail_domains = [domain.get("name") for domain in (mail_policy.get("domains") or []) if domain.get("name")]
+    snappymail_state = load_snappymail_state(paths["stack"] / "snappymail")
+    ensure_snappymail_layout(
+        paths["stack"] / "snappymail",
+        runtime,
+        snappymail_domains,
+        sso_key=mail_policy.get("snappymail_sso_key") or snappymail_state.get("sso_key"),
+    )
+    fb_db_dir = paths["stack"] / "filebrowser"
+    fb_db_dir.mkdir(parents=True, exist_ok=True)
+    fb_config_dir = paths["stack"] / "filebrowser-config"
+    fb_config_dir.mkdir(parents=True, exist_ok=True)
+    fb_branding_dir = paths["stack"] / "filebrowser-branding"
+    fb_branding_dir.mkdir(parents=True, exist_ok=True)
+    (fb_branding_dir / "custom.js").write_text(FILEBROWSER_CUSTOM_JS, encoding="utf-8")
+    fb_settings = fb_config_dir / "settings.json"
+    fb_settings.write_text(
+        '{\n  "port": 80,\n  "baseURL": "/files",\n  "address": "",\n  "log": "stdout",\n  "database": "/database/filebrowser.db",\n  "root": "/srv",\n  "auth": {\n    "method": "noauth"\n  },\n  "branding": {\n    "name": "File Manager",\n    "disableUsedPercentage": false,\n    "files": "/branding"\n  }\n}\n',
+        encoding="utf-8"
+    )
+    
+    # Generate OLS config
+    vhosts_dir = paths["stack"] / "vhosts"
+    vhosts_dir.mkdir(parents=True, exist_ok=True)
+    for website in websites:
+        domain = website["domain"]
+        domain_dir = vhosts_dir / domain
+        domain_dir.mkdir(parents=True, exist_ok=True)
+        (domain_dir / "vhconf.conf").write_text(render_ols_vhconf(vhost_account, website), encoding="utf-8")
+        
+    # Generate custom error pages
+    errors_dir = paths["stack"] / "errors"
+    errors_dir.mkdir(parents=True, exist_ok=True)
+    for err_code, err_html in DEFAULT_ERROR_PAGES.items():
+        (errors_dir / f"{err_code}.html").write_text(err_html, encoding="utf-8")
+
+    # Keep the server-level LSAPI definitions aligned with the vhost worker
+    # quota. Public connection capacity is independent; PHP concurrency still
+    # follows the plan so high connection counts cannot fork unbounded workers.
+    (paths["stack"] / "openlitespeed-httpd.conf").write_text(render_openlitespeed_httpd_config(vhost_account, websites), encoding="utf-8")
+    rules_path = paths["stack"] / "modsecurity-rules.conf"
+    existing_rules = rules_path.read_text(encoding="utf-8", errors="replace") if rules_path.exists() else ""
+    rules_text = render_modsecurity_rules(websites)
+    if "# OWASP CRS" in existing_rules:
+        rules_text += "\n" + existing_rules[existing_rules.index("# OWASP CRS"):]
+    rules_path.write_text(rules_text, encoding="utf-8")
+    paths["apache_vhosts"].write_text(render_apache_vhosts(account, websites), encoding="utf-8")
+    (paths["stack"] / "cron").write_text(render_crontab(account), encoding="utf-8")
+    (paths["stack"] / "cron").chmod(0o600)
+    try:
+        if hasattr(os, "chown"):
+            os.chown(paths["stack"] / "cron", 0, 0)
+    except PermissionError:
+        pass
+    ftp_conf = paths["stack"] / "proftpd.conf"
+    ftp_conf.write_text(
+        "\n".join([
+            "ServerName Zeropanel FTP",
+            "ServerType standalone",
+            "DefaultServer on",
+            "Port 21",
+            "UseIPv6 off",
+            "Include /etc/proftpd/modules.conf",
+            "AuthOrder mod_auth_file.c",
+            "AuthUserFile /etc/proftpd/ftp.passwd",
+            "AuthPAM off",
+            "RequireValidShell off",
+            "MaxLoginAttempts 3",
+            "TimeoutLogin 60",
+            "DefaultRoot ~",
+            "PassivePorts {} {}".format(runtime["ftp_passive_min"], runtime["ftp_passive_max"]),
+            "MasqueradeAddress {}".format(runtime["public_host"]) if runtime["public_host"] not in {"127.0.0.1", "0.0.0.0", "localhost"} else "",
+            "<Limit LOGIN>",
+            "  AllowAll",
+            "</Limit>",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    ftp_passwd = paths["stack"] / "ftp.passwd"
+    if not ftp_passwd.exists():
+        ftp_passwd.write_text("", encoding="utf-8")
+    ftp_passwd.chmod(0o600)
+    
+    # Keep the account database tuned across every Zeropanel reprovision.
+    # The buffer pool is deliberately below the container ceiling so MariaDB
+    # still has room for connection/session buffers and temporary tables.
+    mysql_cnf = """[mysqld]
+innodb_buffer_pool_size=2048M
+max_connections=250
+tmp_table_size=96M
+max_heap_table_size=96M
+thread_cache_size=96
+table_open_cache=6000
+"""
+    (paths["stack"] / "mysql.cnf").write_text(mysql_cnf, encoding="utf-8")
+    
+    sftp_users_conf = paths["stack"] / "sftp_users.conf"
+    if not sftp_users_conf.exists():
+        acc_d = dict(account) if not isinstance(account, dict) else account
+        ssh_status = acc_d.get("ssh_access", "disabled")
+        if ssh_status == "enabled":
+            sftp_users_conf.write_text(f"{account['username']}:{runtime['sftp_password']}:1001:1001\n", encoding="utf-8")
+        else:
+            sftp_users_conf.write_text(f"# SSH/SFTP access disabled for {account['username']}\n", encoding="utf-8")
+
+    sshd_config = paths["stack"] / "sshd_config"
+    sshd_config_content = """Protocol 2
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+UseDNS no
+PermitRootLogin no
+X11Forwarding no
+AllowTcpForwarding yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+UsePAM no
+MaxAuthTries 3
+LoginGraceTime 20
+MaxStartups 10:30:20
+PerSourceMaxStartups 3
+PerSourcePenalties yes
+AllowUsers {username}
+PrintMotd yes
+Subsystem sftp internal-sftp
+""".format(username=account["username"])
+    sshd_config.write_text(sshd_config_content, encoding="utf-8")
+    motd_path = paths["stack"] / "motd"
+    if not motd_path.exists():
+        motd_path.write_text(DEFAULT_SSH_MOTD, encoding="utf-8")
+    ftp_access = str(account.get("ftp_access", "enabled") if hasattr(account, "get") else "enabled")
+    ssh_access = str(account.get("ssh_access", "disabled") if hasattr(account, "get") else "disabled")
+    ftp_marker = paths["stack"] / "ftp.enabled"
+    ssh_marker = paths["stack"] / "ssh.enabled"
+    ftp_marker.write_text("enabled\n" if ftp_access == "enabled" else "disabled\n", encoding="utf-8")
+    ssh_marker.write_text("enabled\n" if ssh_access == "enabled" else "disabled\n", encoding="utf-8")
+    service_runner = """#!/bin/sh
+set -eu
+mkdir -p /run/sshd
+if grep -q '^enabled' /etc/Zeropanel/ssh.enabled; then
+  groupadd -g 1001 mpusers 2>/dev/null || true
+  # VS Code Remote-SSH installs its server under the login user's home.
+  # The account home is shared with the web stack, so prepare only this
+  # private directory for the SSH user instead of changing site ownership.
+  install -d -m 700 -o 1001 -g 1001 "/home/{username}/.vscode-server" 2>/dev/null || true
+  while IFS=: read -r login password uid gid home; do
+    case "$login" in ''|\\#*) continue ;; esac
+    # Only the primary account is an SSH/SFTP identity. FTP subaccounts
+    # share this file for legacy compatibility but must never receive shell access.
+    [ "$login" = "{username}" ] || continue
+    if ! id "$login" >/dev/null 2>&1; then
+      useradd -M -u "${uid:-1001}" -g 1001 -d "/home/{username}" -s /bin/sh "$login" 2>/dev/null || true
+    fi
+    printf '%s:%s\\n' "$login" "$password" | chpasswd 2>/dev/null || true
+  done < /etc/sftp/users.conf
+  ssh-keygen -A >/dev/null 2>&1 || true
+  nohup /usr/sbin/sshd -D -e >/var/log/sshd.log 2>&1 </dev/null &
+fi
+if grep -q '^enabled' /etc/Zeropanel/ftp.enabled; then
+  nohup /usr/sbin/proftpd -n -c /etc/proftpd/Zeropanel.conf >/var/log/proftpd-runtime.log 2>&1 </dev/null &
+fi
+# Ensure OPcache is properly enabled and configured for all installed PHP versions
+for opcache_ini in /usr/local/lsws/lsphp*/etc/php/*/mods-available/opcache.ini; do
+  [ -f "$opcache_ini" ] || continue
+  if ! grep -q '^opcache\.enable=' "$opcache_ini" 2>/dev/null; then
+    printf 'opcache.enable=1\nopcache.enable_cli=1\nopcache.memory_consumption=256\nopcache.interned_strings_buffer=16\nopcache.max_accelerated_files=20000\n' >> "$opcache_ini"
+  fi
+done
+
+# Request deadlines are enforced by LSAPI_MAX_PROCESS_TIME in each vhost.
+# Process age includes idle time and must never be used to kill PHP workers
+# or their persistent parent process.
+# Keep legacy applications that use localhost:3306 working inside the web
+# container while preserving the normal db:3306 Docker-network path.
+nohup /bin/sh -c 'while ! /usr/bin/socat TCP-LISTEN:3306,bind=127.0.0.1,reuseaddr,fork TCP:db:3306; do sleep 2; done' >/var/log/mysql-loopback-proxy.log 2>&1 </dev/null &
+# PHP applications that use the traditional `localhost` MySQL setting do
+# not use TCP; mysqli and PDO resolve it to this Unix socket instead.  Keep
+# that legacy behaviour compatible with the isolated per-account database
+# container without changing application files or database credentials.
+mkdir -p /var/run/mysqld
+nohup /bin/sh -c 'while ! /usr/bin/socat UNIX-LISTEN:/var/run/mysqld/mysqld.sock,fork,reuseaddr,umask=000 TCP:db:3306; do rm -f /var/run/mysqld/mysqld.sock; sleep 2; done' >/var/log/mysql-socket-proxy.log 2>&1 </dev/null &
+# Keep OpenLiteSpeed self-healing if its master process stops while the
+# container's PID 1 is still alive. A Docker restart policy only runs when
+# PID 1 exits; merely reporting an unhealthy container is not enough.
+# The supervisor runs as the main foreground process. If OpenLiteSpeed cannot
+# be revived, exiting this script terminates /entrypoint.sh (PID 1) so Docker
+# automatically recreates and restores the web container.
+lsws_status() {
+  /usr/local/lsws/bin/lswsctrl status 2>/dev/null | /usr/bin/grep -q 'litespeed is running with PID'
+}
+
+/usr/sbin/cron -f &
+cron_pid=$!
+
+# Reload OpenLiteSpeed for .htaccess files in each public_html directory and
+# one level below it. inotify is event-driven (no polling); the short lock
+# coalesces bursts from file-manager moves into one graceful reload.
+if command -v inotifywait >/dev/null 2>&1 && [ -d "/home/{username}/domains" ]; then
+  (
+    set --
+    for public_root in /home/{username}/domains/*/public_html; do
+      [ -d "$public_root" ] || continue
+      set -- "$@" "$public_root"
+      for child_dir in "$public_root"/*; do
+        [ -d "$child_dir" ] && set -- "$@" "$child_dir"
+      done
+    done
+    inotifywait -m -q \\
+      -e close_write,moved_to,moved_from,create,delete \\
+      --format '%w%f' --include '(^|/)\\.htaccess$' \\
+      "$@" 2>/dev/null |
+    while IFS= read -r changed_path; do
+      if mkdir /run/Zeropanel-htaccess-reload.lock 2>/dev/null; then
+        (
+          sleep 2
+          rmdir /run/Zeropanel-htaccess-reload.lock 2>/dev/null || true
+          /usr/local/lsws/bin/lswsctrl reload >/dev/null 2>&1 || true
+        ) &
+      fi
+    done
+  ) >/dev/null 2>&1 &
+fi
+
+while :; do
+  if ! kill -0 "$cron_pid" 2>/dev/null; then
+    /usr/sbin/cron -f &
+    cron_pid=$!
+  fi
+  if ! lsws_status; then
+    printf '%s OpenLiteSpeed is down; attempting restart\\n' "$(date -Is)" >>/var/log/Zeropanel-lsws-supervisor.log 2>/dev/null || true
+    if ! /usr/local/lsws/bin/lswsctrl start >>/var/log/Zeropanel-lsws-supervisor.log 2>&1; then
+      printf '%s OpenLiteSpeed restart failed; restarting container\\n' "$(date -Is)" >>/var/log/Zeropanel-lsws-supervisor.log 2>/dev/null || true
+      kill -9 "$cron_pid" 2>/dev/null || true
+      exit 1
+    fi
+    sleep 5
+    if ! lsws_status; then
+      printf '%s OpenLiteSpeed did not become ready; restarting container\\n' "$(date -Is)" >>/var/log/Zeropanel-lsws-supervisor.log 2>/dev/null || true
+      kill -9 "$cron_pid" 2>/dev/null || true
+      exit 1
+    fi
+  fi
+  sleep 15
+done
+""".replace("{username}", str(account["username"])).replace("{php_timeout}", str(php_timeout_limit(vhost_account, websites)))
+    runner_path = paths["stack"] / "services-entrypoint.sh"
+    runner_path.write_text(service_runner, encoding="utf-8")
+    runner_path.chmod(0o755)
+
+    paths["compose"].write_text(
+        render_compose(account, plan, websites, runtime, mail_enabled=bool(mailboxes)),
+        encoding="utf-8",
+    )
+    
+    # Generate custom web Dockerfile
+    web_build_dir = paths["stack"] / "web"
+    web_build_dir.mkdir(parents=True, exist_ok=True)
+    dockerfile_content = f"""FROM litespeedtech/openlitespeed:latest
+COPY --from={PHP_LEGACY_IMAGES['74']} /usr/local/lsws/lsphp74 /usr/local/lsws/lsphp74
+COPY --from={PHP_LEGACY_IMAGES['80']} /usr/local/lsws/lsphp80 /usr/local/lsws/lsphp80
+COPY --from={PHP_LEGACY_IMAGES['81']} /usr/local/lsws/lsphp81 /usr/local/lsws/lsphp81
+COPY --from={PHP_LEGACY_IMAGES['74']} /usr/lib/x86_64-linux-gnu/libssl.so.1.1* /opt/Zeropanel-legacy-libs/
+COPY --from={PHP_LEGACY_IMAGES['74']} /usr/lib/x86_64-linux-gnu/libcrypto.so.1.1* /opt/Zeropanel-legacy-libs/
+COPY --from={PHP_LEGACY_IMAGES['74']} /usr/lib/x86_64-linux-gnu/libxml2.so.2* /opt/Zeropanel-legacy-libs/
+COPY --from={PHP_LEGACY_IMAGES['74']} /usr/lib/x86_64-linux-gnu/libenchant.so.1* /opt/Zeropanel-legacy-libs/
+COPY --from={PHP_LEGACY_IMAGES['74']} /usr/lib/x86_64-linux-gnu/libwebp.so.6* /opt/Zeropanel-legacy-libs/
+COPY --from={PHP_LEGACY_IMAGES['74']} /usr/lib/x86_64-linux-gnu/libicu*.so.66* /opt/Zeropanel-legacy-libs/
+COPY --from={PHP_LEGACY_IMAGES['81']} /usr/lib/x86_64-linux-gnu/libzip.so.4* /opt/Zeropanel-legacy-libs/
+# The legacy 7.4 image ships extension ini files whose ImageMagick and IMAP
+# shared-library dependencies are not present in the current base image.  A
+# failed extension load makes LiteSpeed return a blank 500 before the CRM can
+# run.  Keep the runtime stable; applications can still use GD and SMTP, and
+# the extensions can be added later when their matching legacy libraries are
+# bundled explicitly.
+RUN rm -f /usr/local/lsws/lsphp74/etc/php/7.4/mods-available/40-imagick.ini \\
+    /usr/local/lsws/lsphp74/etc/php/7.4/mods-available/imap.ini
+RUN apt-get update && apt-get install -y lsphp82 lsphp83 lsphp84 \\
+    lsphp82-mysql lsphp83-mysql lsphp84-mysql \\
+    lsphp82-sqlite3 lsphp83-sqlite3 lsphp84-sqlite3 \\
+    lsphp82-curl lsphp83-curl lsphp84-curl \\
+    lsphp82-opcache lsphp83-opcache lsphp84-opcache \\
+    lsphp82-redis lsphp83-redis lsphp84-redis \\
+    lsphp82-memcached lsphp83-memcached lsphp84-memcached \\
+    proftpd-basic openssh-server socat inotify-tools \\
+    && rm -rf /var/lib/apt/lists/*
+"""
+    (web_build_dir / "Dockerfile").write_text(dockerfile_content, encoding="utf-8")
+    
+    # OS User Separation: Change ownership and permissions (Linux production only)
+    import sys, subprocess
+    if sys.platform.startswith("linux"):
+        uid = 5000 + int(account["id"])
+        try:
+            subprocess.run(["chown", "-R", f"{uid}:{uid}", str(paths["base"])], check=True)
+            subprocess.run(["chmod", "755", str(paths["base"])], check=True)
+            subprocess.run(["chmod", "-R", "777", str(paths["stack"])], check=True)
+        except Exception as e:
+            print(f"Warning: failed to chown/chmod account base path: {e}")
+    for sensitive in ["ftp.passwd", "sftp_users.conf", "sshd_config"]:
+        try:
+            (paths["stack"] / sensitive).chmod(0o600)
+        except OSError:
+            pass
+    try:
+        (paths["stack"] / "proftpd.conf").chmod(0o644)
+    except OSError:
+        pass
+        
+    return paths
+
+
+def expand_domain_aliases(domains):
+    """Expand domain names to include their www variant for Caddy and vhosts.
+
+    If a domain does not already start with www. and is not an IP address or wildcard,
+    the www. variant is included so Caddy provisions TLS certificates and routes
+    both apex and www variants to the web service seamlessly.
+    """
+    expanded = []
+    seen = set()
+    for d in domains:
+        d = str(d).strip()
+        if not d:
+            continue
+        variants = [d]
+        if not d.startswith("www.") and not d.startswith("*."):
+            try:
+                ipaddress.ip_address(d)
+            except ValueError:
+                variants.append(f"www.{d}")
+        for item in variants:
+            if item not in seen:
+                seen.add(item)
+                expanded.append(item)
+    return expanded
+
+
+def render_apache_vhosts(account, websites):
+    blocks = []
+    for index, website in enumerate(websites):
+        root = container_path(account, website["document_root"])
+        logs_dir = container_path(account, str(Path(website["document_root"]).parent / "logs"))
+        analytics_enabled = int(website.get("analytics_enabled", 1) or 0) != 0
+        custom_log = (
+            f'  CustomLog "{logs_dir}/access.log" combined\n'
+            if analytics_enabled
+            else ""
+        )
+        base_dir = container_path(account, str(Path(website["document_root"]).parent))
+        aliases = [d for d in expand_domain_aliases([website["domain"]]) if d != website["domain"]]
+        alias_line = f"\n  ServerAlias {' '.join(aliases)}" if aliases else ""
+        blocks.append(
+            """
+<VirtualHost *:80>
+  ServerName {domain}{alias_line}
+  DocumentRoot "{root}"
+
+  <Directory "{root}">
+    Options Indexes FollowSymLinks
+    AllowOverride All
+    Require all granted
+    <IfModule mod_php7.c>
+      php_admin_value open_basedir "{base_dir}:/tmp:/var/tmp"
+    </IfModule>
+    <IfModule mod_php.c>
+      php_admin_value open_basedir "{base_dir}:/tmp:/var/tmp"
+    </IfModule>
+  </Directory>
+
+  ErrorLog "{logs_dir}/error.log"
+{custom_log}</VirtualHost>
+""".strip().format(domain=website["domain"], alias_line=alias_line, root=root, base_dir=base_dir, logs_dir=logs_dir, custom_log=custom_log)
+        )
+
+    if not blocks:
+        fallback_root = container_path(account, str(Path(account["base_path"]) / "domains" / "default" / "public_html"))
+        blocks.append(
+            """
+<VirtualHost *:80>
+  ServerName {username}.mango.test
+  DocumentRoot "{root}"
+  <Directory "{root}">
+    Options Indexes FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+</VirtualHost>
+""".strip().format(username=account["username"], root=fallback_root)
+        )
+    return "\n\n".join(blocks) + "\n"
+
+
+def container_path(account, host_path):
+    base = Path(account["base_path"]).resolve()
+    path = Path(host_path).resolve()
+    try:
+        rel = path.relative_to(base)
+    except ValueError:
+        return str(path)
+    return str(Path("/home") / account["username"] / rel)
+
+
+def php_worker_limit(account, website=None):
+    """Resolve the worker ceiling for one website in an account stack."""
+    try:
+        default = max(1, min(1000, int(account.get("php_workers", 3) or 3)))
+    except (AttributeError, TypeError, ValueError):
+        default = 3
+    mode = str(account.get("php_workers_mode", "max_per_site") or "max_per_site")
+    if mode == "unlimited":
+        return 1000
+    if mode == "per_site" and website is not None:
+        try:
+            configured = website.get("php_workers_limit")
+            if configured is not None:
+                return max(1, min(1000, int(configured)))
+        except (AttributeError, TypeError, ValueError):
+            pass
+    try:
+        configured = account.get("php_workers_max_per_site")
+        if configured is not None:
+            return max(1, min(1000, int(configured)))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return default
+
+
+def php_timeout_limit(account, websites=None):
+    """Resolve the PHP execution timeout ceiling in seconds for an account stack."""
+    candidates = []
+    if websites:
+        for w in websites:
+            if not isinstance(w, dict):
+                continue
+            if w.get("php_timeout"):
+                try:
+                    candidates.append(int(w["php_timeout"]))
+                except (TypeError, ValueError):
+                    pass
+            try:
+                ini = json.loads(w.get("php_ini") or "{}") if isinstance(w.get("php_ini"), str) else (w.get("php_ini") or {})
+                if ini.get("max_execution_time"):
+                    candidates.append(int(ini["max_execution_time"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+    try:
+        acc_timeout = int(account.get("php_timeout") or 0)
+        if acc_timeout > 0:
+            candidates.append(acc_timeout)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    if candidates:
+        return max(10, min(3600, max(candidates)))
+    return 120
+
+
+def render_openlitespeed_httpd_config(account, websites):
+    base_config = """
+serverName                       Zeropanel
+user                             nobody
+group                            nogroup
+priority                         0
+autoRestart                      1
+chrootPath                       /
+enableChroot                     0
+inMemBufSize                     60M
+swappingDir                      /tmp/lshttpd/swap
+autoFix503                       1
+gracefulRestartTimeout           300
+mime                             conf/mime.properties
+showVersionNumber                0
+adminEmails                      root@localhost
+indexFiles                       index.html, index.php
+disableWebAdmin                  0
+useIpInProxyHeader               2
+extIpInHeader                    1
+
+module mod_security {
+    modsecurity                 on
+    modsecurity_rules_file      /etc/Zeropanel/modsecurity-rules.conf
+    ls_enabled                  1
+}
+
+errorlog $SERVER_ROOT/logs/error.log {
+    logLevel             DEBUG
+    debugLevel           0
+    rollingSize          10M
+    enableStderrLog      1
+}
+
+accessLog $SERVER_ROOT/logs/access.log {
+    rollingSize          10M
+    keepDays             30
+    compressArchive      0
+    logReferer           1
+    logUserAgent         1
+}
+
+expires {
+    enableExpires           1
+    expiresByType           image/*=A604800,text/css=A604800,application/x-javascript=A604800,application/javascript=A604800,font/*=A604800,application/x-font-ttf=A604800
+}
+
+tuning{
+    maxConnections               1000000
+    maxSSLConnections            1000000
+    connTimeout                  300
+    maxKeepAliveReq              10000
+    smartKeepAlive               0
+    keepAliveTimeout             5
+    sndBufSize                   0
+    rcvBufSize                   0
+    gzipStaticCompressLevel      6
+    gzipMaxFileSize              10M
+    eventDispatcher              best
+    maxCachedFileSize            4096
+    totalInMemCacheSize          20M
+    maxMMapFileSize              256K
+    totalMMapCacheSize           40M
+    useSendfile                  1
+    fileETag                     28
+    SSLCryptoDevice              null
+    maxReqURLLen                 32768
+    maxReqHeaderSize             65536
+    maxReqBodySize               2047M
+    maxDynRespHeaderSize         32768
+    maxDynRespSize               2047M
+    enableGzipCompress           1
+    enableBrCompress             4
+    enableDynGzipCompress        1
+    gzipCompressLevel            6
+    brStaticCompressLevel        6
+    compressibleTypes            default
+    gzipAutoUpdateStatic         1
+    gzipMinFileSize              300
+    quicEnable                   1
+    quicShmDir                   /dev/shm
+}
+
+fileAccessControl{
+    followSymbolLink                            1
+    checkSymbolLink                             0
+    requiredPermissionMask                      000
+    restrictedPermissionMask                    000
+}
+
+perClientConnLimit{
+    staticReqPerSec                          0
+    dynReqPerSec                             0
+    outBandwidth                             0
+    inBandwidth                              0
+    softLimit                                0
+    hardLimit                                0
+    gracePeriod                              15
+    banPeriod                                300
+}
+
+CGIRLimit{
+    maxCGIInstances                         20
+    minUID                                  11
+    minGID                                  10
+    priority                                0
+    CPUSoftLimit                            10
+    CPUHardLimit                            50
+    memSoftLimit                            2047M
+    memHardLimit                            2047M
+    procSoftLimit                           400
+    procHardLimit                           450
+}
+
+accessControl{
+    allow                                   ALL
+    deny
+}
+
+module cache {
+    ls_enabled          1
+    checkPrivateCache   1
+    checkPublicCache    1
+    maxCacheObjSize     10000000
+    maxStaleAge         200
+    qsCache             1
+    reqCookieCache      1
+    respCookieCache     1
+    ignoreReqCacheCtrl  1
+    ignoreRespCacheCtrl 0
+    enableCache         0
+    expireInSeconds     3600
+    enablePrivateCache  0
+    privateExpireInSeconds 3600
+}
+"""
+    blocks = [base_config]
+    
+
+    for website in websites:
+        domain = website["domain"]
+        root = container_path(account, website["document_root"])
+        blocks.append(
+            """
+virtualHost {domain} {{
+  vhRoot                  {root}
+  configFile              $SERVER_ROOT/conf/vhosts/{domain}/vhconf.conf
+  allowSymbolLink         2
+  enableScript            1
+  restrained              1
+  setUIDMode              0
+}}
+""".strip().format(domain=domain, root=root)
+        )
+    
+    if websites:
+        maps = []
+        for i, w in enumerate(websites):
+            dom = w["domain"]
+            aliases = ", ".join(expand_domain_aliases([dom]))
+            if i == 0:
+                maps.append(f"map                     {dom} {aliases}, *")
+            else:
+                maps.append(f"map                     {dom} {aliases}")
+        maps_str = "\n  ".join(maps)
+        blocks.append(
+            f"""
+listener http {{
+  address                 *:80
+  secure                  0
+  {maps_str}
+}}
+""".strip()
+        )
+    return "\n\n".join(blocks) + "\n"
+
+
+def render_modsecurity_rules(websites):
+    """Render ModSecurity 3 rules and the per-website engine switches."""
+    lines = [
+        "# Zeropanel managed ModSecurity 3 rules",
+        "SecRuleEngine On",
+        "SecRequestBodyAccess On",
+    ]
+    for index, website in enumerate(websites):
+        domain = str(website["domain"]).replace(".", r"\.")
+        enabled = int(website.get("modsec_enabled", 1) if website.get("modsec_enabled") is not None else 1)
+        state = "On" if enabled else "Off"
+        lines.append(
+            f'SecRule SERVER_NAME "@rx ^(?:www\\.)?{domain}$" "id:{100000 + index},phase:1,pass,nolog,ctl:ruleEngine={state}"'
+        )
+    # The probe is harmless and gives the panel a deterministic enforcement
+    # check. The second rule blocks only high-confidence traversal/script URI
+    # patterns, avoiding broad application-specific false positives.
+    lines.extend([
+        'SecRule REQUEST_URI "@streq /__Zeropanel_modsec_probe__" "id:1099990,phase:1,deny,status:403,log"',
+        'SecRule REQUEST_URI "@rx (?i)(?:\\.\\./|<script[^>]*>)" "id:1099991,phase:1,deny,status:403,log"',
+        # Caddy is the trusted reverse proxy, so REMOTE_ADDR is normally the
+        # proxy itself. Key the built-in IP blocker by Cloudflare's client IP
+        # when present and fall back to the direct peer for local/direct use.
+        'SecRule REQUEST_HEADERS:CF-Connecting-IP "!^$" "id:1099994,phase:1,pass,nolog,initcol:ip=%{REQUEST_HEADERS:CF-Connecting-IP}"',
+        'SecRule REQUEST_HEADERS:CF-Connecting-IP "^$" "id:1099999,phase:1,pass,nolog,initcol:ip=%{REMOTE_ADDR}"',
+        'SecRule REQUEST_URI "@streq /xmlrpc.php" "id:1099995,phase:1,pass,nolog,chain"',
+        'SecRule REQUEST_METHOD "@streq POST" "setvar:ip.mp_xmlrpc_count=+1,expirevar:ip.mp_xmlrpc_count=60"',
+        'SecRule IP:MP_XMLRPC_COUNT "@gt 2" "id:1099996,phase:1,deny,status:429,log,msg:\'Zeropanel XML-RPC IP block\'"',
+        'SecRule REQUEST_URI "@streq /wp-login.php" "id:1099997,phase:1,pass,nolog,chain"',
+        'SecRule REQUEST_METHOD "@streq POST" "setvar:ip.mp_login_count=+1,expirevar:ip.mp_login_count=300"',
+        'SecRule IP:MP_LOGIN_COUNT "@gt 5" "id:1099998,phase:1,deny,status:429,log,msg:\'Zeropanel login IP block\'"',
+        # Limit abusive JNews polling before it reaches PHP or MySQL while
+        # allowing normal frontend bursts.
+        'SecRule QUERY_STRING "@rx (^|&)ajax-request=jnews(&|$)" "id:10999910,phase:1,pass,nolog,chain"',
+        'SecRule REQUEST_METHOD "@rx ^(?:GET|POST)$" "setvar:ip.mp_jnews_count=+1,expirevar:ip.mp_jnews_count=60"',
+        'SecRule IP:MP_JNEWS_COUNT "@gt 60" "id:10999911,phase:1,deny,status:429,log,msg:\'Zeropanel JNews AJAX rate limit\'"',
+        # The empty router request only boots WordPress and returns an empty
+        # 200 response. Reject the exact form reported by the old host while
+        # preserving requests that include a real JNews action.
+        'SecRule QUERY_STRING "@streq ajax-request=jnews" "id:10999912,phase:1,deny,status:404,nolog,msg:\'Zeropanel empty JNews request\'"',
+        # Live search performs wildcard scans over the large posts table.
+        # Cap abusive polling and oversized input before PHP/MySQL are reached.
+        'SecRule QUERY_STRING "@rx (^|&)action=jnews_ajax_live_search(&|$)" "id:10999913,phase:1,pass,nolog,chain"',
+        'SecRule REQUEST_METHOD "@streq GET" "setvar:ip.mp_live_search_count=+1,expirevar:ip.mp_live_search_count=60"',
+        'SecRule IP:MP_LIVE_SEARCH_COUNT "@gt 10" "id:10999914,phase:1,deny,status:429,log,msg:\'Zeropanel live search rate limit\'"',
+        'SecRule QUERY_STRING "@rx (^|&)action=jnews_ajax_live_search(&|$)" "id:10999915,phase:1,deny,status:413,log,chain,msg:\'Zeropanel live search input too long\'"',
+        'SecRule QUERY_STRING "@rx (^|&)s=[^&]{121}" "t:none"',
+        # Elementor sends large, authenticated JSON editor payloads containing
+        # HTML, CSS, SVG, and JavaScript. CRS interprets those values as attack
+        # signatures, so skip body inspection only for the editor endpoints.
+        'SecRule REQUEST_URI "@streq /wp-admin/admin-ajax.php" "id:1099992,phase:1,pass,nolog,chain,ctl:requestBodyAccess=Off"',
+        'SecRule REQUEST_HEADERS:Referer "@rx (?i)(?:[?&]action=elementor(?:&|$)|[?&]elementor-preview=)" "t:none"',
+        'SecRule REQUEST_URI "@rx ^/wp-json/elementor/v1/global-classes(?:\\?.*)?$" "id:1099993,phase:1,pass,nolog,ctl:ruleEngine=Off,ctl:ruleRemoveById=911100,ctl:ruleRemoveById=920620,ctl:ruleRemoveById=949110"',
+        # WordPress's authenticated media endpoint receives multipart file
+        # bodies.  CRS cannot reliably classify binary image/document parts,
+        # and false positives turn into the generic "upload error" response.
+        # Keep the request routed through PHP/authentication while disabling
+        # only ModSecurity body inspection for this exact endpoint.
+        'SecRule REQUEST_URI "@rx ^/wp-admin/async-upload\\.php$" "id:10999916,phase:1,pass,nolog,ctl:requestBodyAccess=Off"',
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def render_ols_vhconf(account, website):
+    domain = website["domain"]
+    username = account["username"]
+    php_workers = php_worker_limit(account, website)
+    php_timeout = php_timeout_limit(account, [website])
+    safe_domain = domain.replace(".", "_").replace("-", "_")
+
+    # Ensure PHP version is one of the supported versions.
+    supported_php = SUPPORTED_PHP_VERSIONS
+    php_raw = str(website.get("php_version", "8.2"))
+    php_ver = php_raw.replace(".", "")
+    if php_ver not in supported_php:
+        php_ver = "82"
+    legacy_env = "  env                     LD_LIBRARY_PATH=/opt/Zeropanel-legacy-libs\n" if php_ver in {"74", "80", "81"} else ""
+    doc_root = container_path(account, website["document_root"])
+    base_dir = container_path(account, str(Path(website["document_root"]).parent))
+    logs_dir = container_path(account, str(Path(website["document_root"]).parent / "logs"))
+    analytics_enabled = int(website.get("analytics_enabled", 1) or 0) != 0
+    # Cache controls may be supplied for an individual website. Existing
+    # accounts without a website-level override inherit their account default.
+    opcache_value = website.get("opcache_enabled")
+    if opcache_value is None:
+        opcache_value = account.get("opcache_enabled", 1) if hasattr(account, "get") else account["opcache_enabled"] if "opcache_enabled" in account.keys() else 1
+    litespeed_value = website.get("litespeed_cache_enabled")
+    if litespeed_value is None:
+        litespeed_value = account.get("litespeed_cache_enabled", 1) if hasattr(account, "get") else account["litespeed_cache_enabled"] if "litespeed_cache_enabled" in account.keys() else 1
+    opcache_enabled = 1 if int(opcache_value or 0) else 0
+    litespeed_cache_enabled = 1 if int(litespeed_value or 0) else 0
+    hotlink_lines = []
+    if int(website.get("hotlink_enabled", 0) or 0):
+        hotlink_lines.extend([
+            "  # BEGIN Zeropanel Hotlink",
+            r"  RewriteCond %{REQUEST_URI} \.(?:jpe?g|png|gif|webp|avif|svg|bmp|ico)$ [NC]",
+            r"  RewriteCond %{HTTP_REFERER} !^$ [NC]",
+        ])
+        allowed_domains = sorted({str(value).strip().lower() for value in (website.get("hotlink_domains") or []) if str(value).strip()})
+        for allowed_domain in allowed_domains:
+            escaped = re.escape(allowed_domain).replace(r"\.", r"\.")
+            hotlink_lines.append(
+                r"  RewriteCond %{{HTTP_REFERER}} !^https?://(?:[^/]+\.)?{}(?:/|$) [NC]".format(escaped)
+            )
+        hotlink_lines.extend([
+            "  RewriteRule ^ - [R=403,L]",
+            "  # END Zeropanel Hotlink",
+        ])
+    hotlink_block = "\n".join(hotlink_lines)
+    protected_realms = []
+    protected_contexts = []
+    for index, protected in enumerate(website.get("protected_directories") or []):
+        relative = str(protected.get("path") or "").strip().strip("/")
+        root_relative = str(Path(website["document_root"]).resolve().relative_to(Path(account["base_path"]).resolve())).strip("/")
+        if not relative or relative == root_relative or not relative.startswith(root_relative + "/"):
+            continue
+        uri = "/" + relative[len(root_relative):].strip("/") + "/"
+        realm_name = "mp_realm_{}_{}".format(safe_domain, index)
+        htpasswd = container_path(account, Path(account["base_path"]) / relative / ".htpasswd")
+        context_location = "$DOC_ROOT/" + str(Path(relative[len(root_relative):].strip("/"))) + "/"
+        protected_realms.append(
+            f"""realm {realm_name} {{
+  userDB {{
+    location              {htpasswd}
+    cacheTimeout          60
+    maxCacheSize          200
+  }}
+}}"""
+        )
+        protected_contexts.append(
+            f"""context {uri} {{
+  type                    static
+  location                {context_location}
+  allowBrowse             1
+  realm                   {realm_name}
+  authName                \"Protected Area\"
+  required                user {protected.get('username', '')}
+}}"""
+        )
+    protected_block = "\n\n".join(protected_realms + protected_contexts)
+    accesslog_block = (
+        f"""
+accesslog {logs_dir}/access.log {{
+  useServer               0
+  rollingSize             10M
+  keepDays                30
+}}
+""".rstrip()
+        if analytics_enabled
+        else ""
+    )
+    return f"""
+docRoot                   {doc_root}
+indexFiles                index.php, index.html
+enableGzip                1
+enableBr                  1
+
+general {{
+  enableContextAC         0
+}}
+
+errorlog {logs_dir}/error.log {{
+  useServer               0
+  logLevel                DEBUG
+  rollingSize             10M
+}}
+
+{accesslog_block}
+
+rewrite  {{
+  enable                  1
+  autoLoadHtaccess        1
+  RewriteRule             ^/_Zeropanel_errors/ - [L]
+  # Never serve WordPress configuration source, even if a PHP handler is
+  # temporarily unavailable or a malformed config contains a closing tag.
+  RewriteRule             ^/wp-config(?:\.php)?$ - [F,L,END,NC]
+  RewriteCond             %{{DOCUMENT_ROOT}}/.Zeropanel-suspended -f
+  RewriteRule             ^/(.*)$ /_Zeropanel_errors/suspended.html [L]
+  # Missing static assets must not fall through to a CMS front controller.
+  # WordPress normally rewrites every non-file to index.php; for assets that
+  # needlessly boots PHP (and can leave browsers waiting on a 404). Return a
+  # server-level 404 instead, while preserving dynamic application routes.
+  RewriteCond             %{{REQUEST_FILENAME}} !-f
+  RewriteCond             %{{REQUEST_FILENAME}} !-d
+  RewriteCond             %{{REQUEST_URI}} \.(?:css|js|mjs|map|png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|mp4|webm|pdf)(?:\?.*)?$ [NC]
+  RewriteRule             ^/.*\.(?:css|js|mjs|map|png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|mp4|webm|pdf)(?:\?.*)?$ - [R=404,L,END]
+  # Cache only public, read-only JNews fragments. Keep search, comments,
+  # auth, cart, nonce, and POST actions dynamic because they may be
+  # user-specific or mutate state. LiteSpeed still bypasses session cookies.
+  RewriteCond             %{{REQUEST_METHOD}} ^GET$ [NC]
+  RewriteCond             %{{QUERY_STRING}} ^ajax-request=jnews&action=jnews_(?:newsfeed_load|mega_category_[12])$ [NC]
+  RewriteRule             ^ - [E=cache-control:public,max-age=60]
+  RewriteCond             %{{REQUEST_METHOD}} ^GET$ [NC]
+  RewriteCond             %{{QUERY_STRING}} ^ajax-request=jnews&action=jnews_ajax_live_search&s=[^&]+$ [NC]
+  RewriteRule             ^ - [E=cache-control:public,max-age=30]
+  # Never cache authenticated/admin/API/upload requests.  This also prevents
+  # a stale page generated by a broken plugin/config from being replayed after
+  # the underlying PHP response has been repaired.
+  RewriteCond             %{{REQUEST_URI}} ^/(?:wp-admin(?:/|$)|wp-login\\.php(?:$|/)|wp-json(?:/|$)|xmlrpc\\.php(?:$|/)|wp-cron\\.php(?:$|/)) [NC]
+  RewriteRule             ^ - [E=cache-control:no-cache]
+{hotlink_block}
+}}
+
+errorpage 403 {{
+  url                     /_Zeropanel_errors/403.html
+}}
+errorpage 404 {{
+  url                     /_Zeropanel_errors/404.html
+}}
+errorpage 500 {{
+  url                     /_Zeropanel_errors/500.html
+}}
+errorpage 502 {{
+  url                     /_Zeropanel_errors/502.html
+}}
+errorpage 503 {{
+  url                     /_Zeropanel_errors/503.html
+}}
+
+context /_Zeropanel_errors/ {{
+  location                /usr/local/lsws/Zeropanel_errors/
+  allowBrowse             1
+}}
+
+{protected_block}
+
+context / {{
+  type                    NULL
+  location                {doc_root}/
+  allowBrowse             1
+  indexFiles              index.php, index.html
+}}
+
+extprocessor lsphp_{safe_domain} {{
+  type                    lsapi
+  address                 uds:///tmp/lshttpd/lsphp_{safe_domain}_requestguard.sock
+  maxConns                {php_workers}
+  env                     PHP_LSAPI_CHILDREN={php_workers}
+  env                     LSAPI_MAX_PROCESS_TIME={php_timeout}
+  env                     LSAPI_AVOID_FORK=200M
+{legacy_env}  initTimeout             {php_timeout}
+  retryTimeout            0
+  persistConn             1
+  # Each OLS worker has its own pool; release idle connections promptly so
+  # one worker cannot hold every child in the shared PHP process group.
+  pcKeepAliveTimeout      1
+  extMaxIdleTime          30
+  respBuffer              0
+  autoStart               1
+  path                    /usr/local/lsws/lsphp{php_ver}/bin/lsphp
+  backlog                 10000
+  instances               1
+  priority                0
+  memSoftLimit            0
+  memHardLimit            0
+  procSoftLimit           1400
+  procHardLimit           1500
+}}
+
+scripthandler  {{
+  add                     lsapi:lsphp_{safe_domain} php
+}}
+
+phpIniOverride  {{
+  php_admin_value open_basedir "{base_dir}:/tmp:/var/tmp"
+  php_admin_value memory_limit "512M"
+  php_admin_value upload_max_filesize "10M"
+  php_admin_value post_max_size "10M"
+  php_value max_execution_time "{php_timeout}"
+  php_value max_input_time "{php_timeout}"
+  # Keep OPcache enabled while checking changed PHP files on every request.
+  # This preserves bytecode performance without making plugin/theme edits
+  # invisible until a PHP worker restart.
+  php_admin_value opcache.validate_timestamps "1"
+  php_admin_value opcache.revalidate_freq "0"
+  php_admin_value mysqli.allow_persistent "0"
+  php_admin_value mysqli.max_persistent "0"
+}}
+
+module cache {{
+  enableCache             {litespeed_cache_enabled}
+  # Keep page-cache files in a domain-specific directory even though the web
+  # container and its volume are shared by this hosting account.
+  storagePath             /usr/local/lsws/cachedata/{safe_domain}
+}}
+"""
+
+
+def render_crontab(account, cron_jobs=None):
+    account = dict(account) if hasattr(account, "keys") else account
+    lines = [
+        "# Zeropanel cron file for {}".format(account["username"]),
+        "SHELL=/bin/sh",
+        "PATH=/usr/local/bin:/usr/bin:/bin",
+        "",
+    ]
+    for job in cron_jobs or []:
+        if job["status"] != "enabled":
+            continue
+        runner_cmd = (job["runner_command"] if "runner_command" in job.keys() and job["runner_command"] else None) or job["command"]
+        command = str(runner_cmd).replace("\n", " ").strip()
+        if not command:
+            continue
+        lines.append("{} {}".format(job["schedule"], command))
+    return "\n".join(lines) + "\n"
+
+
+def render_compose(account, plan, websites, runtime, mail_enabled=True):
+    website_domains = [w['domain'] for w in websites] if websites else []
+    http_doms = expand_domain_aliases(website_domains) if website_domains else [f"{account['username']}.mango.test"]
+    domains_http = ", ".join([f"http://{d}" for d in http_doms])
+
+    # Do not expose an HTTPS route (which makes Caddy immediately request an
+    # ACME certificate) until Zeropanel has verified that the domain resolves
+    # to this host.  New websites start with ``ssl_status=missing`` and are
+    # therefore HTTP-only; the SSL agent flips them to ``pending`` only after
+    # a successful DNS check and regenerates the stack.
+    public_doms = [
+        w['domain'] for w in websites
+        if not w['domain'].endswith(('.localhost', '.test', '.local', '.nip.io'))
+        and str(w.get('ssl_status') or 'missing').lower() in {'pending', 'active'}
+    ]
+    local_doms = [w['domain'] for w in websites if w['domain'].endswith(('.localhost', '.test', '.local', '.nip.io'))]
+    if not websites:
+        local_doms.append(f"{account['username']}.mango.test")
+
+    expanded_public = expand_domain_aliases(public_doms)
+    expanded_local = expand_domain_aliases(local_doms)
+
+    domains_public_https = ", ".join([f"https://{d}" for d in expanded_public]) if expanded_public else ""
+    domains_local_https = ", ".join([f"https://{d}" for d in expanded_local]) if expanded_local else ""
+    
+    username = account["username"]
+    uid = 5000 + int(account["id"])
+    base_path = account["base_path"]
+    memory = "{}m".format(plan["memory_mb"])
+    cpu_count = compose_cpu_limit(plan["cpu_limit"])
+    service_cpu_count = compose_cpu_limit(plan.get("service_cpu_limit", "0.25"))
+    cpu_group = "Zeropanel-{}.slice".format(username)
+    storage_mb = int(plan["storage_mb"])
+    inode_limit = int(plan["inode_limit"])
+    backup_retention_days = int(plan["backup_retention_days"])
+    default_domain = websites[0]["domain"] if websites else "{}.mango.test".format(username)
+    project = "mp-{}".format(username)
+    reverse_proxy_value = account.get("reverse_proxy_cache_enabled", 0) if hasattr(account, "get") else account["reverse_proxy_cache_enabled"] if "reverse_proxy_cache_enabled" in account.keys() else 0
+    reverse_proxy_cache_enabled = 1 if int(reverse_proxy_value or 0) else 0
+    labels_list = [
+        f'Zeropanel.plan: "{plan["name"]}"',
+        f'Zeropanel.storage_mb: "{storage_mb}"',
+        f'Zeropanel.inode_limit: "{inode_limit}"',
+        f'Zeropanel.backup_retention_days: "{backup_retention_days}"',
+        f'caddy_0: "{domains_http}"',
+        'caddy_0.reverse_proxy: "{upstreams 80}"',
+        'caddy_0.reverse_proxy.header_up: "X-Forwarded-Proto https"',
+        'caddy_0.reverse_proxy.header_up_0: "X-Forwarded-SSL on"',
+        # Reject XML-RPC at the shared edge before a request enters any
+        # account container. The same rule is also present in ModSecurity as
+        # a defense-in-depth control for direct/origin traffic.
+        'caddy_0.import: "Zeropanel-xmlrpc-block"',
+    ]
+    if domains_public_https:
+        labels_list.extend([
+            f'caddy_1: "{domains_public_https}"',
+            'caddy_1.reverse_proxy: "{upstreams 80}"',
+            'caddy_1.reverse_proxy.header_up: "X-Forwarded-Proto https"',
+            'caddy_1.reverse_proxy.header_up_0: "X-Forwarded-SSL on"',
+            'caddy_1.import: "Zeropanel-xmlrpc-block"',
+        ])
+    if domains_local_https:
+        labels_list.extend([
+            f'caddy_2: "{domains_local_https}"',
+            'caddy_2.tls: "internal"',
+            'caddy_2.reverse_proxy: "{upstreams 80}"',
+            'caddy_2.reverse_proxy.header_up: "X-Forwarded-Proto https"',
+            'caddy_2.reverse_proxy.header_up_0: "X-Forwarded-SSL on"',
+            'caddy_2.import: "Zeropanel-xmlrpc-block"',
+        ])
+    labels_str = "\n      ".join(labels_list)
+
+    mail_restart = "unless-stopped" if mail_enabled else "no"
+    composed = """name: {project}
+services:
+  web:
+    build:
+      context: ./web
+    image: mp-{username}-web:latest
+    container_name: mp-{username}-web
+    restart: unless-stopped
+    mem_limit: {memory}
+    cpus: "{cpu_count}"
+    cgroup_parent: {cpu_group}
+    pids_limit: 2048
+    healthcheck:
+      test: ["CMD-SHELL", "/usr/local/lsws/bin/lswsctrl status 2>/dev/null | /usr/bin/grep -q 'litespeed is running with PID'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    entrypoint: ["/bin/sh", "-c", 'umask 0002; groupadd -g {uid} {username} 2>/dev/null || true; usermod -aG {uid} nobody 2>/dev/null || true; exec /entrypoint.sh "$$@"', "--"]
+    command: ["/bin/sh", "/usr/local/bin/Zeropanel-services.sh"]
+    ports:
+      - "0.0.0.0:{ftp_port}:21"
+      - "0.0.0.0:{ftp_passive_min}-{ftp_passive_max}:{ftp_passive_min}-{ftp_passive_max}"
+      - "0.0.0.0:{sftp_port}:22"
+    labels:
+      {labels_str}
+    volumes:
+      - {base_path}:/home/{username}
+      - {base_path}/.runtime/stack/cron:/var/spool/cron/crontabs/root
+      - {base_path}/.runtime/stack/proftpd.conf:/etc/proftpd/Zeropanel.conf:ro
+      - {base_path}/.runtime/stack/ftp.passwd:/etc/proftpd/ftp.passwd:ro
+      - {base_path}/.runtime/stack/sftp_users.conf:/etc/sftp/users.conf:ro
+      - {base_path}/.runtime/stack/services-entrypoint.sh:/usr/local/bin/Zeropanel-services.sh:ro
+      - {base_path}/.runtime/stack/ftp.enabled:/etc/Zeropanel/ftp.enabled:ro
+      - {base_path}/.runtime/stack/ssh.enabled:/etc/Zeropanel/ssh.enabled:ro
+      - {base_path}/.runtime/stack/sshd_config:/etc/ssh/sshd_config:ro
+      - {base_path}/.runtime/stack/motd:/etc/motd:ro
+      - {base_path}/.runtime/stack/openlitespeed-httpd.conf:/usr/local/lsws/conf/httpd_config.conf:ro
+      - {base_path}/.runtime/stack/modsecurity-rules.conf:/etc/Zeropanel/modsecurity-rules.conf:ro
+      - {base_path}/.runtime/stack/vhosts:/usr/local/lsws/conf/vhosts:ro
+      - {base_path}/.runtime/stack/errors:/usr/local/lsws/Zeropanel_errors:ro
+    networks:
+      - account
+      - Zeropanel-edge
+
+  redis:
+    image: redis:7-alpine
+    container_name: mp-{username}-redis
+    restart: unless-stopped
+    mem_limit: 2048m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    # One Redis service and its /data volume are retained per account. The
+    # extra logical databases isolate individual sites within that service.
+    command: ["redis-server", "--databases", "256", "--maxmemory", "1800mb", "--maxmemory-policy", "allkeys-lru", "--save", "900", "1", "--appendonly", "no"]
+    volumes:
+      - {base_path}/.runtime/stack/redis:/data
+    networks:
+      - account
+
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: mp-{username}-filebrowser
+    user: "{uid}:{uid}"
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    entrypoint: ["/bin/sh", "-c", 'if [ ! -f /config/settings.json ]; then cp -a /defaults/settings.json /config/settings.json; fi; umask 0000; if [ ! -f /database/filebrowser.db ]; then /bin/filebrowser config init -d /database/filebrowser.db --auth.method noauth >/dev/null 2>&1; fi; /bin/filebrowser config set --auth.method noauth --perm.rename=true -d /database/filebrowser.db >/dev/null 2>&1 || true; if ! /bin/filebrowser users ls -d /database/filebrowser.db 2>/dev/null | grep -q "admin"; then /bin/filebrowser users add admin "$(cat /proc/sys/kernel/random/uuid)" --scope / --perm.admin -d /database/filebrowser.db >/dev/null 2>&1 || true; fi; exec /bin/filebrowser "$$@"', "--"]
+    command: ["--config", "/config/settings.json", "--baseURL", "/files", "--root", "/srv", "--address", "0.0.0.0", "--port", "80", "--database", "/database/filebrowser.db"]
+    environment:
+      FB_BRANDING_DISABLE_USED_PERCENTAGE: "false"
+      FB_BRANDING_FILES: "/branding"
+    labels:
+      caddy: "{filebrowser_domain}"
+      caddy.handle_path: "/auth/*"
+      caddy.handle_path.0_rewrite: "* /api/public/tool-launch/filebrowser/auth{{uri}}"
+      caddy.handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route: "/files*"
+      caddy.route.0_handle_path: "/files/api/login"
+      caddy.route.0_handle_path.0_rewrite: "* /api/public/filebrowser/proxy/api/login"
+      caddy.route.0_handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route.1_forward_auth: "host.docker.internal:8000"
+      caddy.route.1_forward_auth.uri: "/api/public/auth-verify"
+      caddy.route.2_handle_path: "/files/custom.js"
+      caddy.route.2_handle_path.0_rewrite: "* /api/public/filebrowser/custom.js"
+      caddy.route.2_handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route.3_handle_path: "/files/api/extract"
+      caddy.route.3_handle_path.0_rewrite: "* /api/public/filebrowser/extract"
+      caddy.route.3_handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route.4_handle_path: "/files/api/usage*"
+      caddy.route.4_handle_path.0_rewrite: "* /api/public/filebrowser/usage"
+      caddy.route.4_handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route.5_handle: "*"
+      caddy.route.5_handle.0_rewrite: "* /api/public/filebrowser/proxy{{uri}}"
+      caddy.route.5_handle.1_reverse_proxy: "host.docker.internal:8000"
+    volumes:
+      - {base_path}/domains:/srv/domains
+      - {base_path}/databases:/srv/databases
+      - {base_path}/mail:/srv/mail
+      - {base_path}/backups:/srv/backups
+      - {base_path}/git:/srv/git
+      - {base_path}/ssl:/srv/ssl
+      - {base_path}/.runtime/stack/filebrowser:/database
+      - {base_path}/.runtime/stack/filebrowser-config:/config
+      - {base_path}/.runtime/stack/filebrowser-branding:/branding
+    networks:
+      - account
+      - Zeropanel-edge
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: mp-{username}-phpmyadmin
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    labels:
+      caddy: "{phpmyadmin_domain}"
+      caddy.handle_path: "/auth/*"
+      caddy.handle_path.0_rewrite: "* /api/public/tool-launch/phpmyadmin/auth{{uri}}"
+      caddy.handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route: "/db*"
+      caddy.route.0_forward_auth: "host.docker.internal:8000"
+      caddy.route.0_forward_auth.uri: "/api/public/auth-verify"
+      caddy.route.1_uri: "strip_prefix /db"
+      caddy.route.2_reverse_proxy: "{{upstreams 80}}"
+    environment:
+      PMA_HOST: db
+      PMA_USER: {db_user}
+      PMA_PASSWORD: {db_password}
+      PMA_ABSOLUTE_URI: "/db/"
+      UPLOAD_LIMIT: 1G
+    networks:
+      - account
+      - Zeropanel-edge
+
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
+    container_name: mp-{username}-mailserver
+    hostname: {mail_host}
+    domainname: {public_host}
+    restart: {mail_restart}
+    mem_limit: 768m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "0.0.0.0:{smtp_inbound_port}:25"
+      - "0.0.0.0:{smtp_port}:587"
+      - "0.0.0.0:{smtp_tls_port}:465"
+      - "0.0.0.0:{imap_port}:143"
+      - "0.0.0.0:{imap_tls_port}:993"
+      - "0.0.0.0:{pop_port}:110"
+      - "0.0.0.0:{pop_tls_port}:995"
+      - "0.0.0.0:{sieve_port}:4190"
+    environment:
+      ACCOUNT_PROVISIONER: FILE
+      ENABLE_IMAP: "1"
+      ENABLE_POP3: "1"
+      ENABLE_MANAGESIEVE: "1"
+      ENABLE_QUOTAS: "1"
+      ENABLE_FAIL2BAN: "1"
+      FAIL2BAN_BLOCKTYPE: drop
+      ENABLE_CLAMAV: "0"
+      ENABLE_SPAMASSASSIN: "0"
+      ENABLE_POLICYD_SPF: "0"
+      ENABLE_OPENDKIM: "1"
+      ENABLE_OPENDMARC: "0"
+      ENABLE_SRS: "0"
+      ENABLE_UPDATE_CHECK: "0"
+      OVERRIDE_HOSTNAME: {mail_host}
+      POSTMASTER_ADDRESS: postmaster@{default_domain}
+      PERMIT_DOCKER: none
+      SSL_TYPE: self-signed
+      DMS_DEBUG: "0"
+    volumes:
+      - {base_path}/mail:/var/mail
+      - {base_path}/.runtime/stack/mailserver/config:/tmp/docker-mailserver
+      - mailserver-state:/var/mail-state
+      - {base_path}/.runtime/stack/mailserver/logs:/var/log/mail
+    networks:
+      - account
+      - Zeropanel-edge
+
+  mailproxy:
+    image: {SNAPPYMAIL_IMAGE}
+    container_name: mp-{username}-mailproxy
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    labels:
+      caddy: "{mail_proxy_domain}"
+      caddy.route.0_handle_path: "/assets*"
+      caddy.route.0_handle_path.0_rewrite: "* /assets{{uri}}"
+      caddy.route.0_handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route.1_handle_path: "/webmail*"
+      caddy.route.1_handle_path.0_rewrite: "* /webmail{{uri}}"
+      caddy.route.1_handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route.2_handle_path: "/api/public/webmail*"
+      caddy.route.2_handle_path.0_rewrite: "* /api/public/webmail{{uri}}"
+      caddy.route.2_handle_path.1_reverse_proxy: "host.docker.internal:8000"
+      caddy.route.3_reverse_proxy: "{{upstreams 8888}}"
+    environment:
+      DEBUG: "false"
+    volumes:
+      - {base_path}/.runtime/stack/snappymail:/var/lib/snappymail
+      - {base_path}/.runtime/stack/snappymail/themes/Zeropanel:/snappymail/snappymail/v/{SNAPPYMAIL_APP_VERSION}/themes/Zeropanel:ro
+    networks:
+      - account
+      - Zeropanel-edge
+
+  db:
+    image: mariadb:10.11
+    container_name: mp-{username}-db
+    restart: unless-stopped
+    mem_limit: 3072m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    labels:
+      Zeropanel.plan: "{plan_name}"
+      Zeropanel.storage_mb: "{storage_mb}"
+      Zeropanel.inode_limit: "{inode_limit}"
+    ports:
+      - "127.0.0.1:{db_port}:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: {db_root_password}
+      MARIADB_ROOT_HOST: "%"
+      MARIADB_DATABASE: {db_name}
+      MARIADB_USER: {db_user}
+      MARIADB_PASSWORD: {db_password}
+    volumes:
+      - db-data:/var/lib/mysql
+      - {base_path}/.runtime/stack/mysql.cnf:/etc/mysql/conf.d/mysql.cnf:ro
+    networks:
+      - account
+
+  pg:
+    image: postgres:16
+    container_name: mp-{username}-pg
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    ports:
+      - "127.0.0.1:{pg_port}:5432"
+    environment:
+      POSTGRES_PASSWORD: {db_root_password}
+      POSTGRES_USER: {db_user}
+      POSTGRES_DB: {db_name}
+    volumes:
+      - {base_path}/pg_databases:/var/lib/postgresql/data
+    networks:
+      - account
+
+  adminer:
+    image: adminer:latest
+    container_name: mp-{username}-adminer
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "{service_cpu_count}"
+    cgroup_parent: {cpu_group}
+    labels:
+      caddy: "{adminer_domain}"
+      caddy.reverse_proxy: "{{upstreams 8080}}"
+    environment:
+      ADMINER_DEFAULT_SERVER: pg
+    networks:
+      - account
+      - Zeropanel-edge
+
+networks:
+  account:
+    name: mp-{username}-net
+  Zeropanel-edge:
+    external: true
+
+volumes:
+  db-data:
+    name: mp-{username}-db-data
+  mailserver-state:
+    name: mp-{username}-mailserver-state
+"""
+    import re
+    pub_host = runtime.get("public_host") or CONFIG.public_host or "127.0.0.1"
+    if pub_host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"} and CONFIG.public_host not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+        pub_host = CONFIG.public_host
+    public_tool_host = pub_host if pub_host not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"} else None
+    filebrowser_domain = f"files-{username}.{public_tool_host}, http://files-{username}.localhost" if public_tool_host else f"http://files-{username}.localhost"
+    phpmyadmin_domain = f"pma-{username}.{public_tool_host}, http://pma-{username}.localhost" if public_tool_host else f"http://pma-{username}.localhost"
+    adminer_domain = f"adminer-{username}.{public_tool_host}, http://adminer-{username}.localhost" if public_tool_host else f"http://adminer-{username}.localhost"
+    # The dotted per-account hostname is the only public webmail entry point.
+    # Do not publish the historical mail-<account> alias, which made it easy
+    # to bypass the canonical account-scoped hostname.
+    mail_domains = [runtime.get("mail_host")] if public_tool_host and runtime.get("mail_host") else []
+    runtime_mail_host = runtime.get("mail_host")
+    if runtime_mail_host and runtime_mail_host not in mail_domains:
+        # Keep the public account mail hostname as a normal Caddy site so it
+        # receives automatic HTTPS. An explicit http:// scheme disables TLS.
+        mail_domains.append(runtime_mail_host)
+    composed = composed.format(
+        project=project,
+        mail_restart=mail_restart,
+        uid=uid,
+        labels_str=labels_str,
+        plan_name=plan["name"],
+        username=username,
+        memory=memory,
+        cpu_count=cpu_count,
+        service_cpu_count=service_cpu_count,
+        cpu_group=cpu_group,
+        storage_mb=storage_mb,
+        inode_limit=inode_limit,
+        backup_retention_days=backup_retention_days,
+        base_path=base_path,
+        default_domain=default_domain,
+        public_host=runtime["public_host"],
+        web_port=runtime["web_port"],
+        filebrowser_port=runtime["filebrowser_port"],
+        phpmyadmin_port=runtime["phpmyadmin_port"],
+        db_port=runtime["db_port"],
+        pg_port=runtime["pg_port"],
+        adminer_port=runtime["adminer_port"],
+        sftp_port=runtime["sftp_port"],
+        ftp_port=runtime["ftp_port"],
+        ftp_passive_min=runtime["ftp_passive_min"],
+        ftp_passive_max=runtime["ftp_passive_max"],
+        smtp_port=runtime["smtp_port"],
+        smtp_tls_port=runtime["smtp_tls_port"],
+        smtp_inbound_port=runtime["smtp_inbound_port"],
+        imap_port=runtime["imap_port"],
+        imap_tls_port=runtime["imap_tls_port"],
+        pop_port=runtime["pop_port"],
+        pop_tls_port=runtime["pop_tls_port"],
+        sieve_port=runtime["sieve_port"],
+        mail_host=runtime["mail_host"],
+        mail_edge_host=runtime.get("mail_edge_host", runtime["mail_host"]),
+        mail_edge_url=runtime.get("mail_edge_url", f"http://{runtime.get('mail_edge_host', runtime['mail_host'])}"),
+        mail_edge_webmail_url=runtime.get("mail_edge_webmail_url", f"http://{runtime.get('mail_edge_host', runtime['mail_host'])}/webmail"),
+        mail_edge_login_url=runtime.get("mail_edge_login_url", f"http://{runtime.get('mail_edge_host', runtime['mail_host'])}/webmail/login"),
+        mail_proxy_domain=", ".join(mail_domains) if mail_domains else f"http://mail-{username}.localhost",
+        db_name=runtime["db_name"],
+        db_user=runtime["db_user"],
+        db_password=runtime["db_password"],
+        db_root_password=runtime["db_root_password"],
+        sftp_password=runtime["sftp_password"],
+        filebrowser_password=runtime.get("filebrowser_password", "admin"),
+        filebrowser_secret_path=runtime.get("filebrowser_secret_path", "files"),
+        phpmyadmin_secret_path=runtime.get("phpmyadmin_secret_path", "db"),
+        redis_host=runtime.get("redis_host", "redis"),
+        redis_port=runtime.get("redis_port", 6379),
+        object_cache_backend=runtime.get("object_cache_backend", "redis"),
+        opcode_cache_backend=runtime.get("opcode_cache_backend", "opcache"),
+        phpmyadmin_raw_domain=runtime["phpmyadmin_url"].split("://")[1],
+        filebrowser_domain=filebrowser_domain,
+        phpmyadmin_domain=phpmyadmin_domain,
+        adminer_domain=adminer_domain,
+        SNAPPYMAIL_APP_VERSION=SNAPPYMAIL_APP_VERSION,
+        SNAPPYMAIL_IMAGE=SNAPPYMAIL_IMAGE,
+    )
+    # caddy-docker-proxy requires {{upstreams N}} with literal double-braces.
+    # Python .format() collapses {{ to { so we restore them after formatting.
+    composed = re.sub(r'\{upstreams (\d+)\}', r'{{upstreams \1}}', composed)
+    return composed
+
+
+def compose_cpu_limit(value):
+    raw = str(value or "1").strip().lower().replace("cores", "").replace("core", "").strip()
+    try:
+        cpu = float(raw)
+    except ValueError:
+        cpu = 1.0
+    if cpu <= 0:
+        cpu = 1.0
+    return "{:g}".format(cpu)
+
+
+def stack_summary(paths):
+    return {
+        "compose_path": str(paths["compose"]),
+        "account_json": str(paths["account_json"]),
+        "services": STACK_SERVICES,
+    }

@@ -1,0 +1,472 @@
+import json
+import base64
+import gc
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from unittest import mock
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+from Zeropanel import app as app_module
+from Zeropanel.agent import Agent
+from Zeropanel.config import Config
+from Zeropanel.db import connect, get_system_setting, init_db, seed_dev_data
+from Zeropanel.providers import DNS_PROVIDER_CLOUDFLARE
+from Zeropanel.security import encrypt_secret, hash_password
+from Zeropanel.store import adjust_wallet, approve_order, place_order, save_category, save_plan
+from tests.test_providers import FakeCloudflareHandler, FakeHTTPServer
+
+
+PASSWORD = "ChangeMe-DevOnly-123!"
+
+
+class ClientApiServer:
+    def __init__(self, config, panel="client"):
+        self.previous_config = app_module.CONFIG
+        app_module.CONFIG = config
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), app_module.MangoHandler)
+        self.httpd.panel = panel
+        self.base_url = "http://127.0.0.1:{}".format(self.httpd.server_address[1])
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+        app_module.CONFIG = self.previous_config
+
+    def request(self, method, path, body=None, token=None):
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if token:
+            headers["Authorization"] = "Bearer {}".format(token)
+        req = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raise AssertionError("{} {} failed: {} {}".format(method, path, exc.code, exc.read().decode("utf-8"))) from exc
+
+    def request_with_headers(self, method, path, body=None, token=None, host=None):
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if token:
+            headers["Authorization"] = "Bearer {}".format(token)
+        if host:
+            headers["Host"] = host
+        req = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                raw = response.read().decode("utf-8")
+                payload = json.loads(raw) if raw else {}
+                return payload, response.headers
+        except urllib.error.HTTPError as exc:
+            raise AssertionError("{} {} failed: {} {}".format(method, path, exc.code, exc.read().decode("utf-8"))) from exc
+
+    def request_raw(self, method, path, body=None, token=None, host=None, extra_headers=None):
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if token:
+            headers["Authorization"] = "Bearer {}".format(token)
+        if host:
+            headers["Host"] = host
+        if extra_headers:
+            headers.update(extra_headers)
+        req = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(urllib.request.HTTPHandler, NoRedirectHandler)
+        try:
+            with opener.open(req, timeout=10) as response:
+                raw = response.read().decode("utf-8")
+                return response.status, dict(response.headers), json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8")
+            return exc.code, dict(exc.headers), json.loads(raw) if raw else {}
+
+    def request_bytes(self, method, path, body=None, token=None, host=None, extra_headers=None):
+        data = None
+        headers = {"Accept": "application/octet-stream"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if token:
+            headers["Authorization"] = "Bearer {}".format(token)
+        if host:
+            headers["Host"] = host
+        if extra_headers:
+            headers.update(extra_headers)
+        req = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(urllib.request.HTTPHandler, NoRedirectHandler)
+        try:
+            with opener.open(req, timeout=10) as response:
+                return response.status, dict(response.headers), response.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), exc.read()
+
+    def request_error(self, method, path, body=None, token=None):
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if token:
+            headers["Authorization"] = "Bearer {}".format(token)
+        req = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                raise AssertionError("{} {} unexpectedly succeeded: {}".format(method, path, response.read().decode("utf-8")))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8")
+            return exc.code, json.loads(raw) if raw else {}
+
+    def login(self):
+        challenge = self.request("POST", "/api/client/auth/login", {"email": "owner@example.mango.test", "password": PASSWORD})
+        payload = self.request("POST", "/api/client/auth/totp/verify", {"challenge_token": challenge["challenge_token"], "code": "000000"})
+        return payload["access_token"]
+
+
+class Phase3RouteTests(unittest.TestCase):
+    def make_config(self, root):
+        config = Config()
+        config.db_path = root / "Zeropanel.sqlite3"
+        config.data_dir = root
+        config.account_root = root / "accounts"
+        config.agent_mode = "simulate"
+        config.agent_inline = True
+        config.dev_auth_test_mode = True
+        return config
+
+    def test_development_admin_can_create_store_category_and_product(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            config.env = "development"
+            config.agent_mode = "simulate"
+            init_db(config.db_path)
+            conn = connect(config.db_path)
+            try:
+                conn.execute(
+                    "INSERT INTO admins(email, password_hash, full_name, role, status, totp_secret) VALUES (?, ?, ?, ?, ?, '')",
+                    ("admin@example.test", hash_password(PASSWORD), "Test Admin", "super_admin", "active"),
+                )
+                hosting_plan_id = conn.execute(
+                    """INSERT INTO plans(name, cpu_limit, memory_mb, storage_mb, inode_limit, max_websites,
+                       max_databases, max_mailboxes, max_cron_jobs, daily_email_limit, backup_retention_days)
+                       VALUES ('Hosting Basic', '1', 1024, 10240, 10000, 1, 3, 2, 0, 0, 7)"""
+                ).lastrowid
+                conn.commit()
+            finally:
+                conn.close()
+
+            with ClientApiServer(config, panel="admin") as server:
+                login = server.request("POST", "/api/admin/auth/login", {"email": "admin@example.test", "password": PASSWORD})
+                token = login["access_token"]
+                category = server.request(
+                    "POST",
+                    "/api/admin/store/categories",
+                    {"name": "Development Hosting", "description": "Test category", "sort_order": 0},
+                    token,
+                )["category"]
+                product = server.request(
+                    "POST",
+                    "/api/admin/store/plans",
+                    {
+                        "category_id": category["id"],
+                        "name": "Hosting Basic Product",
+                        "product_type": "hosting",
+                        "hosting_plan_id": hosting_plan_id,
+                        "price_cents": 1000,
+                        "billing_interval": "month",
+                    },
+                    token,
+                )["plan"]
+            gc.collect()
+
+            self.assertEqual(category["name"], "Development Hosting")
+            self.assertEqual(product["category_id"], category["id"])
+            self.assertEqual(product["name"], "Hosting Basic Product")
+
+    def test_client_home_and_store_routes_serve_existing_portal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(Path(tmp))
+            with ClientApiServer(config) as server:
+                for path in ("/home", "/store"):
+                    status, headers, body = server.request_bytes("GET", path)
+                    self.assertEqual(status, 200)
+                    self.assertIn("text/html", headers.get("Content-Type", ""))
+                    self.assertIn(b'id="client-app"', body)
+
+    def test_minecraft_metrics_and_file_operations_use_owned_server_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            config.env = "development"
+            init_db(config.db_path)
+            seed_dev_data(config.db_path, config.account_root)
+            conn = connect(config.db_path)
+            try:
+                user = conn.execute("SELECT id FROM users WHERE email = 'owner@example.mango.test'").fetchone()
+                admin = conn.execute("SELECT id FROM admins ORDER BY id LIMIT 1").fetchone()
+                category = save_category(conn, {"name": "Minecraft Services"})
+                plan = save_plan(conn, {
+                    "category_id": category["id"],
+                    "name": "Minecraft Test",
+                    "product_type": "minecraft",
+                    "price_cents": 500,
+                    "limits": {"ram_mb": 2048, "disk_mb": 1024, "max_servers": 1},
+                    "server_types": ["PAPER"],
+                })
+                order = place_order(conn, user["id"], plan["id"])
+                adjust_wallet(conn, user["id"], 500, admin["id"], "Test credit")
+                approved = approve_order(conn, order["id"], admin["id"], config.account_root)
+                server_id = approved["service_id"]
+                conn.commit()
+            finally:
+                conn.close()
+
+            with ClientApiServer(config) as server:
+                token = server.login()
+                metrics = server.request("GET", f"/api/client/minecraft-servers/{server_id}/metrics", token=token)["metrics"]
+                self.assertFalse(metrics["running"])
+                self.assertEqual(metrics["ram_limit_bytes"], 2048 * 1024 * 1024)
+                server.request("POST", f"/api/client/minecraft-servers/{server_id}/files/create", {"path": "plugins", "kind": "directory"}, token)
+                server.request("POST", f"/api/client/minecraft-servers/{server_id}/files/create", {"path": "plugins/config.yml", "kind": "file"}, token)
+                server.request("PUT", f"/api/client/minecraft-servers/{server_id}/files/content", {"path": "plugins/config.yml", "content": "enabled: true\n"}, token)
+                listing = server.request("GET", f"/api/client/minecraft-servers/{server_id}/files?path=plugins", token=token)
+                self.assertEqual(listing["files"][0]["name"], "config.yml")
+                server.request("PATCH", f"/api/client/minecraft-servers/{server_id}/files/item", {"path": "plugins/config.yml", "name": "settings.yml"}, token)
+                server.request("DELETE", f"/api/client/minecraft-servers/{server_id}/files/item", {"path": "plugins/settings.yml"}, token)
+                binary_content = b"\x00minecraft-server-jar\xff"
+                server.request("POST", f"/api/client/minecraft-servers/{server_id}/files/upload", {
+                    "path": "plugins",
+                    "files": [{"name": "binary.dat", "content_base64": base64.b64encode(binary_content).decode("ascii")}],
+                }, token)
+                download_status, download_headers, downloaded = server.request_bytes("GET", f"/api/client/minecraft-servers/{server_id}/files/download?path=plugins/binary.dat", token=token)
+                self.assertEqual(download_status, 200)
+                self.assertIn("attachment", download_headers.get("Content-Disposition", ""))
+                self.assertEqual(downloaded, binary_content)
+                server.request("DELETE", f"/api/client/minecraft-servers/{server_id}/files/item", {"path": "plugins/binary.dat"}, token)
+                activities = server.request("GET", "/api/client/activity", token=token)["activity"]
+
+            gc.collect()
+            self.assertTrue(any("minecraft_server_file_created" in item["action"] for item in activities))
+            self.assertTrue(any("minecraft_server_file_renamed" in item["action"] for item in activities))
+            self.assertTrue(any("minecraft_server_file_deleted" in item["action"] for item in activities))
+
+    def test_first_admin_setup_persists_panel_domain_and_brands_totp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            config.env = "production"
+            config.agent_mode = "docker"
+            init_db(config.db_path)
+
+            with mock.patch.object(app_module, "get_host_public_ip", return_value="203.0.113.10"), mock.patch.object(app_module, "start_edge_proxy") as start_edge:
+                with ClientApiServer(config, panel="admin") as server:
+                    bootstrap = server.request("GET", "/api/public/bootstrap")
+                    self.assertTrue(bootstrap["admin_setup_required"])
+                    self.assertEqual(bootstrap["server_ip"], "203.0.113.10")
+                    setup = server.request(
+                        "POST",
+                        "/api/public/admin-setup",
+                        {
+                            "public_host": "leaf.servermango.com",
+                            "full_name": "Panel Admin",
+                            "email": "admin@example.com",
+                            "password": PASSWORD,
+                        },
+                    )
+
+            start_edge.assert_called_once_with("leaf.servermango.com")
+            self.assertIn("leaf.servermango.com%20-%20Zeropanel%20Admin", setup["totp_uri"])
+            with connect(config.db_path) as conn:
+                self.assertEqual(get_system_setting(conn, "public_host"), "leaf.servermango.com")
+
+    def test_public_hostname_save_refreshes_the_edge_proxy_for_tls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            config.env = "production"
+            config.agent_mode = "docker"
+            init_db(config.db_path)
+            with connect(config.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO admins(id, email, password_hash, full_name, role, status) VALUES (1, 'admin@mango.test', ?, 'Panel Admin', 'super_admin', 'active')",
+                    (hash_password(PASSWORD),),
+                )
+
+            with mock.patch.object(app_module, "start_edge_proxy") as start_edge, mock.patch.object(app_module, "get_host_public_ip", return_value="203.0.113.10"):
+                with ClientApiServer(config, panel="admin") as server:
+                    login = server.request("POST", "/api/admin/auth/login", {"email": "admin@mango.test", "password": PASSWORD})
+                    token = login["access_token"]
+                    result = server.request(
+                        "PATCH",
+                        "/api/admin/configuration",
+                        {"backup_time": "02:00", "resource_scan_time": "03:00", "timezone": "UTC", "public_host": "leaf.servermango.com"},
+                        token,
+                    )
+
+            start_edge.assert_called_once_with("leaf.servermango.com")
+            self.assertTrue(result["edge_proxy_refreshed"])
+
+    def test_postgresql_crud_routes_sync_simulated_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            seed_dev_data(config.db_path, config.account_root)
+            Agent(config).run_all()
+
+            with ClientApiServer(config) as server:
+                token = server.login()
+                created_db = server.request("POST", "/api/client/pg-databases", {"name": "u000001_pgapp"}, token)
+                db_id = created_db["pg_database_id"]
+                created_user = server.request("POST", "/api/client/pg-databases/users", {"username": "u000001_pguser", "password": "StrongPass123"}, token)
+                user_id = created_user["pg_user_id"]
+                created_grant = server.request(
+                    "POST",
+                    "/api/client/pg-databases/users/grants",
+                    {"database_id": db_id, "user_id": user_id, "privileges": "READ_WRITE"},
+                    token,
+                )
+                grant_id = created_grant["pg_grant_id"]
+
+                server.request("POST", "/api/client/pg-databases/users/password", {"user_id": user_id, "password": "NewStrong123"}, token)
+                server.request("DELETE", "/api/client/pg-databases/users/grants/{}".format(grant_id), token=token)
+                server.request("DELETE", "/api/client/pg-databases/users/{}".format(user_id), token=token)
+                server.request("DELETE", "/api/client/pg-databases/{}".format(db_id), token=token)
+
+            artifact = config.account_root / "u000001" / ".runtime" / "postgresql" / "report.json"
+            self.assertTrue(artifact.exists())
+            with connect(config.db_path) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) AS c FROM pg_databases").fetchone()["c"], 0)
+                self.assertGreater(conn.execute("SELECT COUNT(*) AS c FROM jobs WHERE type = 'sync_pg_databases' AND status = 'succeeded'").fetchone()["c"], 0)
+
+    def test_custom_ssl_route_writes_simulated_certificate_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            seed_dev_data(config.db_path, config.account_root)
+            Agent(config).run_all()
+
+            with ClientApiServer(config) as server:
+                token = server.login()
+                home = server.request("GET", "/api/client/home", token=token)
+                self.assertEqual(home["email"], "owner@example.mango.test")
+                self.assertIsNotNone(home["user"])
+                self.assertEqual(home["user"]["email"], "owner@example.mango.test")
+                website_id = home["websites"][0]["id"]
+                payload = server.request(
+                    "POST",
+                    "/api/client/ssl/custom",
+                    {"website_id": website_id, "crt": "-----BEGIN CERTIFICATE-----\ndev\n-----END CERTIFICATE-----", "key": "-----BEGIN PRIVATE KEY-----\ndev\n-----END PRIVATE KEY-----"},
+                    token,
+                )
+                self.assertEqual(payload["ssl_status"], "custom")
+
+            cert_path = config.account_root / "u000001" / "ssl" / "example.mango.test" / "custom.crt"
+            artifact = config.account_root / "u000001" / ".runtime" / "simulated" / "ssl" / "example.mango.test-custom.json"
+            self.assertTrue(cert_path.exists())
+            self.assertTrue(artifact.exists())
+            with connect(config.db_path) as conn:
+                website = conn.execute("SELECT ssl_status FROM websites WHERE id = ?", (website_id,)).fetchone()
+                self.assertEqual(website["ssl_status"], "custom")
+
+    def test_create_website_surfaces_cloudflare_nameservers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            seed_dev_data(config.db_path, config.account_root)
+            FakeCloudflareHandler.created_zone = None
+            FakeCloudflareHandler.created_records = []
+
+            with FakeHTTPServer(FakeCloudflareHandler) as fake_cf:
+                config.cloudflare_api_base = fake_cf.base_url + "/client/v4"
+                with connect(config.db_path) as conn:
+                    provider = conn.execute("SELECT * FROM dns_providers WHERE key = ?", (DNS_PROVIDER_CLOUDFLARE,)).fetchone()
+                    account_id = conn.execute(
+                        """
+                        INSERT INTO dns_provider_accounts(provider_id, display_name, account_name, external_account_id, status)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (provider["id"], "Main Cloudflare", "Example Hosting", "account-1", "active"),
+                    ).lastrowid
+                    conn.execute(
+                        """
+                        INSERT INTO dns_provider_credentials(provider_account_id, credential_kind, secret_label, encrypted_secret, status)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (account_id, "api_token", "token:...alue", encrypt_secret("secret-token-value", config.jwt_secret), "stored"),
+                    )
+                    plan = conn.execute("SELECT * FROM plans ORDER BY id LIMIT 1").fetchone()
+                    conn.execute(
+                        "UPDATE plans SET dns_default_provider = ?, dns_default_provider_account_id = ? WHERE id = ?",
+                        (DNS_PROVIDER_CLOUDFLARE, account_id, plan["id"]),
+                    )
+
+                with ClientApiServer(config) as server:
+                    token = server.login()
+                    payload = server.request("POST", "/api/client/websites", {"domain": "cloudflare-example.mango.test"}, token)
+                    website = payload["website"]
+                    self.assertTrue(website["nameservers"])
+                    self.assertIn("abby.ns.cloudflare.com", website["nameservers"])
+                    self.assertEqual(website["dns_provider_label"], "Cloudflare")
+
+                with connect(config.db_path) as conn:
+                    domain = conn.execute("SELECT * FROM domains WHERE name = ?", ("cloudflare-example.mango.test",)).fetchone()
+                    self.assertIsNotNone(domain)
+                    self.assertIn("abby.ns.cloudflare.com", domain["nameservers_json"])
+
+    def test_create_website_seeds_dns_records_for_apex_www_and_mail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = self.make_config(root)
+            seed_dev_data(config.db_path, config.account_root)
+
+            with ClientApiServer(config) as server:
+                token = server.login()
+                payload = server.request("POST", "/api/client/websites", {"domain": "dns-records-example.mango.test"}, token)
+                website = payload["website"]
+
+            with connect(config.db_path) as conn:
+                domain = conn.execute("SELECT * FROM domains WHERE name = ?", ("dns-records-example.mango.test",)).fetchone()
+                self.assertIsNotNone(domain)
+                records = conn.execute(
+                    "SELECT type, name, value FROM dns_records WHERE domain_id = ? ORDER BY type, name",
+                    (domain["id"],),
+                ).fetchall()
+                record_set = {(row["type"], row["name"], row["value"]) for row in records}
+                self.assertTrue(any(row["type"] == "A" and row["name"] == "@" for row in records))
+                self.assertIn(("CNAME", "www", "@"), record_set)
+                self.assertTrue(any(row["type"] == "MX" and row["name"] == "@" for row in records))
+                self.assertTrue(any(row["type"] == "TXT" and row["name"] == "@" for row in records))
+                self.assertTrue(any(row["type"] == "TXT" and row["name"] == "_dmarc" for row in records))
+                self.assertTrue(any(row["type"] == "TXT" and row["name"] == "mango._domainkey" for row in records))
+                self.assertTrue(website["nameservers"])
+
+
+if __name__ == "__main__":
+    unittest.main()

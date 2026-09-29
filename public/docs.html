@@ -1,0 +1,2301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZeroPanel Documentation · Shared Hosting Control Plane</title>
+    <meta name="description" content="Complete single-page documentation for ZeroPanel: Installation, System Requirements, Basic Setup, Hosting Plans, Client Provisioning, Cloudflare DNS, Server Migration, and Architecture.">
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon-client.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0b0f19;
+            --surface: #151d30;
+            --surface-2: #1e2942;
+            --surface-elevated: #263556;
+            
+            --text: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --muted: #94a3b8;
+            --line: #222f4c;
+            --line-hover: #33446b;
+            
+            --brand: #fdb528;
+            --brand-strong: #e8a417;
+            --brand-ink: #8a5800;
+            --brand-tint: rgba(253, 181, 40, 0.12);
+            --brand-glow: rgba(253, 181, 40, 0.22);
+            
+            --accent: #2c3136;
+            --accent-dark: #1e2528;
+            
+            --success: #22c55e;
+            --success-ink: #86efac;
+            --success-tint: rgba(34, 197, 94, 0.12);
+            
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            --info-tint: rgba(59, 130, 246, 0.12);
+            
+            --shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+            --shadow-premium: 0 20px 45px -10px rgba(0, 0, 0, 0.5);
+            --transition: all 0.2s ease-in-out;
+            
+            --font-body: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Top Header */
+        header {
+            height: 64px;
+            padding: 0 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(21, 29, 48, 0.9);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--line);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text);
+        }
+
+        .brand-mark {
+            width: 34px;
+            height: 34px;
+            background: var(--brand);
+            color: var(--accent-dark);
+            font-weight: 800;
+            font-size: 18px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 3px 10px var(--brand-glow);
+        }
+
+        .brand-text strong {
+            font-size: 1.1rem;
+            font-weight: 800;
+        }
+
+        .brand-text small {
+            color: var(--brand);
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-left: 6px;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .btn-nav {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.45rem 0.85rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: var(--transition);
+            border: 1px solid var(--line);
+            background: var(--surface-2);
+            color: var(--text);
+        }
+
+        .btn-nav:hover {
+            border-color: var(--brand);
+            color: var(--brand);
+        }
+
+        .btn-nav-primary {
+            background: var(--brand);
+            color: var(--accent-dark);
+            border-color: var(--brand-strong);
+        }
+
+        .btn-nav-primary:hover {
+            background: var(--brand-strong);
+            color: var(--accent-dark);
+        }
+
+        /* Documentation Layout */
+        .docs-container {
+            display: grid;
+            grid-template-columns: 280px minmax(0, 1fr);
+            min-height: calc(100vh - 64px);
+        }
+
+        /* Sidebar Navigation */
+        .docs-sidebar {
+            position: sticky;
+            top: 64px;
+            height: calc(100vh - 64px);
+            overflow-y: auto;
+            background: var(--surface);
+            border-right: 1px solid var(--line);
+            padding: 1.5rem 1rem;
+        }
+
+        .docs-search {
+            margin-bottom: 1.25rem;
+            position: relative;
+        }
+
+        .docs-search input {
+            width: 100%;
+            padding: 0.55rem 0.75rem;
+            background: var(--bg);
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.85rem;
+            font-family: var(--font-body);
+            outline: none;
+        }
+
+        .docs-search input:focus {
+            border-color: var(--brand);
+        }
+
+        .nav-group-title {
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--brand);
+            margin: 1.25rem 0.5rem 0.5rem;
+        }
+
+        .nav-menu {
+            list-style: none;
+        }
+
+        .nav-menu li a {
+            display: block;
+            padding: 0.42rem 0.65rem;
+            color: var(--muted);
+            text-decoration: none;
+            font-size: 0.86rem;
+            font-weight: 500;
+            border-radius: 6px;
+            transition: var(--transition);
+            line-height: 1.3;
+        }
+
+        .nav-menu li a:hover,
+        .nav-menu li a.active {
+            color: var(--text);
+            background: var(--surface-2);
+        }
+
+        .nav-menu li a.active {
+            color: var(--brand);
+            font-weight: 700;
+            border-left: 2px solid var(--brand);
+            border-radius: 0 6px 6px 0;
+        }
+
+        /* Main Content Area */
+        .docs-content {
+            padding: 2.5rem 4rem 6rem;
+            max-width: 960px;
+        }
+
+        .docs-section {
+            margin-bottom: 4rem;
+            padding-bottom: 2.5rem;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .docs-section:last-child {
+            border-bottom: none;
+        }
+
+        .docs-section h1 {
+            font-size: 2.5rem;
+            font-weight: 800;
+            letter-spacing: -0.025em;
+            margin-bottom: 1rem;
+            color: var(--text);
+        }
+
+        .docs-section h2 {
+            font-size: 1.75rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin: 2rem 0 1rem;
+            color: var(--text);
+        }
+
+        .docs-section h3 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin: 1.5rem 0 0.75rem;
+            color: var(--brand);
+        }
+
+        .docs-section h4 {
+            font-size: 1rem;
+            font-weight: 700;
+            margin: 1.2rem 0 0.5rem;
+            color: var(--text);
+        }
+
+        .docs-section p {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            line-height: 1.7;
+        }
+
+        .docs-section ul, .docs-section ol {
+            margin: 0.5rem 0 1.25rem 1.5rem;
+            color: var(--text-secondary);
+        }
+
+        .docs-section li {
+            margin-bottom: 0.4rem;
+            line-height: 1.6;
+        }
+
+        /* Callout Cards & Badges */
+        .callout {
+            padding: 1.2rem 1.4rem;
+            border-radius: 10px;
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-left: 4px solid var(--brand);
+            margin: 1.25rem 0;
+        }
+
+        .callout-title {
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--brand);
+            margin-bottom: 0.4rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .callout p {
+            margin-bottom: 0;
+            font-size: 0.92rem;
+            color: var(--text-secondary);
+        }
+
+        .callout-info { border-left-color: var(--info); }
+        .callout-info .callout-title { color: var(--info); }
+
+        .callout-warning { border-left-color: var(--warning); }
+        .callout-warning .callout-title { color: var(--warning); }
+
+        /* Tables */
+        .table-wrapper {
+            overflow-x: auto;
+            margin: 1.25rem 0;
+            border-radius: 8px;
+            border: 1px solid var(--line);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: var(--surface-2);
+            color: var(--text);
+            font-weight: 700;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--line);
+        }
+
+        td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--line);
+            color: var(--text-secondary);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* Code Blocks */
+        pre {
+            background: #060911;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 1.1rem;
+            overflow-x: auto;
+            font-family: var(--font-mono);
+            font-size: 0.88rem;
+            color: #e2e8f0;
+            margin: 1rem 0 1.5rem;
+            position: relative;
+        }
+
+        code {
+            font-family: var(--font-mono);
+            font-size: 0.86rem;
+            background: var(--surface-2);
+            color: var(--brand);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            border: 1px solid var(--line);
+        }
+
+        pre code {
+            background: transparent;
+            color: inherit;
+            padding: 0;
+            border: none;
+        }
+
+        .badge-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.25rem 0.65rem;
+            background: var(--brand-tint);
+            border: 1px solid rgba(253, 181, 40, 0.3);
+            border-radius: 999px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            color: var(--brand);
+            text-transform: uppercase;
+        }
+
+        /* Responsive UI */
+        @media (max-width: 900px) {
+            .docs-container {
+                grid-template-columns: 1fr;
+            }
+            .docs-sidebar {
+                display: none;
+            }
+            .docs-content {
+                padding: 2rem 1.5rem 4rem;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <header>
+        <a href="/" class="brand">
+            <span class="brand-mark">M</span>
+            <div class="brand-text">
+                <strong>ZeroPanel</strong>
+                <small>DOCS</small>
+            </div>
+        </a>
+        <div class="header-actions">
+            <a href="/" class="btn-nav">Home</a>
+            <a href="docs.html" class="btn-nav btn-nav-primary">Docs</a>
+        </div>
+    </header>
+
+    <div class="docs-container">
+        <!-- Sidebar Navigation -->
+        <aside class="docs-sidebar">
+            <div class="docs-search">
+                <input type="text" id="menu-search" placeholder="Search documentation..." onkeyup="filterDocsNav()">
+            </div>
+            
+            <div class="nav-group-title">Getting Started</div>
+            <ul class="nav-menu">
+                <li><a href="#introduction" class="active">Introduction</a></li>
+                <li><a href="#requirements">Requirements</a></li>
+                <li><a href="#installation">Installation</a></li>
+                <li><a href="#quick-start">Quick Start</a></li>
+            </ul>
+
+            <div class="nav-group-title">Operations &amp; Setup</div>
+            <ul class="nav-menu">
+                <li><a href="#basic-setup">Basic Setup</a></li>
+                <li><a href="#admin-management">Admin Setup &amp; Recovery</a></li>
+                <li><a href="#creating-plans">Hosting Plans Setup</a></li>
+                <li><a href="#provisioning-clients">Client Provisioning</a></li>
+                <li><a href="#cloudflare-dns">Cloudflare DNS Setup</a></li>
+                <li><a href="#dns-domain-setup">Domain &amp; Subdomain DNS</a></li>
+            </ul>
+
+            <div class="nav-group-title">Panel Documentation</div>
+            <ul class="nav-menu">
+                <li><a href="#admin-panel-docs">Admin Panel Guide</a></li>
+                <li><a href="#admin-access-security">Admin Access &amp; Security</a></li>
+                <li><a href="#admin-client-profiles">Client Profiles</a></li>
+                <li><a href="#admin-suspension">Soft &amp; Hard Suspend</a></li>
+                <li><a href="#admin-account-recovery">Account Recovery</a></li>
+                <li><a href="#user-panel-docs">User Panel Guide</a></li>
+                <li><a href="#wordpress-integration">WordPress Integration</a></li>
+                <li><a href="#user-account-settings">Account Settings</a></li>
+                <li><a href="#user-files">Files &amp; Websites</a></li>
+                <li><a href="#user-dns-zone-actions">DNS Zone Editor</a></li>
+                <li><a href="#user-collaborators">Collaborators &amp; Accounts</a></li>
+                <li><a href="#user-suspension">Suspended Accounts</a></li>
+            </ul>
+
+            <div class="nav-group-title">Architecture &amp; Data</div>
+            <ul class="nav-menu">
+                <li><a href="#current-build">Current Build Features</a></li>
+                <li><a href="#how-it-works">How It Works</a></li>
+                <li><a href="#data-layout">Data Layout</a></li>
+                <li><a href="#service-command">Service Command</a></li>
+                <li><a href="#terminal-command-reference">Terminal Command Reference</a></li>
+                <li><a href="#server-migration">Server Migration</a></li>
+                <li><a href="#local-development">Local &amp; Docker Dev</a></li>
+                <li><a href="#thesis-direction">Thesis Integration</a></li>
+                <li><a href="#next-steps">Implementation Roadmap</a></li>
+            </ul>
+
+            <div class="nav-group-title">API Reference</div>
+            <ul class="nav-menu">
+                <li><a href="#client-api">Client Area API</a></li>
+                <li><a href="#admin-api">Admin Area API</a></li>
+                <li><a href="#reseller-api">Reseller Area API</a></li>
+            </ul>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="docs-content">
+
+            <!-- INTRODUCTION -->
+            <section id="introduction" class="docs-section">
+                <span class="badge-pill">Overview</span>
+                <h1>Introduction</h1>
+                <p>ZeroPanel is a lightweight, self-hosted, hPanel-style shared hosting control panel. It provides a complete web hosting control plane designed for real account stacks, queued jobs, DNS management, SSL certificates, email services, databases, file managers, and backups.</p>
+                
+                <div class="callout">
+                    <div class="callout-title">Core Philosophy</div>
+                    <p>ZeroPanel uses a zero-external-framework Python HTTP API backed by SQLite WAL mode. Desired infrastructure state is written to SQLite, while a dedicated local Node Agent processes privileged operations asynchronously.</p>
+                </div>
+
+                <h3>Key Platform Highlights</h3>
+                <ul>
+                    <li><strong>Account Isolation:</strong> One dedicated Docker Compose stack per customer account (OpenLiteSpeed, MariaDB, phpMyAdmin, Filebrowser, SFTP, Mail).</li>
+                    <li><strong>Audited Control Plane:</strong> Single SQLite database (`Zeropanel.sqlite3`) tracking users, websites, databases, mailboxes, and job logs.</li>
+                    <li><strong>Built-in Security:</strong> Signed JWT session tokens, mandatory TOTP multi-factor authentication, and short-lived launch tokens for sub-services.</li>
+                    <li><strong>Dual-Port Panel Architecture:</strong> Separate listening ports for Client (`8000`) and Admin (`8001`) to isolate administrative API routes.</li>
+                </ul>
+            </section>
+
+            <!-- REQUIREMENTS -->
+            <section id="requirements" class="docs-section">
+                <span class="badge-pill">Prerequisites</span>
+                <h1>Requirements</h1>
+                <p>Before installing ZeroPanel, ensure your server or development environment satisfies the following system specifications:</p>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Component</th>
+                                <th>Minimum Requirement</th>
+                                <th>Recommended</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Operating System</strong></td>
+                                <td>Linux (Ubuntu 22.04 / 24.04 LTS, Debian 12) or macOS</td>
+                                <td>Ubuntu 24.04 LTS Server</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Python</strong></td>
+                                <td>Python 3.10+</td>
+                                <td>Python 3.12+</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Container Engine</strong></td>
+                                <td>Docker Engine 24.0+ &amp; Docker Compose v2</td>
+                                <td>Docker Engine 26.0+</td>
+                            </tr>
+                            <tr>
+                                <td><strong>System Tools</strong></td>
+                                <td>`git`, `make`, `curl`, `tar`, `sqlite3`</td>
+                                <td>`git`, `make`, `curl`, `rsync`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Network Ports</strong></td>
+                                <td>`8000` (Client), `8001` (Admin)</td>
+                                <td>Public IPs for 80, 443, 53 (DNS), 587 (SMTP), 993 (IMAP)</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- INSTALLATION -->
+            <section id="installation" class="docs-section">
+                <span class="badge-pill">Setup</span>
+                <h1>Installation</h1>
+                <p>Choose one of the following methods to install ZeroPanel on your host system.</p>
+
+                <h3>Option A: Automated One-Line Install (Recommended)</h3>
+                <p>Fresh clone and auto-installation using `git`:</p>
+                <pre><code>git clone https://github.com/servermango/Zeropanel.git ZeroPanel &amp;&amp; cd ZeroPanel &amp;&amp; bash scripts/install.sh</code></pre>
+
+                <h3>Option B: Archive Install (If Git is unavailable)</h3>
+                <pre><code>mkdir ZeroPanel &amp;&amp; curl -fsSL https://codeload.github.com/servermango/Zeropanel/tar.gz/refs/heads/main | tar -xz -C ZeroPanel --strip-components=1 &amp;&amp; cd ZeroPanel &amp;&amp; bash scripts/install.sh</code></pre>
+
+                <h3>Option C: Manual Makefile Step-by-Step</h3>
+                <pre><code>cd ZeroPanel
+
+# 1. Install system prerequisites, Python venv, Docker tools &amp; pre-pull images
+make install
+
+# 2. Check Python, Docker, and listening ports
+make dev-init
+
+# 3. Start the client and admin panel services (seeds dev data on first run)
+make dev-up</code></pre>
+            </section>
+
+            <!-- QUICK START -->
+            <section id="quick-start" class="docs-section">
+                <span class="badge-pill">Getting Started</span>
+                <h1>Quick Start</h1>
+                <p>Once installation finishes, ZeroPanel runs as a local background daemon or development server.</p>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Interface</th>
+                                <th>URL</th>
+                                <th>Default Credentials</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Client Portal</strong></td>
+                                <td>`http://127.0.0.1:8000/`</td>
+                                <td>`owner@example.mango.test` / `ChangeMe-DevOnly-123!`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Admin Panel</strong></td>
+                                <td>`http://127.0.0.1:8001/admin`</td>
+                                <td>`admin@mango.test` / `ChangeMe-DevOnly-123!`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Client Signup</strong></td>
+                                <td>`http://127.0.0.1:8000/signup`</td>
+                                <td>Self-service client registration</td>
+                            </tr>
+                            <tr>
+                                <td><strong>System Status</strong></td>
+                                <td>`http://127.0.0.1:8000/status`</td>
+                                <td>Public platform feature state page</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout callout-info">
+                    <div class="callout-title">Development 2FA Code</div>
+                    <p>In development mode (`MP_DEV_AUTH_TEST_MODE=true`), the universal TOTP verification code is <code>000000</code>.</p>
+                </div>
+            </section>
+
+            <!-- BASIC SETUP -->
+            <section id="basic-setup" class="docs-section">
+                <span class="badge-pill">Guide</span>
+                <h1>Basic Setup</h1>
+                <p>Follow these steps to configure your initial administrative credentials, define hosting plans, and provision your first customer accounts.</p>
+
+                <h2 id="admin-management">1. Admin Setup &amp; Recovery</h2>
+                <p>When starting ZeroPanel on a fresh database with zero admins, visiting `http://<server-ip>:8001/admin` automatically routes to the <strong>First-Admin Setup Page</strong> (`/admin/setup`).</p>
+                
+                <ul>
+                    <li>Choose the panel domain first, then create <code>A</code> records for both that domain and its wildcard subdomain, pointing to the displayed server IP.</li>
+                    <li>Fill in the admin email address and password.</li>
+                    <li>The system generates an initial TOTP authenticator secret and displays an <code>otpauth://</code> QR code named with the panel domain.</li>
+                    <li>Scan the QR code in Google Authenticator / 1Password and verify a code before completing setup.</li>
+                    <li>Once an admin exists, public first-admin setup is permanently locked.</li>
+                </ul>
+
+                <h4>CLI Admin Recovery Tool</h4>
+                <p>If an administrator loses password or 2FA access, run `scripts/admin_recovery.py` directly on the server host:</p>
+                <pre><code># Reset admin password
+sudo python3 scripts/admin_recovery.py --email admin@example.com --set-password
+
+# Generate new TOTP secret &amp; display QR setup URI
+sudo python3 scripts/admin_recovery.py --email admin@example.com --enable-totp
+
+# Disable TOTP requirement for emergency login
+sudo python3 scripts/admin_recovery.py --email admin@example.com --disable-totp</code></pre>
+
+                <h2 id="creating-plans">2. Creating Hosting Plans</h2>
+                <p>Before customer accounts can be provisioned, define at least one active <strong>Hosting Plan</strong> in the Admin Panel under <strong>Plans</strong> (`/admin#plans`).</p>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Plan Field</th>
+                                <th>Description</th>
+                                <th>Example Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Name &amp; Slug</strong></td>
+                                <td>Human readable label and identifier</td>
+                                <td>`Starter Plan` (`starter`)</td>
+                            </tr>
+                            <tr>
+                                <td><strong>CPU &amp; RAM Limit</strong></td>
+                                <td>Per-account container execution limits</td>
+                                <td>`1.0 CPU` / `512 MB RAM`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Storage &amp; Inodes</strong></td>
+                                <td>Disk quota in MB and file count limit</td>
+                                <td>`10000 MB` / `250000 inodes`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Website Count</strong></td>
+                                <td>Maximum allowed hosted domains</td>
+                                <td>`5 websites`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Databases &amp; Mailboxes</strong></td>
+                                <td>Max MySQL/PostgreSQL DBs and email accounts</td>
+                                <td>`5 DBs` / `10 mailboxes`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>DNS Policy</strong></td>
+                                <td>DNS provider selection (Local PowerDNS / Cloudflare)</td>
+                                <td>`Cloudflare Managed`</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2 id="provisioning-clients">3. Provisioning Customer Clients</h2>
+                <p>Customer accounts can be created through two primary workflows:</p>
+
+                <h4>Workflow A: Self-Service Signup Page (`/signup`)</h4>
+                <ol>
+                    <li>User visits `http://<server-ip>:8000/signup`.</li>
+                    <li>Enters email, password, and selects an available hosting plan.</li>
+                    <li>API executes `POST /api/public/signup`, generates customer credentials, sets up 2FA, and assigns an account ID (e.g., `u000001`).</li>
+                </ol>
+
+                <h4>Workflow B: Admin Dashboard Provisioning</h4>
+                <ol>
+                    <li>Admin opens <strong>Admin Panel &gt; Clients</strong>.</li>
+                    <li>Clicks <strong>Create Client Account</strong>.</li>
+                    <li>Enters user email, password, and selects the hosting plan.</li>
+                    <li>The system creates the user, generates account directory structure under `user_files/accounts/<account_id>/`, and queues container deployment.</li>
+                </ol>
+            </section>
+
+            <!-- CLOUDFLARE DNS -->
+            <section id="cloudflare-dns" class="docs-section">
+                <span class="badge-pill">DNS Integration</span>
+                <h1>Cloudflare as DNS - Setup Instructions</h1>
+                <p>ZeroPanel supports Cloudflare as an authoritative DNS provider for managed domains. Configure Cloudflare credentials in the Admin panel under <strong>DNS Settings</strong>.</p>
+
+                <h3>Cloudflare API Prerequisites</h3>
+                <ul>
+                    <li><strong>Account ID:</strong> Found in the right sidebar of the Cloudflare Dashboard on any domain's Overview page.</li>
+                    <li><strong>API Token:</strong> Generated under <strong>My Profile &gt; API Tokens</strong> in Cloudflare.</li>
+                </ul>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Required Token Permissions</div>
+                    <p>The Cloudflare API Token must include these explicit permissions:<br>
+                    • <strong>Zone &gt; Zone &gt; Edit</strong><br>
+                    • <strong>Zone &gt; DNS &gt; Edit</strong></p>
+                </div>
+            </section>
+
+            <!-- DOMAIN & SUBDOMAIN DNS SETUP -->
+            <section id="dns-domain-setup" class="docs-section">
+                <span class="badge-pill">DNS Routing</span>
+                <h1>Domain &amp; Subdomain DNS Setup</h1>
+                <p>To instruct users to set up a server domain or subdomain for ZeroPanel and tool access, create DNS A-records pointing to your server's IP address.</p>
+
+                <div class="callout callout-info">
+                    <div class="callout-title">Domain Setup Example</div>
+                    <p>For example, if you want your users to reach the panel from <strong>hosting.servermango.com</strong>, create the following DNS A-records pointing to your server's public IP address:</p>
+                </div>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>Name / Host</th>
+                                <th>Target / Value</th>
+                                <th>Purpose</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>A</code></td>
+                                <td><code>hosting.servermango.com</code> (or <code>@</code>)</td>
+                                <td><code>&lt;SERVER_IP&gt;</code></td>
+                                <td>Main panel and web traffic</td>
+                            </tr>
+                            <tr>
+                                <td><code>A</code></td>
+                                <td><code>*.files.hosting.servermango.com</code> (or <code>*.files</code>)</td>
+                                <td><code>&lt;SERVER_IP&gt;</code></td>
+                                <td>Per-account Filebrowser tool subdomain routing</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <p>Once configured, access ZeroPanel at:</p>
+                <ul>
+                    <li><strong>Admin Panel:</strong> <code>http://hosting.servermango.com:8001/admin</code></li>
+                    <li><strong>Client Panel:</strong> <code>http://hosting.servermango.com:8000/client</code> (or <code>http://hosting.servermango.com:8000/</code>)</li>
+                </ul>
+            </section>
+
+            <!-- CURRENT BUILD -->
+            <section id="current-build" class="docs-section">
+                <span class="badge-pill">Architecture</span>
+                <h1>Current Build Features</h1>
+                <ul>
+                    <li>Python standard-library HTTP API with zero framework overhead.</li>
+                    <li>SQLite WAL-mode schema with versioned development seed data.</li>
+                    <li>Public client signup (`/signup`), client portal (`/`), admin panel (`/admin`), and status page (`/status`).</li>
+                    <li>Full coverage for websites, MySQL, PostgreSQL, mailboxes, SFTP, cron jobs, backups, Git deployments, and audit logs.</li>
+                    <li>Node-agent job runner with simulated and Docker Compose execution modes.</li>
+                    <li>Account-stack generator for OpenLiteSpeed, Filebrowser, phpMyAdmin, MariaDB, cron, SFTP, and shared mail scaffolding.</li>
+                </ul>
+            </section>
+
+            <!-- SERVICE COMMAND -->
+            <section id="service-command" class="docs-section">
+                <span class="badge-pill">CLI Tooling</span>
+                <h1>Service Command</h1>
+                <p>ZeroPanel includes a portable service wrapper at <code>scripts/service</code> that manages background panel processes and agent workers without requiring `systemd`:</p>
+
+                <pre><code># Service lifecycle management
+bash scripts/service Zeropanel start
+bash scripts/service Zeropanel status
+bash scripts/service Zeropanel restart
+bash scripts/service Zeropanel stop
+
+# Makefile wrapper equivalent
+make service ACTION=start
+make service ACTION=status</code></pre>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Production startup</div>
+                    <p>On a production server, run the systemd service so the panel uses Docker mode and asynchronous agent jobs. This does not delete website content:</p>
+                    <pre><code>cd /root/Zeropanel
+sudo systemctl start Zeropanel.service
+sudo systemctl status Zeropanel.service --no-pager
+
+# The service must define:
+# MP_ENV=production
+# MP_AGENT_MODE=docker</code></pre>
+                    <p>Do not start a second manual <code>python -m Zeropanel.app</code> process on ports 8000/8001.</p>
+                </div>
+            </section>
+
+            <!-- TERMINAL COMMAND REFERENCE -->
+            <section id="terminal-command-reference" class="docs-section">
+                <span class="badge-pill">CLI Reference</span>
+                <h1>Terminal Command Reference</h1>
+                <p>Run these commands from the ZeroPanel project root. Replace <code>python3</code> with your virtual-environment interpreter when applicable. Production commands should be run by an administrator and destructive commands should be reviewed before execution.</p>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Before running commands</div>
+                    <p>Stop duplicate panel or worker processes before starting another one. <code>make dev-reset</code> deletes development data under <code>user_files/</code>, so never run it against a production database.</p>
+                </div>
+
+                <h2>Installation and service lifecycle</h2>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Command</th><th>Description</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>bash scripts/install.sh</code></td><td>Install full ZeroPanel prerequisites and runtime dependencies.</td></tr>
+                            <tr><td><code>bash scripts/install.sh --api-only</code></td><td>Install the API/panel-only setup without the full hosting stack.</td></tr>
+                            <tr><td><code>bash scripts/install.sh --full</code></td><td>Explicitly select the full hosting setup.</td></tr>
+                            <tr><td><code>bash scripts/service Zeropanel start</code></td><td>Start the production panel and its internal queue worker in the background.</td></tr>
+                            <tr><td><code>bash scripts/service Zeropanel status</code></td><td>Show whether the panel process is running.</td></tr>
+                            <tr><td><code>bash scripts/service Zeropanel restart</code></td><td>Stop and start the panel process.</td></tr>
+                            <tr><td><code>bash scripts/service Zeropanel stop</code></td><td>Stop the background panel process.</td></tr>
+                            <tr><td><code>make service ACTION=start|status|restart|stop</code></td><td>Makefile wrapper for the service commands.</td></tr>
+                            <tr><td><code>python3 -m Zeropanel.app</code></td><td>Run the panel in the foreground; useful for development or live logs.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2>Development and testing</h2>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Command</th><th>Description</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>make dev-init</code></td><td>Check Python, Docker availability, and development port 8000.</td></tr>
+                            <tr><td><code>make dev-up</code></td><td>Start the client and admin panels using simulated account stacks.</td></tr>
+                            <tr><td><code>make dev-up-docker</code></td><td>Start the panels with real per-account Docker containers.</td></tr>
+                            <tr><td><code>make dev-seed</code></td><td>Seed development users, plans, accounts, and sample data.</td></tr>
+                            <tr><td><code>make dev-agent</code></td><td>Process queued development jobs in simulated mode.</td></tr>
+                            <tr><td><code>make dev-agent-once</code></td><td>Process one queued development job and exit.</td></tr>
+                            <tr><td><code>python3 scripts/dev_agent.py --once</code></td><td>Process one queued job and exit.</td></tr>
+                            <tr><td><code>python3 scripts/dev_agent.py --watch</code></td><td>Continuously watch and process queued jobs until interrupted.</td></tr>
+                            <tr><td><code>python3 scripts/dev_agent.py --limit 25</code></td><td>Process up to 25 queued jobs in one batch.</td></tr>
+                            <tr><td><code>python3 scripts/dev_agent.py --apply-all</code></td><td>Regenerate and apply every hosting account stack.</td></tr>
+                            <tr><td><code>python3 scripts/dev_agent.py --down-all</code></td><td>Stop every generated hosting account stack.</td></tr>
+                            <tr><td><code>make dev-hosting-up</code></td><td>Seed data and apply all account stacks in Docker mode.</td></tr>
+                            <tr><td><code>make dev-hosting-down</code></td><td>Stop all development account stacks.</td></tr>
+                            <tr><td><code>make dev-smoke</code></td><td>Run authenticated panel/API smoke checks.</td></tr>
+                            <tr><td><code>make dev-hosting-smoke</code></td><td>Check website, Filebrowser, phpMyAdmin, and account hosting routes.</td></tr>
+                            <tr><td><code>make dev-e2e</code></td><td>Run the complete unittest discovery suite.</td></tr>
+                            <tr><td><code>make test</code></td><td>Run the project test suite.</td></tr>
+                            <tr><td><code>make dev-down</code></td><td>Print development shutdown guidance; stop a foreground server with Ctrl-C.</td></tr>
+                            <tr><td><code>make dev-reset</code></td><td><strong>Destructive:</strong> stop stacks, free dev ports, and delete development data.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2>Maintenance and recovery scripts</h2>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Command</th><th>Description</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>python3 scripts/dev_free_ports.py</code></td><td>Stop processes using development ports 8000 and 8001.</td></tr>
+                            <tr><td><code>python3 scripts/dev_free_ports.py --port 8000 --port 8001</code></td><td>Stop processes on explicitly selected ports.</td></tr>
+                            <tr><td><code>sudo python3 scripts/admin_recovery.py --email admin@example.com --set-password</code></td><td>Reset an administrator password interactively.</td></tr>
+                            <tr><td><code>sudo python3 scripts/admin_recovery.py --email admin@example.com --set-password --password 'NewPassword'</code></td><td>Set an administrator password non-interactively; protect shell history.</td></tr>
+                            <tr><td><code>sudo python3 scripts/admin_recovery.py --email admin@example.com --enable-totp</code></td><td>Generate a fresh administrator TOTP secret.</td></tr>
+                            <tr><td><code>sudo python3 scripts/admin_recovery.py --email admin@example.com --disable-totp</code></td><td>Disable administrator TOTP recovery protection.</td></tr>
+                            <tr><td><code>python3 scripts/ensure_wordpress_htaccess.py</code></td><td>Scan managed WordPress sites and create a standard <code>.htaccess</code> only where missing.</td></tr>
+                            <tr><td><code>python3 scripts/sync_cloudflare_rules.py</code></td><td>Sync Cloudflare ACME/security rules for all websites.</td></tr>
+                            <tr><td><code>python3 scripts/sync_cloudflare_rules.py WEBSITE_ID</code></td><td>Sync Cloudflare ACME/security rules for one website.</td></tr>
+                            <tr><td><code>php scripts/domain_isolation_test.php</code></td><td>Run the PHP domain-isolation and runtime safety diagnostic.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2>Database and log diagnostics</h2>
+                <pre><code># Check the SQLite database without changing it
+sqlite3 user_files/data/Zeropanel.sqlite3 "PRAGMA quick_check;"
+
+# Inspect recent jobs
+sqlite3 -header -column user_files/data/Zeropanel.sqlite3 \
+  "SELECT id,type,status,attempts,created_at,updated_at FROM jobs ORDER BY id DESC LIMIT 20;"
+
+# Follow the foreground/service log
+tail -f var/Zeropanel.log</code></pre>
+                <p>Take a database backup before repair or migration work. Do not delete WAL files, database rows, account directories, or job history as a first troubleshooting step.</p>
+            </section>
+
+            <!-- HOW IT WORKS -->
+            <section id="how-it-works" class="docs-section">
+                <span class="badge-pill">Internals</span>
+                <h1>How It Works</h1>
+                <p>Request flow in one line:</p>
+                <div class="callout callout-info">
+                    <p><strong>Browser</strong> &rarr; <strong>Panel API</strong> (writes SQLite + enqueues job) &rarr; <strong>Local Agent</strong> (provisions files &amp; containers) &rarr; <strong>Status reported back to SQLite</strong> &rarr; <strong>UI displays result</strong></p>
+                </div>
+            </section>
+
+            <!-- DATA LAYOUT -->
+            <section id="data-layout" class="docs-section">
+                <span class="badge-pill">Filesystem</span>
+                <h1>Data Layout</h1>
+                <p>All persistent control-plane state and customer hosting data lives under <code>user_files/</code>:</p>
+                <pre><code>user_files/
+  accounts/                 # per-customer hosting files  (MP_ACCOUNT_ROOT)
+    u000001/
+      account.json
+      domains/&lt;domain&gt;/public_html/
+      databases/  mail/  backups/  ssl/  git/  .runtime/
+  data/                     # control-plane database       (MP_DATA_DIR)
+    Zeropanel.sqlite3</code></pre>
+            </section>
+
+            <!-- SERVER MIGRATION -->
+            <section id="server-migration" class="docs-section">
+                <span class="badge-pill">Maintenance</span>
+                <h1>Server Migration</h1>
+                <p>Because all database state and customer files live inside `user_files/`, migration to a new server takes 5 simple steps:</p>
+
+                <ol>
+                    <li><strong>Stop Services:</strong> <code>bash scripts/service Zeropanel stop</code> on old server.</li>
+                    <li><strong>Install on New Server:</strong> Run installation script on destination machine.</li>
+                    <li><strong>Transfer `user_files/`:</strong> <code>rsync -avzP /path/to/old/user_files/ root@new-server:/path/to/new/user_files/</code></li>
+                    <li><strong>Start Services &amp; Provision Stacks:</strong> <code>bash scripts/service Zeropanel start</code> &amp; run agent stack rebuild.</li>
+                    <li><strong>Update DNS:</strong> Point A-records to the new server IP.</li>
+                </ol>
+            </section>
+
+            <!-- LOCAL DEVELOPMENT -->
+            <section id="local-development" class="docs-section">
+                <span class="badge-pill">Developer</span>
+                <h1>Local &amp; Docker Development</h1>
+                <pre><code># Start lightweight dev server (Simulated Mode)
+make dev-up
+
+# Start full Docker hosting stack (OpenLiteSpeed, MariaDB, SFTP containers)
+make dev-up-docker
+
+# Run unit tests
+make test
+
+# Run API smoke test suite
+make dev-smoke</code></pre>
+            </section>
+
+            <!-- THESIS DIRECTION -->
+            <section id="thesis-direction" class="docs-section">
+                <span class="badge-pill">Research</span>
+                <h1>Thesis Integration Direction</h1>
+                <p>ZeroPanel is evaluated as a case study for Tariq Abdullah's <strong>Cloud Definition Language (CDL)</strong> M.Tech thesis research, exploring how shared-hosting platform intent can be compiled into explainable infrastructure artifacts.</p>
+            </section>
+
+            <!-- NEXT STEPS -->
+            <section id="next-steps" class="docs-section">
+                <span class="badge-pill">Roadmap</span>
+                <h1>Implementation Roadmap</h1>
+                <ul>
+                    <li><strong>Phase 1 (Implemented):</strong> Shared interfaces and control-plane schema.</li>
+                    <li><strong>Phase 2 (Implemented):</strong> Local PowerDNS adapter, ACME provider, and mail edge scaffolding.</li>
+                    <li><strong>Phase 3 (Implemented):</strong> Hardening, auth validation, and client dashboard metrics integration.</li>
+                </ul>
+            </section>
+
+            <!-- ADMIN PANEL DOCUMENTATION -->
+            <section id="admin-panel-docs" class="docs-section">
+                <span class="badge-pill">Admin Panel</span>
+                <h1>Admin Panel Documentation</h1>
+                <p>The Admin Panel is the control surface for platform operators. It manages customers, hosting accounts, plans, DNS providers, infrastructure jobs, security settings, and system health. Administrative actions are audited and privileged changes require administrator permissions.</p>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Production safety</div>
+                    <p>Administrative changes can affect live customer traffic. Review the target client and hosting account before applying a change, and use <strong>Hard suspend</strong> only when taking the entire account stack offline is intentional.</p>
+                </div>
+
+                <h2 id="admin-access-security">1. Admin Access &amp; Security</h2>
+                <p>Open the Admin Panel at <code>/admin</code> on the administrative panel port. Admin sessions use signed, short-lived tokens and two-factor authentication when configured.</p>
+                <h3>Administrator roles and permissions</h3>
+                <ul>
+                    <li><strong>Authentication:</strong> Sign in with the administrator email, password, and authenticator code.</li>
+                    <li><strong>Permissions:</strong> Scope checks protect client, plan, system, DNS, incident, and administrator-management operations.</li>
+                    <li><strong>Session revocation:</strong> Password, email, or 2FA changes invalidate existing sensitive sessions.</li>
+                    <li><strong>Audit trail:</strong> Account, profile, suspension, security, and infrastructure actions are recorded in the audit log.</li>
+                </ul>
+                <h3>Recommended security routine</h3>
+                <ol>
+                    <li>Use a unique administrator password stored in a password manager.</li>
+                    <li>Keep administrator TOTP enabled and store recovery material offline.</li>
+                    <li>Use the minimum administrator permission set required for each operator.</li>
+                    <li>Review audit entries after account status, password, or 2FA changes.</li>
+                </ol>
+
+                <h2 id="admin-dashboard">2. Dashboard &amp; System Monitoring</h2>
+                <p>The Admin Dashboard summarizes customer count, hosting accounts, resource use, jobs, incidents, and service health.</p>
+                <h3>What to inspect first</h3>
+                <ul>
+                    <li><strong>System status:</strong> Check service availability and active maintenance notices.</li>
+                    <li><strong>Jobs:</strong> Review queued, running, failed, and retried agent jobs.</li>
+                    <li><strong>Storage:</strong> Check disk and inode pressure before provisioning or rebuilding stacks.</li>
+                    <li><strong>Network and nodes:</strong> Confirm nodes are online before starting account operations.</li>
+                </ul>
+                <h3>Queued operations</h3>
+                <p>Most infrastructure changes are represented as jobs. The API records the requested state first, then the local agent applies files, container changes, and service configuration. A failed job should be investigated before retrying it.</p>
+
+                <h2 id="admin-client-profiles">3. Client Profiles, Billing &amp; Identity</h2>
+                <p>Use <strong>Clients &gt; Edit Profile</strong> to manage a customer identity without exposing stored secrets.</p>
+                <h3>Editable profile data</h3>
+                <ul>
+                    <li>Full name and login email.</li>
+                    <li>Billing email, company, phone, tax ID, and postal address.</li>
+                    <li>Account status where the operator has the required permission.</li>
+                </ul>
+                <h3>Password and 2FA controls</h3>
+                <p>Administrators can reset a client password or enable, disable, and rotate client 2FA. Sensitive actions require administrator re-authentication and invalidate the client’s active browser sessions.</p>
+
+                <h2 id="admin-hosting-accounts">4. Hosting Accounts &amp; Stack Lifecycle</h2>
+                <p>A hosting account represents an isolated customer stack, account directory, websites, databases, mail services, and generated runtime configuration.</p>
+                <h3>Account states</h3>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>State</th><th>Meaning</th><th>Typical next action</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>provisioning</code></td><td>Initial files and services are being prepared.</td><td>Wait for the provisioning job.</td></tr>
+                            <tr><td><code>active</code></td><td>Normal customer operation.</td><td>Manage plan, domains, services, or access.</td></tr>
+                            <tr><td><code>suspended</code></td><td>Soft suspended; web traffic is gated while the stack remains available.</td><td>Unsuspend or escalate to Hard suspend.</td></tr>
+                            <tr><td><code>hard_suspended</code></td><td>Entire account stack is stopped and web traffic is gated.</td><td>Unsuspend after the operational issue is resolved.</td></tr>
+                            <tr><td><code>rebuilding</code></td><td>Generated configuration or stack services are being reapplied.</td><td>Monitor the associated job.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2 id="admin-suspension">5. Soft Suspend and Hard Suspend</h2>
+                <p>ZeroPanel provides two deliberate suspension levels. Both are account-level controls and both show a suspension message to the customer in the User Panel.</p>
+
+                <h3>Soft suspend</h3>
+                <p><strong>Soft suspend</strong> is the normal access restriction. It changes the hosting account state to <code>suspended</code> and creates a filesystem marker. The web server checks that marker and serves the ZeroPanel “Account Temporarily Unavailable” page instead of the customer’s website.</p>
+                <ul>
+                    <li>The account’s containers remain running.</li>
+                    <li>Web requests are blocked at the document-root serving layer.</li>
+                    <li>The marker is checked from the filesystem, so normal web traffic does not query SQLite.</li>
+                    <li>Customer write operations are rejected by the panel while the account is suspended.</li>
+                    <li>Use this when access should be restricted without stopping mail, database, or other stack services.</li>
+                </ul>
+
+                <h3>Hard suspend</h3>
+                <p><strong>Hard suspend</strong> is an operational shutdown. It changes the state to <code>hard_suspended</code>, keeps the filesystem serving gate active, and queues a job that runs <code>docker compose down --remove-orphans</code> for the account’s complete stack.</p>
+                <ul>
+                    <li>The web, database, mail, Filebrowser, SFTP, cache, cron, and related account services are stopped.</li>
+                    <li>Existing account data and persistent volumes are retained; Hard suspend is not account deletion.</li>
+                    <li>The User Panel remains available for the customer to see the suspension notice, but account operations are restricted.</li>
+                    <li>Use this for severe abuse, non-payment escalation, incident containment, or a deliberate full shutdown.</li>
+                </ul>
+
+                <h3>How suspension is applied</h3>
+                <ol>
+                    <li>The Admin Panel writes the suspension state and creates the account marker immediately.</li>
+                    <li>Domain document roots receive a filesystem marker and a managed web-server gate.</li>
+                    <li>An agent job records the operation and applies the stack action.</li>
+                    <li>Failed jobs leave the account fail-closed and remain visible for investigation and retry.</li>
+                    <li>The public website returns the suspension page without loading WordPress or another customer application.</li>
+                </ol>
+
+                <h3>When to choose each option</h3>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Situation</th><th>Recommended action</th><th>Reason</th></tr></thead>
+                        <tbody>
+                            <tr><td>Temporary billing or policy hold</td><td><strong>Soft suspend</strong></td><td>Restricts access while keeping services available for controlled recovery.</td></tr>
+                            <tr><td>Abuse investigation or active web compromise</td><td><strong>Hard suspend</strong></td><td>Stops the complete account stack and limits further activity.</td></tr>
+                            <tr><td>Planned maintenance requiring service downtime</td><td><strong>Hard suspend</strong></td><td>Provides a known stopped state before maintenance.</td></tr>
+                            <tr><td>Account deletion</td><td>Use the deletion workflow</td><td>Suspension never deletes customer files or persistent data.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2 id="admin-account-recovery">6. Unsuspend and Account Recovery</h2>
+                <p>Click <strong>Unsuspend</strong> after the reason for the hold has been resolved. For a soft suspension, the serving marker is removed after the account state is restored. For a hard suspension, the agent first brings the account stack back up and then clears the marker.</p>
+                <h3>Recovery checklist</h3>
+                <ol>
+                    <li>Confirm the customer, account username, and suspension reason.</li>
+                    <li>Review failed jobs, audit entries, and relevant security or billing notes.</li>
+                    <li>For Hard suspend, verify node capacity and Docker availability.</li>
+                    <li>Click <strong>Unsuspend</strong> and monitor the resulting agent job.</li>
+                    <li>Verify the website, database, mail, and Filebrowser routes after recovery.</li>
+                </ol>
+                <div class="callout callout-info">
+                    <div class="callout-title">Fail-closed recovery</div>
+                    <p>If the stack cannot be started, the account remains restricted instead of being marked fully active while services are unavailable. Investigate the job error and retry only after correcting the cause.</p>
+                </div>
+
+                <h2 id="admin-plans-dns">7. Plans, Domains, DNS &amp; SSL</h2>
+                <p>Plans define CPU, memory, storage, inode, website, database, mailbox, backup, and DNS policy limits. Domain and DNS tools apply records, nameserver assignments, provider migrations, and verification jobs. SSL issuance is tracked per website and normally runs asynchronously through the agent.</p>
+                <h3>Safe change order</h3>
+                <ol>
+                    <li>Update or validate the plan limits.</li>
+                    <li>Confirm the target account and current resource use.</li>
+                    <li>Apply the plan or DNS change.</li>
+                    <li>Watch the job result and verify the generated stack or DNS state.</li>
+                </ol>
+
+                <h2 id="admin-audit-maintenance">8. Audit, Jobs &amp; Maintenance</h2>
+                <p>Use the audit and job views to answer who changed what, when it changed, which account was affected, and whether the agent completed the requested operation. Keep failed jobs until their cause and recovery are documented.</p>
+                <ul>
+                    <li>Use job retry for transient infrastructure failures only.</li>
+                    <li>Use storage and quota views before large migrations or rebuilds.</li>
+                    <li>Use incident status tools to communicate platform-wide maintenance separately from account suspension.</li>
+                    <li>Do not manually delete account markers, compose files, or runtime directories as a substitute for the panel workflow.</li>
+                </ul>
+
+            </section>
+
+            <!-- USER PANEL DOCUMENTATION -->
+            <section id="user-panel-docs" class="docs-section">
+                <span class="badge-pill">User Panel</span>
+                <h1>User Panel Documentation</h1>
+                <p>The User Panel is the customer workspace for managing websites, domains, DNS, databases, mailboxes, files, backups, deployments, security, and account settings. Customers can manage only the hosting accounts and collaborator scopes assigned to them.</p>
+
+                <h2 id="user-access-security">1. Sign-in, 2FA &amp; Session Security</h2>
+                <p>Open the Client Portal at <code>/client</code> or the configured client-panel URL. Sign-in may require a TOTP authenticator code after the password is accepted.</p>
+                <ul>
+                    <li>Use <strong>Sign out</strong> when leaving a shared or administrative workstation.</li>
+                    <li>Changing the email, password, or 2FA settings requires sensitive-change verification.</li>
+                    <li>Changing a password or login email revokes existing sessions and requires a fresh login.</li>
+                    <li>Never share an API token or authenticator secret with support staff or collaborators.</li>
+                </ul>
+
+                <h2 id="user-dashboard">2. Dashboard &amp; Account Selection</h2>
+                <p>The dashboard displays the selected hosting account, websites, resource summaries, warnings, and recent account activity.</p>
+                <h3>Multiple accounts</h3>
+                <p>If you own multiple accounts or have collaborator access, use the account selector to switch the active scope. The selected account controls which websites, databases, files, mailboxes, and tools are displayed.</p>
+                <h3>Resource summary</h3>
+                <p>Disk, inode, CPU, and memory summaries are estimates based on the latest usage sample. A high value may require cleanup, a plan change, or administrator assistance.</p>
+
+                <h2 id="user-account-settings">3. Account Settings, Billing &amp; Identity</h2>
+                <p>Account Settings contains your identity and billing profile. You can update your name, billing email, company, phone, tax information, and address.</p>
+                <h3>Password and 2FA</h3>
+                <ul>
+                    <li>Use a long, unique password and confirm the current password before changing it.</li>
+                    <li>Keep TOTP enabled for accounts that manage production websites or email.</li>
+                    <li>Disabling or rotating 2FA requires current security verification and may sign you out.</li>
+                </ul>
+
+                <h2 id="user-files">4. Websites, Domains &amp; File Manager</h2>
+                <h3>Websites</h3>
+                <p>Create websites by selecting a domain, document root, and PHP version. The platform generates an isolated web-server virtual host for each website.</p>
+                <h3>Domains and DNS</h3>
+                <p>Use the Domains and DNS tools to inspect nameservers, manage permitted DNS records, verify propagation, and select the available DNS provider. DNS changes can take time to propagate outside ZeroPanel.</p>
+
+                <h3 id="user-dns-zone-actions">DNS Zone Editor: Rebuild vs Verify</h3>
+                <p>DNS record changes normally queue a provider sync automatically. The two action buttons serve different purposes:</p>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Action</th>
+                                <th>What it does</th>
+                                <th>When to use it</th>
+                                <th>Does it change DNS?</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Rebuild</strong></td>
+                                <td>Reads the records saved in ZeroPanel, rebuilds the authoritative zone, and publishes it to the selected provider.</td>
+                                <td>After a failed sync, provider change, imported-record cleanup, or when you need to republish the current saved zone.</td>
+                                <td>Yes. It queues a DNS synchronization job.</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Verify</strong></td>
+                                <td>Performs a read-only public DNS check and compares the domain’s observed nameservers with the provider’s expected nameservers.</td>
+                                <td>After changing nameservers at the registrar, or when confirming that delegation has propagated.</td>
+                                <td>No. It does not edit records or nameservers.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h4>Recommended workflow</h4>
+                <ol>
+                    <li>Edit or add the DNS record. ZeroPanel queues synchronization automatically.</li>
+                    <li>Use <strong>Rebuild</strong> only if you need to republish the saved zone or a sync failed.</li>
+                    <li>Copy the provider nameservers shown by ZeroPanel into your registrar when using an authoritative provider such as Cloudflare.</li>
+                    <li>Wait for delegation to propagate, then click <strong>Verify</strong>.</li>
+                </ol>
+
+                <h4>DNS status meanings</h4>
+                <ul>
+                    <li><strong>Published / Active:</strong> The provider accepted the zone.</li>
+                    <li><strong>Pending nameserver:</strong> The zone was published, but public delegation has not yet been confirmed.</li>
+                    <li><strong>Provider failed:</strong> The provider rejected the operation or could not be reached. Read the displayed error, correct the provider/account or record issue, then use <strong>Rebuild</strong>.</li>
+                    <li><strong>DNS sync in progress:</strong> A queued job is currently applying the saved zone. Avoid repeated rebuilds until it finishes.</li>
+                </ul>
+
+                <h4>Switching the provider</h4>
+                <p>Use <strong>Switch DNS Provider</strong> to open the domain-scoped provider modal. The available providers and Cloudflare accounts come from the hosting plan. If multiple Cloudflare accounts are permitted, choose the account for that domain in the modal; changing it does not change other domains in the account.</p>
+
+                <h3>File Manager</h3>
+                <p>Use <strong>Access all files of domain</strong> for a domain-scoped file view. Use <strong>Access Root Filesystem of this hosting</strong> for account-level directories when your account permissions allow it. File edits are sent through the authenticated Filebrowser proxy; do not expose or reuse launch URLs.</p>
+                <div class="callout callout-warning">
+                    <div class="callout-title">File safety</div>
+                    <p>Editing <code>wp-config.php</code>, server rules, or application configuration can take a website offline. Download a backup or copy the original content before making changes.</p>
+                </div>
+
+                <h2 id="user-databases">5. Databases &amp; Database Users</h2>
+                <p>The User Panel supports MySQL and PostgreSQL database records, users, grants, and password changes subject to plan limits.</p>
+                <ul>
+                    <li>Create database names and users using the panel-generated account scope.</li>
+                    <li>Grant only the privileges required by the application.</li>
+                    <li>Store database credentials in the application’s secure configuration rather than in public files.</li>
+                    <li>Use phpMyAdmin or Adminer only through their authenticated account launch path.</li>
+                </ul>
+
+                <h2 id="user-mail-services">6. Mailboxes, Routing &amp; Webmail</h2>
+                <p>Create mailboxes, aliases, forwarders, and autoresponders under the active account. Mailbox quotas and daily sending limits are enforced by the hosting plan.</p>
+                <h3>Deliverability checklist</h3>
+                <ul>
+                    <li>Publish the required SPF, DKIM, and DMARC records for each sending domain.</li>
+                    <li>Use a valid mailbox password and avoid reusing the panel password.</li>
+                    <li>Check DNS status before troubleshooting remote delivery.</li>
+                </ul>
+
+                <h2 id="user-backups-deployments">7. Backups, Git &amp; SSL</h2>
+                <h3>Backups and restores</h3>
+                <p>Create backups before application upgrades or bulk file changes. Restores can overwrite current files and should be treated as a planned operation.</p>
+                <h3>Git deployments</h3>
+                <p>Configure a repository, branch, and deployment path, then use the deployment history to inspect commits and roll back when supported.</p>
+                <h3>SSL</h3>
+                <p>Issue or inspect SSL certificates from the website security tools. Confirm DNS points to the correct server before requesting a certificate.</p>
+
+                <h2 id="user-collaborators">8. Collaborators &amp; Account Switching</h2>
+                <p>Account owners can invite collaborators and assign scoped permissions. A collaborator may be restricted to selected websites or tools.</p>
+                <ul>
+                    <li>Switch accounts before performing an operation intended for another hosting account.</li>
+                    <li>Confirm the active username in the panel header before opening files or databases.</li>
+                    <li>Collaborator permissions are enforced by account and website scope, including Filebrowser paths.</li>
+                    <li>Revoke access when a collaborator no longer needs it.</li>
+                </ul>
+
+                <h2 id="user-suspension">9. Suspended Hosting Accounts</h2>
+                <p>When an administrator suspends the selected hosting account, the User Panel displays a clear suspension message. The panel remains available for account information and support communication, but hosting operations that modify the suspended account are blocked.</p>
+                <h3>Soft suspension</h3>
+                <p>Websites show the temporary-unavailability page while the account’s services remain running. You cannot use suspended-account operations to bypass the hold.</p>
+                <h3>Hard suspension</h3>
+                <p>The account’s complete hosting stack is turned off. Websites, databases, mail, Filebrowser, SFTP, and scheduled account services remain unavailable until an administrator unsuspends the account and the stack starts successfully.</p>
+                <h3>What to do</h3>
+                <ol>
+                    <li>Review the suspension notice in the User Panel.</li>
+                    <li>Contact the hosting administrator or support channel listed by your provider.</li>
+                    <li>Do not delete account files or attempt to change application configuration to work around the suspension.</li>
+                    <li>After administrator recovery, refresh the panel and verify the affected website and services.</li>
+                </ol>
+
+                <h2 id="user-api-security">10. API Tokens &amp; Troubleshooting</h2>
+                <p>API tokens are created under Account Settings and should be granted only the permissions required by an integration. Treat tokens like passwords, rotate them after suspected exposure, and revoke unused tokens.</p>
+                <h3>Common issues</h3>
+                <ul>
+                    <li><strong>Website unavailable:</strong> Check the dashboard warning, DNS nameservers, SSL status, and whether the account is suspended.</li>
+                    <li><strong>File Manager login screen:</strong> Reopen the tool from the User Panel so a fresh account-scoped launch token is generated.</li>
+                    <li><strong>Access denied:</strong> Confirm the active account and collaborator permissions.</li>
+                    <li><strong>Changes still processing:</strong> Check activity and job status before repeating the operation.</li>
+                </ul>
+            </section>
+
+            <!-- WORDPRESS INTEGRATION -->
+            <section id="wordpress-integration" class="docs-section">
+                <span class="badge-pill">Client Area</span>
+                <h1>WordPress Integration</h1>
+                <p>ZeroPanel includes a dedicated WordPress workflow for websites created with the App Installer or Site Builder. The <strong>WordPress Manager</strong> keeps those sites together and provides a secure shortcut into each site’s WordPress administration area.</p>
+
+                <h2>WordPress Manager</h2>
+                <p>Open <strong>WordPress Manager</strong> from the Client Area sidebar. The manager lists WordPress websites belonging to the currently selected hosting account, along with the site title, installation status, and installation date.</p>
+                <ul>
+                    <li>Use <strong>Create new WordPress website</strong> to open ZeroPanel’s existing website and WordPress installation wizard.</li>
+                    <li>Use <strong>Detect WordPress</strong> to scan hosted website document roots for existing WordPress files.</li>
+                    <li>Use <strong>Login to WordPress Admin</strong> to open the selected site’s WordPress dashboard.</li>
+                </ul>
+
+                <h2>Creating a WordPress website</h2>
+                <ol>
+                    <li>Open <strong>WordPress Manager</strong> and select <strong>Create new WordPress website</strong>.</li>
+                    <li>Choose WordPress in the installation flow, enter the domain and site details, and set the WordPress administrator credentials.</li>
+                    <li>Complete the website creation flow. ZeroPanel queues the installation and prepares the database, WordPress files, and compatibility plugin.</li>
+                    <li>Wait for the installation status to become <strong>installed</strong> before opening WordPress Admin.</li>
+                </ol>
+                <div class="callout callout-info">
+                    <div class="callout-title">DNS and SSL</div>
+                    <p>The website must resolve to the hosting account before visitors can reach WordPress. Configure the domain’s DNS and issue or verify SSL from the website tools when required.</p>
+                </div>
+
+                <h2>Detecting an existing WordPress site</h2>
+                <p><strong>Detect WordPress</strong> is intended for WordPress sites already present in a hosted document root, including sites created outside the normal installation record. ZeroPanel checks for the WordPress configuration and administration directories, registers matching sites, and installs or refreshes the ZeroPanel compatibility plugin.</p>
+                <ul>
+                    <li>Detection does not overwrite WordPress content or database data.</li>
+                    <li>The detected administrator username and email are read from ZeroPanel metadata in <code>wp-config.php</code> when available.</li>
+                    <li>If the site was moved manually and administrator metadata is unavailable, confirm the detected administrator account before using SSO.</li>
+                </ul>
+
+                <h2>Secure WordPress Admin login</h2>
+                <p>The login button creates a short-lived, signed launch token for the selected website. The compatibility plugin validates the token locally, establishes the WordPress administrator session, and redirects to <code>/wp-admin/</code>.</p>
+                <ul>
+                    <li>Each WordPress installation has its own randomly generated SSO secret.</li>
+                    <li>The secret is stored for that installation and written only to its <code>wp-config.php</code>; it is not part of the plugin source or Git repository.</li>
+                    <li>Launch tokens expire quickly and are scoped to the selected website and administrator account.</li>
+                    <li>Never copy launch URLs into tickets, logs, chat, or bookmarks. If a token may have been exposed, start a fresh login from WordPress Manager.</li>
+                </ul>
+
+                <h2>Dashboard shortcut</h2>
+                <p>When the dashboard’s selected website has a registered WordPress installation, the welcome panel displays <strong>Login to WP Admin</strong>. Change the selected website first if the shortcut is not shown.</p>
+
+                <h2>Troubleshooting</h2>
+                <ul>
+                    <li><strong>No site listed:</strong> Select the correct hosting account and run <strong>Detect WordPress</strong>.</li>
+                    <li><strong>Installation in progress:</strong> Wait for the queued installation job to complete before logging in.</li>
+                    <li><strong>Login does not complete:</strong> Confirm the domain resolves to ZeroPanel, then run detection again to refresh the compatibility plugin.</li>
+                    <li><strong>Administrator not found:</strong> Verify the administrator username or email in WordPress and update the ZeroPanel installation metadata before retrying.</li>
+                </ul>
+            </section>
+
+            <!-- CLIENT AREA API REFERENCE -->
+            <section id="client-api" class="docs-section">
+                <span class="badge-pill">Developer API</span>
+                <h1>Client Area API Reference &amp; Parameters</h1>
+                <p>ZeroPanel provides a clean REST API for managing websites, DNS records, databases, mailboxes, cron jobs, files, SSL, and monitoring resource usage using API keys or Bearer JWT tokens.</p>
+
+                <h3>1. Authentication &amp; Headers</h3>
+                <p>Client panel users can generate API keys under <strong>Account Settings &gt; API Tokens</strong> inside the Client Area (port <code>8000</code>). Generated tokens have the prefix <code>mp_</code> (e.g., <code>mp_a1b2c3d4...</code>).</p>
+                <div class="code-block-wrapper">
+                    <pre><code># Option A: Bearer Header (Recommended)
+Authorization: Bearer mp_YOUR_API_KEY
+
+# Option B: Custom Header
+X-API-Key: mp_YOUR_API_KEY
+
+# Option C: Query Parameter
+GET /api/client/websites?api_key=mp_YOUR_API_KEY
+
+# Optional Account Scope Switcher Header (for multi-account users)
+X-Hosting-Account-ID: 2</code></pre>
+                </div>
+
+                <h3>2. Code Snippets</h3>
+                <h4>cURL Example</h4>
+                <div class="code-block-wrapper">
+                    <pre><code># Create a new website
+curl -X POST "http://your-server:8000/api/client/websites" \
+     -H "Authorization: Bearer mp_YOUR_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"domain": "mysite.com", "php_version": "8.3"}'</code></pre>
+                </div>
+
+                <h4>Python Example</h4>
+                <div class="code-block-wrapper">
+                    <pre><code>import requests
+
+API_KEY = "mp_YOUR_API_KEY"
+BASE_URL = "http://your-server:8000"
+headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+# Add a new DNS A-record
+payload = {
+    "domain_id": 1,
+    "name": "sub",
+    "type": "A",
+    "value": "127.0.0.1",
+    "ttl": 300,
+    "proxied": True
+}
+res = requests.post(f"{BASE_URL}/api/client/dns-records", headers=headers, json=payload)
+print(res.json())</code></pre>
+                </div>
+
+                <h3>3. Complete Client Endpoint &amp; Parameter Reference</h3>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Method &amp; Endpoint</th>
+                                <th>Description</th>
+                                <th>Parameters &amp; Payload Fields</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Overview & Monitoring -->
+                            <tr>
+                                <td><code>GET /api/client/home</code></td>
+                                <td>Account overview, quotas, and resource summary</td>
+                                <td><em>None</em> (Optional query: <code>account_id</code>)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/resource-usage</code></td>
+                                <td>CPU, Memory, Disk, and Inode trend metrics</td>
+                                <td>Query: <code>range</code> (<code>30m</code> | <code>24h</code> | <code>7d</code> | <code>30d</code>)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/recalculate-usage</code></td>
+                                <td>Trigger immediate disk and inode usage recalculation</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/analytics</code></td>
+                                <td>Web access and bandwidth analytics</td>
+                                <td>Query: <code>website_id</code> (int), <code>range</code> (<code>24h</code> | <code>7d</code> | <code>30d</code>)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/php-info</code></td>
+                                <td>Fetch PHP configuration for a website</td>
+                                <td>Query: <code>website_id</code> (required, int)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/sync-jobs</code></td>
+                                <td>List background stack sync jobs for account</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Websites -->
+                            <tr>
+                                <td><code>GET /api/client/websites</code></td>
+                                <td>List all websites on account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/websites</code></td>
+                                <td>Create a new website</td>
+                                <td>
+                                    <code>domain</code> (string, required)<br>
+                                    <code>php_version</code> (string: <code>"8.1"</code>, <code>"8.2"</code>, <code>"8.3"</code>)<br>
+                                    <code>document_root</code> (string, optional)<br>
+                                    <code>index_enabled</code> (bool, default true)<br>
+                                    <code>modsec_enabled</code> (bool, default true)<br>
+                                    <code>analytics_enabled</code> (bool, default true)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/websites/{id}</code></td>
+                                <td>Update website settings</td>
+                                <td>
+                                    <code>php_version</code> (string)<br>
+                                    <code>index_enabled</code> (bool)<br>
+                                    <code>modsec_enabled</code> (bool)<br>
+                                    <code>analytics_enabled</code> (bool)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/websites/{id}</code></td>
+                                <td>Delete website and document root</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/websites/{id}/connection-check</code></td>
+                                <td>Test website OLS &amp; PHP-FPM connectivity</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/php-versions</code></td>
+                                <td>List supported server PHP versions</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Domains & DNS -->
+                            <tr>
+                                <td><code>GET /api/client/domains</code></td>
+                                <td>List account domains</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/dns/check-domain</code></td>
+                                <td>Check domain DNS availability &amp; Cloudflare zone status</td>
+                                <td><code>domain</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/nameservers</code></td>
+                                <td>Update domain registrar nameservers</td>
+                                <td><code>nameservers</code> (array of strings, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/dns/rebuild</code></td>
+                                <td>Rebuild and publish authoritative DNS zone</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/dns/verify-nameservers</code></td>
+                                <td>Verify nameservers resolution via public DNS</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/domains/{id}/dns/export</code></td>
+                                <td>Export DNS zone file in BIND format</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/dns/migrate-provider</code></td>
+                                <td>Migrate DNS provider (Local vs Cloudflare)</td>
+                                <td>
+                                    <code>provider_key</code> (string: <code>"local-dev-dns"</code>, <code>"cloudflare"</code>)<br>
+                                    <code>cloudflare_account_id</code> (int, required if Cloudflare)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/dns-records</code></td>
+                                <td>List DNS records</td>
+                                <td>Query: <code>domain_id</code> (optional int filter)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/dns-records</code></td>
+                                <td>Add a DNS record</td>
+                                <td>
+                                    <code>domain_id</code> (int, required)<br>
+                                    <code>name</code> (string, required e.g., <code>"sub"</code> or <code>"@"</code>)<br>
+                                    <code>type</code> (string: <code>"A"</code>, <code>"AAAA"</code>, <code>"CNAME"</code>, <code>"MX"</code>, <code>"TXT"</code>, <code>"NS"</code>, <code>"SRV"</code>)<br>
+                                    <code>value</code> / <code>content</code> (string, required)<br>
+                                    <code>ttl</code> (int, default 300)<br>
+                                    <code>priority</code> (int, optional for MX/SRV)<br>
+                                    <code>proxied</code> (bool, optional for Cloudflare)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/dns-records/{id}</code></td>
+                                <td>Update existing DNS record</td>
+                                <td><code>name</code>, <code>type</code>, <code>value</code>, <code>ttl</code>, <code>priority</code>, <code>proxied</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/dns-records/{id}</code></td>
+                                <td>Delete a DNS record</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Databases -->
+                            <tr>
+                                <td><code>GET /api/client/databases</code></td>
+                                <td>List MySQL / MariaDB databases</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/databases</code></td>
+                                <td>Create a MySQL database</td>
+                                <td><code>name</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/databases/{id}</code></td>
+                                <td>Delete a MySQL database</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/database-users</code></td>
+                                <td>List MySQL database users</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/database-users</code></td>
+                                <td>Create a MySQL user</td>
+                                <td>
+                                    <code>username</code> (string, required)<br>
+                                    <code>password</code> (string, minimum 8 characters)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/database-users/{id}</code></td>
+                                <td>Change MySQL user password</td>
+                                <td><code>password</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/database-users/{id}</code></td>
+                                <td>Delete a MySQL user</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/database-grants</code></td>
+                                <td>Grant MySQL user database privileges</td>
+                                <td>
+                                    <code>database_id</code> (int, required)<br>
+                                    <code>user_id</code> (int, required)<br>
+                                    <code>privileges</code> (string, default <code>"ALL"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/database-grants/{id}</code></td>
+                                <td>Revoke database user grant</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/pg-databases</code></td>
+                                <td>List PostgreSQL databases</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/pg-databases</code></td>
+                                <td>Create a PostgreSQL database</td>
+                                <td><code>name</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/pg-databases/{id}</code></td>
+                                <td>Delete a PostgreSQL database</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Email / Mailboxes -->
+                            <tr>
+                                <td><code>GET /api/client/mailboxes</code></td>
+                                <td>List email mailboxes</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/mailboxes</code></td>
+                                <td>Create an email mailbox</td>
+                                <td>
+                                    <code>email</code> (string, required e.g., <code>"user@domain.com"</code>)<br>
+                                    <code>password</code> (string, minimum 8 characters)<br>
+                                    <code>quota_mb</code> (int, default 1024)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/mailboxes/{id}</code></td>
+                                <td>Update mailbox password/quota</td>
+                                <td>
+                                    <code>password</code> (string, optional)<br>
+                                    <code>quota_mb</code> (int, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/mailboxes/{id}</code></td>
+                                <td>Delete an email mailbox</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/mail-forwarders</code></td>
+                                <td>List email forwarders</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/mail-forwarders</code></td>
+                                <td>Create an email forwarder</td>
+                                <td>
+                                    <code>source_email</code> (string, required)<br>
+                                    <code>destination_email</code> (string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/mail-forwarders/{id}</code></td>
+                                <td>Delete an email forwarder</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- SSH & FTP -->
+                            <tr>
+                                <td><code>GET /api/client/ssh</code></td>
+                                <td>Get SSH access status &amp; connection details</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssh/toggle</code></td>
+                                <td>Enable or disable SSH shell access</td>
+                                <td><code>enabled</code> (bool, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssh/password</code></td>
+                                <td>Change account SSH / SFTP password</td>
+                                <td><code>password</code> (string, minimum 8 characters)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/ftp-accounts</code></td>
+                                <td>List custom FTP accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ftp-accounts</code></td>
+                                <td>Create a custom FTP account</td>
+                                <td>
+                                    <code>username</code> (string, required)<br>
+                                    <code>password</code> (string, minimum 8 characters)<br>
+                                    <code>path</code> (string, relative directory path)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/ftp-accounts/{id}</code></td>
+                                <td>Delete an FTP account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/files/launch</code></td>
+                                <td>Generate single sign-on URL for File Manager</td>
+                                <td>Query: <code>path</code> (optional directory path)</td>
+                            </tr>
+
+                            <!-- Cron Jobs, SSL, Security & Tools -->
+                            <tr>
+                                <td><code>GET /api/client/cron-jobs</code></td>
+                                <td>List scheduled cron jobs</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/cron-jobs</code></td>
+                                <td>Create a scheduled cron job</td>
+                                <td>
+                                    <code>schedule</code> (string, standard 5-part cron syntax e.g. <code>"0 * * * *"</code>)<br>
+                                    <code>command</code> (string, required e.g. <code>"php /home/public_html/cron.php"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/cron-jobs/{id}</code></td>
+                                <td>Delete a cron job</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssl/issue</code></td>
+                                <td>Issue Let's Encrypt SSL certificate for a website</td>
+                                <td><code>website_id</code> (int, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssl/custom</code></td>
+                                <td>Install custom SSL certificate</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>certificate</code> (PEM string, required)<br>
+                                    <code>private_key</code> (PEM string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/backups</code></td>
+                                <td>List website backup archives</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/backups</code></td>
+                                <td>Create a full website backup archive</td>
+                                <td><code>website_id</code> (int, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/hotlink-protection</code></td>
+                                <td>Configure image hotlink protection</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>enabled</code> (bool, required)<br>
+                                    <code>allowed_domains</code> (array of strings)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ip-blocking</code></td>
+                                <td>Configure IP blocking rules</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>blocked_ips</code> (array of IP strings)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/directory-privacy</code></td>
+                                <td>Password protect a website directory (.htpasswd)</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>path</code> (string, relative directory path)<br>
+                                    <code>username</code> (string, required)<br>
+                                    <code>password</code> (string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/api-tokens</code></td>
+                                <td>List generated Client API keys</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/api-tokens</code></td>
+                                <td>Generate a new Client API key</td>
+                                <td><code>name</code> (string, required descriptive label)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/api-tokens/{id}</code></td>
+                                <td>Revoke/delete a Client API key</td>
+                                <td><em>None</em></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- ADMIN AREA API -->
+            <section id="admin-api" class="docs-section">
+                <span class="badge-pill">System API</span>
+                <h1>Admin Area API Documentation</h1>
+                <p>The Admin Area API provides full administrative control over ZeroPanel, including client provisioning, hosting plan configuration, cluster node registration, DNS settings, incident management, storage cleanup, and system audit logs.</p>
+
+                <div class="callout callout-info">
+                    <div class="callout-title">Authentication &amp; Granular Permission Scopes</div>
+                    <p>Authenticate requests by passing an Admin API Token or session JWT in the <code>Authorization</code> header:<br>
+                    <code>Authorization: Bearer mp_admin_1a2b3c4d...</code><br><br>
+                    Admin API Tokens support granular permission scopes to restrict API capabilities. The available scopes are:</p>
+                </div>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Permission Scope</th>
+                                <th>Access Rights</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>*</code></td>
+                                <td>Full Superadmin privileges across all administrative endpoints.</td>
+                            </tr>
+                            <tr>
+                                <td><code>clients.manage</code></td>
+                                <td>Manage client accounts, hosting accounts, and hosting plans.</td>
+                            </tr>
+                            <tr>
+                                <td><code>hosting.manage</code></td>
+                                <td>Manage cluster nodes, account container stacks, and server infrastructure.</td>
+                            </tr>
+                            <tr>
+                                <td><code>dns.manage</code></td>
+                                <td>Manage DNS providers (PowerDNS/Cloudflare), domain assignments, and registrars.</td>
+                            </tr>
+                            <tr>
+                                <td><code>system.manage</code></td>
+                                <td>Manage platform health status, incidents, storage cleanup, default page, and audit logs.</td>
+                            </tr>
+                            <tr>
+                                <td><code>admins.manage</code></td>
+                                <td>Manage administrative users, admin passwords, and Admin API Tokens.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>Admin API Endpoint Reference</h3>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Endpoint</th>
+                                <th>Description &amp; Scope</th>
+                                <th>Required &amp; Optional Parameters</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Dashboard -->
+                            <tr>
+                                <td><code>GET /api/admin/dashboard</code></td>
+                                <td>Get platform metrics, account counts, node status, and job logs.<br><small style="color: var(--brand);">Scope: Any Admin</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <!-- Clients -->
+                            <tr>
+                                <td><code>GET /api/admin/clients</code></td>
+                                <td>List all registered client users &amp; account stacks.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/clients</code></td>
+                                <td>Create a new client user account.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td>
+                                    <code>email</code> (string, required valid email)<br>
+                                    <code>password</code> (string, required min 8 chars)<br>
+                                    <code>full_name</code> (string, optional)<br>
+                                    <code>plan_id</code> (int, optional for immediate account stack creation)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/clients/{id}</code></td>
+                                <td>Update client user profile or account status.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td>
+                                    <code>email</code> (string, optional)<br>
+                                    <code>full_name</code> (string, optional)<br>
+                                    <code>status</code> (string: <code>"active"</code> or <code>"suspended"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/clients/{id}</code></td>
+                                <td>Delete a client user account and purge all hosting stacks.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <!-- Hosting Accounts -->
+                            <tr>
+                                <td><code>POST /api/admin/hosting-accounts</code></td>
+                                <td>Provision a new hosting account for a client.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td>
+                                    <code>user_id</code> (int, required client ID)<br>
+                                    <code>plan_id</code> (int, required plan ID)<br>
+                                    <code>node_id</code> (int, required cluster node ID)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/hosting-accounts/{id}</code></td>
+                                <td>Change hosting account plan or DNS provider.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td>
+                                    <code>plan_id</code> (int, optional)<br>
+                                    <code>dns_provider</code> (string, optional e.g. <code>"cloudflare"</code>)<br>
+                                    <code>dns_provider_account_id</code> (int, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/hosting-accounts/{id}</code></td>
+                                <td>Deprovision and delete a hosting account stack.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <!-- Plans -->
+                            <tr>
+                                <td><code>GET /api/admin/plans</code></td>
+                                <td>List all hosting plans.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/plans</code></td>
+                                <td>Create a new hosting plan.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td>
+                                    <code>name</code> (string, required e.g. <code>"Pro Business"</code>)<br>
+                                    <code>slug</code> (string, required e.g. <code>"pro-business"</code>)<br>
+                                    <code>max_websites</code> (int, required limit)<br>
+                                    <code>storage_mb</code> (int, required disk limit in MB)<br>
+                                    <code>bandwidth_mb</code> (int, required bandwidth limit in MB)<br>
+                                    <code>max_databases</code> (int, required limit)<br>
+                                    <code>max_mailboxes</code> (int, required limit)<br>
+                                    <code>allow_api_access</code> (bool, optional, default <code>false</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/plans/{id}</code></td>
+                                <td>Edit an existing hosting plan.<br><small style="color: var(--brand);">Scope: clients.manage</small></td>
+                                <td>
+                                    <code>name</code> (string, optional)<br>
+                                    <code>max_websites</code> (int, optional)<br>
+                                    <code>storage_mb</code> (int, optional)<br>
+                                    <code>bandwidth_mb</code> (int, optional)<br>
+                                    <code>max_databases</code> (int, optional)<br>
+                                    <code>max_mailboxes</code> (int, optional)<br>
+                                    <code>allow_api_access</code> (bool, optional)
+                                </td>
+                            </tr>
+                            <!-- Nodes -->
+                            <tr>
+                                <td><code>GET /api/admin/nodes</code></td>
+                                <td>List cluster nodes.<br><small style="color: var(--brand);">Scope: hosting.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/nodes</code></td>
+                                <td>Register a new server cluster node.<br><small style="color: var(--brand);">Scope: hosting.manage</small></td>
+                                <td>
+                                    <code>name</code> (string, required node label)<br>
+                                    <code>hostname</code> (string, required IP or hostname)<br>
+                                    <code>quota_backend</code> (string, optional e.g. <code>"dev-simulator"</code>)
+                                </td>
+                            </tr>
+                            <!-- DNS & Domains -->
+                            <tr>
+                                <td><code>GET /api/admin/dns-settings</code></td>
+                                <td>Get default DNS provider configuration.<br><small style="color: var(--brand);">Scope: dns.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/dns-settings</code></td>
+                                <td>Update default DNS provider credentials.<br><small style="color: var(--brand);">Scope: dns.manage</small></td>
+                                <td>
+                                    <code>provider</code> (string: <code>"local_powerdns"</code> or <code>"cloudflare"</code>)<br>
+                                    <code>cloudflare_account_id</code> (string, optional)<br>
+                                    <code>cloudflare_api_token</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/domains</code></td>
+                                <td>List registered domains &amp; subdomains.<br><small style="color: var(--brand);">Scope: dns.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/domains</code></td>
+                                <td>Register or assign a domain to a client user.<br><small style="color: var(--brand);">Scope: dns.manage</small></td>
+                                <td>
+                                    <code>domain</code> (string, required FQDN)<br>
+                                    <code>user_id</code> (int, required client ID)<br>
+                                    <code>account_id</code> (int, optional hosting account ID)<br>
+                                    <code>registrar_provider_id</code> (int, optional)
+                                </td>
+                            </tr>
+                            <!-- Admin Management & API Tokens -->
+                            <tr>
+                                <td><code>GET /api/admin/admins</code></td>
+                                <td>List administrative user accounts.<br><small style="color: var(--brand);">Scope: admins.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/admins</code></td>
+                                <td>Create a new administrative user.<br><small style="color: var(--brand);">Scope: admins.manage</small></td>
+                                <td>
+                                    <code>email</code> (string, required valid email)<br>
+                                    <code>password</code> (string, required min 8 chars)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/admins/{id}/password</code></td>
+                                <td>Reset an admin account password.<br><small style="color: var(--brand);">Scope: admins.manage</small></td>
+                                <td><code>password</code> (string, required new password)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/api-tokens</code></td>
+                                <td>List generated Admin API Tokens.<br><small style="color: var(--brand);">Scope: admins.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/api-tokens</code></td>
+                                <td>Generate a new Admin API Token with granular permissions.<br><small style="color: var(--brand);">Scope: admins.manage</small></td>
+                                <td>
+                                    <code>name</code> (string, required descriptive label)<br>
+                                    <code>permissions</code> (array of scope strings e.g. <code>["clients.manage", "hosting.manage"]</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/api-tokens/{id}</code></td>
+                                <td>Revoke/delete an Admin API Token.<br><small style="color: var(--brand);">Scope: admins.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <!-- Status & Incidents -->
+                            <tr>
+                                <td><code>GET /api/admin/status</code></td>
+                                <td>Get system component status &amp; operational metrics.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/status/components/{id}</code></td>
+                                <td>Override component health status.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td>
+                                    <code>status</code> (string: <code>"operational"</code>, <code>"degraded"</code>, <code>"partial_outage"</code>, <code>"major_outage"</code>, <code>"maintenance"</code>)<br>
+                                    <small style="color: var(--muted);">Supports ID <code>"queue-worker"</code> for system worker daemon override.</small>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/status/incidents</code></td>
+                                <td>List incidents with nested live update feeds.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/status/incidents</code></td>
+                                <td>Publish a new platform incident report.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td>
+                                    <code>title</code> (string, required incident title)<br>
+                                    <code>severity</code> (string: <code>"minor"</code>, <code>"major"</code>, <code>"critical"</code>)<br>
+                                    <code>state</code> (string: <code>"investigating"</code>, <code>"identified"</code>, <code>"monitoring"</code>, <code>"resolved"</code>)<br>
+                                    <code>message</code> (string, required initial update note)<br>
+                                    <code>published</code> (bool, optional, default <code>true</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/status/incidents/{id}/updates</code></td>
+                                <td>Post a progress update note &amp; change incident status.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td>
+                                    <code>state</code> (string: <code>"investigating"</code>, <code>"identified"</code>, <code>"monitoring"</code>, <code>"resolved"</code>)<br>
+                                    <code>message</code> (string, required progress note text)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/status/incidents/{id}</code></td>
+                                <td>Delete an incident report &amp; timeline update logs.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <!-- System & Storage Operations -->
+                            <tr>
+                                <td><code>GET /api/admin/storage/df</code></td>
+                                <td>Get filesystem mount capacities &amp; disk usage.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/storage/quotas</code></td>
+                                <td>Get storage &amp; inode utilization breakdown per client account.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/storage/paths</code></td>
+                                <td>Get disk utilization breakdown across key system directories.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/storage/cleanup</code></td>
+                                <td>Trigger system storage cleanup operation.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td>
+                                    <code>clean_docker</code> (bool, optional, default <code>true</code>)<br>
+                                    <code>clean_logs</code> (bool, optional, default <code>true</code>)<br>
+                                    <code>clean_tmp</code> (bool, optional, default <code>true</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/system/default-page</code></td>
+                                <td>Get web server fallback default HTML template.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/system/default-page</code></td>
+                                <td>Save custom default page HTML content.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><code>default_page_content</code> (string, required HTML content)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/system/default-page/reset</code></td>
+                                <td>Reset default page HTML to system default template.<br><small style="color: var(--brand);">Scope: system.manage</small></td>
+                                <td><em>None</em></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- RESELLER AREA API -->
+            <section id="reseller-api" class="docs-section">
+                <span class="badge-pill">Reseller API</span>
+                <h1>Reseller Area API Documentation</h1>
+                <p>The Reseller Area API provides full programmatic control over sub-client accounts, custom sub-plan creation, hosting stack provisioning, storage quota monitoring, and API key management on Port <code>8002</code>.</p>
+
+                <div class="callout callout-info">
+                    <div class="callout-title">Authentication &amp; Reseller Key Scope</div>
+                    <p>Authenticate requests by passing a Reseller API Token or Reseller Session JWT in the <code>Authorization</code> header:<br>
+                    <code>Authorization: Bearer mp_reseller_1a2b3c4d...</code><br><br>
+                    Reseller API endpoints are served on Port <code>8002</code> and automatically enforce the reseller's master package limits. Sub-plan limits and aggregate storage allocations are validated in real time against master plan caps.</p>
+                </div>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Enforcement Rule</th>
+                                <th>System Behavior</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>Package Limit Capping</code></td>
+                                <td>When creating a custom sub-plan (<code>POST /api/reseller/plans</code>), RAM, storage, max websites, and max databases cannot exceed the master reseller plan's package limits.</td>
+                            </tr>
+                            <tr>
+                                <td><code>Aggregate Storage Cap</code></td>
+                                <td>When provisioning hosting stacks for sub-clients (<code>POST /api/reseller/hosting-accounts</code>), the total allocated storage across all sub-accounts cannot exceed the master reseller plan's total storage capacity.</td>
+                            </tr>
+                            <tr>
+                                <td><code>Max Sub-Clients &amp; Sub-Plans</code></td>
+                                <td>Sub-client creation and sub-plan creation enforce <code>max_clients</code> and <code>max_reseller_subplans</code> boundaries specified by the administrator on the master reseller plan.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>Reseller API Endpoint Reference</h3>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Endpoint Route</th>
+                                <th>Description</th>
+                                <th>Required Payload / Parameters</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>POST /api/reseller/auth/login</code></td>
+                                <td>Authenticate reseller user credentials and verify reseller status.</td>
+                                <td><code>email</code>, <code>password</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/auth/totp/verify</code></td>
+                                <td>Verify 2FA TOTP challenge code for reseller login.</td>
+                                <td><code>challenge_token</code>, <code>code</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/dashboard</code></td>
+                                <td>Fetch reseller metrics, master plan limits, and allocated storage usage.</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/clients</code></td>
+                                <td>List all sub-client accounts created under this reseller profile.</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/clients</code></td>
+                                <td>Create a new sub-client user under this reseller profile.</td>
+                                <td><code>email</code>, <code>password</code>, <code>full_name</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/reseller/clients/{id}</code></td>
+                                <td>Update sub-client details or toggle status (<code>active</code> / <code>suspended</code>).</td>
+                                <td><code>status</code>, <code>full_name</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/reseller/clients/{id}</code></td>
+                                <td>Delete a sub-client user owned by this reseller.</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/plans</code></td>
+                                <td>List all custom sub-plans created by this reseller.</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/plans</code></td>
+                                <td>Create a custom sub-plan package for sub-clients.</td>
+                                <td><code>name</code>, <code>memory_mb</code>, <code>storage_mb</code>, <code>max_websites</code>, <code>max_databases</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/hosting-accounts</code></td>
+                                <td>Provision an isolated containerized hosting stack for a sub-client.</td>
+                                <td><code>user_id</code>, <code>plan_id</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/storage/quotas</code></td>
+                                <td>View storage and inode quota breakdown for all sub-client accounts.</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/api-tokens</code></td>
+                                <td>List active Reseller API Tokens (<code>mp_reseller_...</code>).</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/api-tokens</code></td>
+                                <td>Generate a new Reseller API Token for automated management.</td>
+                                <td><code>name</code>, <code>permissions</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/reseller/api-tokens/{id}</code></td>
+                                <td>Revoke an active Reseller API Token.</td>
+                                <td><em>None</em></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <script>
+        // Sidebar Navigation Active Link Highlight on Scroll
+        const sections = document.querySelectorAll('.docs-section');
+        const navLinks = document.querySelectorAll('.nav-menu li a');
+
+        window.addEventListener('scroll', () => {
+            let current = '';
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop - 100;
+                if (pageYOffset >= sectionTop) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            navLinks.forEach(link => {
+                link.classList.remove('active');
+                if (link.getAttribute('href') === `#${current}`) {
+                    link.classList.add('active');
+                }
+            });
+        });
+
+        // Filter Sidebar Nav via Search Input
+        function filterDocsNav() {
+            const input = document.getElementById('menu-search').value.toLowerCase();
+            const items = document.querySelectorAll('.nav-menu li');
+            items.forEach(item => {
+                const text = item.textContent.toLowerCase();
+                item.style.display = text.includes(input) ? '' : 'none';
+            });
+        }
+    </script>
+</body>
+</html>

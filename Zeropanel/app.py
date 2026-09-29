@@ -1,0 +1,15630 @@
+import json
+import base64
+import logging
+import hashlib
+import ipaddress
+import os
+from email import policy as email_policy
+from email.parser import BytesParser
+import re
+import secrets
+import shutil
+import sqlite3
+import subprocess
+import threading
+import time
+import socket
+import ssl
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse, urlunparse
+
+from .agent import (
+    Agent,
+    AgentError,
+    add_server_ip,
+    assign_account_ip,
+    cron_next_run_at,
+    decorate_cron_jobs,
+    delete_server_ip,
+    get_account_storage_quotas,
+    get_df_storage,
+    get_live_cpu_io,
+    get_live_disk_io,
+    get_live_network_io,
+    get_network_overview,
+    get_path_size_breakdown,
+    get_server_ips,
+    get_storage_alert_settings,
+    get_system_cpu_history,
+    get_live_ram_io,
+    get_system_ram_history,
+    path_usage,
+    _storage_mb_with_fallback,
+    run_storage_cleanup,
+    save_storage_alert_settings,
+    update_server_ip,
+    validate_cron_schedule,
+)
+from .config import FILEBROWSER_CUSTOM_JS, load_config
+from .mail import build_mail_message_bytes, dkim_dns_value, ensure_mailbox_storage, generate_dkim_material, mailbox_storage_inode_count, mailbox_storage_path, mailbox_storage_size_bytes, mail_auth_health, move_mailbox_storage, recommended_dmarc_record, recommended_spf_record, remove_mailbox_storage, sanitize_mailbox_component, split_mailbox_address
+from .db import (
+    connect,
+    attach_analytics,
+    create_job,
+    apply_system_timezone,
+    default_system_timezone_name,
+    ensure_local_node,
+    get_system_setting,
+    init_db,
+    init_analytics_db,
+    log_activity,
+    log_audit,
+    row_to_dict,
+    rows_to_dicts,
+    seed_dev_data,
+    set_system_setting,
+    with_db_retry,
+)
+from .default_page import DEFAULT_PAGE_CONTENT
+from .providers import (
+    DNS_PROVIDER_CLOUDFLARE,
+    DNS_PROVIDER_LOCAL,
+    DNS_PROVIDER_LOCAL_POWERDNS,
+    CloudflareDNSProvider,
+    DNSProviderError,
+    LocalDNSProvider,
+    PowerDNSProvider,
+    _relative_name,
+)
+from .registrars import RegistrarError, registrar_for
+from .auto_update import execute_auto_update, get_current_commit, sync_auto_update_cron
+
+from .security import create_jwt, decrypt_secret, encrypt_secret, generate_totp_secret, hash_password, validate_git_branch, validate_git_repository_url, verify_jwt, verify_password, verify_totp
+from .backup_service import backup_config, test_remote
+from .minecraft import MinecraftError, MCJARS_TYPES, backup_path as minecraft_backup_path, console_output, create_backup as create_minecraft_backup, create_path as create_minecraft_path, delete_backup as delete_minecraft_backup, delete_path as delete_minecraft_path, get_versions as minecraft_versions, list_backups as list_minecraft_backups, list_files as list_minecraft_files, read_binary_file as read_minecraft_binary_file, read_file as read_minecraft_file, rename_path as rename_minecraft_path, restore_backup as restore_minecraft_backup, runtime_metrics as minecraft_runtime_metrics, send_command as send_minecraft_command, server_action as run_minecraft_action, update_server_settings, update_server_version, upload_files as upload_minecraft_files, write_file as write_minecraft_file
+from .store import StoreError, adjust_wallet, approve_order, catalog as store_catalog, order as store_order, plan_payload as store_plan_payload, place_order, reject_order, renew_due_orders, save_category, save_plan
+
+
+# Filebrowser performs bulk delete/move operations synchronously.  Large site
+# trees can legitimately take longer than the normal request timeout, so do
+# not report a gateway failure while the upstream operation is still running.
+FILEBROWSER_UPSTREAM_TIMEOUT = 300
+from .snappymail import request_login_session
+from .stack import DEFAULT_SSH_MOTD, build_account_runtime, sync_account_suspension_marker
+
+
+CONFIG = load_config()
+PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
+SERVICE_VAR_DIR = Path(__file__).resolve().parent.parent / "var"
+
+# Keep this list aligned with the universal Caddy probe matcher. One match is
+# enough for a short block because these are high-confidence reconnaissance paths.
+UNIVERSAL_PROBE_PATHS = (
+    "/.env*", "/.git/*", "/git/config", "/git/HEAD", "/aws/*", "/aws.json", "/aws-*",
+    "/k8s/*", "/latest/meta-data/*", "/firebase*", "/service-account*", "/google-*", "/gcp-*",
+    "/credentials*", "/config/credentials*", "/config/gcp-credentials*", "/config/aws*",
+    "/config/jenkins.xml", "/.aws/*", "/.gcloud/*", "/.github/*", "/.jenkins/*", "/jenkins/*",
+    "/jenkins/credentials.xml", "/jenkins/Jenkinsfile", "/actuator/*", "/server-status", "/cgi-bin/*",
+    "/wp-config*", "/wp-plain.php", "/atomlib.php", "/shell.php", "/ops.php", "/chosen.php",
+    "/classwithtostring.php", "/admin.php", "/file.php", "/file1.php", "/file5.php", "/file6.php",
+    "/wp-file.php", "/wp-access.php", "/wp-conflg.php", "/wp-2019.php", "/wp-content/config.php",
+    "/wp-content/plugins/hellopress/wp_filemanager.php", "/wp-content/plugins/pwnd/pwnd.php",
+    "/wp-content/plugins/pwnd-1/pwnd.php", "/wp-content/plugins/pwnd-2/pwnd.php",
+    "/wp-content/plugins/fix/up.php", "/wp-content/plugins/seoplugins/mar.php",
+    "/wp-content/themes/twenty/twenty.php", "/wp-content/themes/aahana/json.php",
+    "/wp-includes/wp-class.php", "/wp-includes/css/wp-conflg.php", "/wp-content/uploads/index.php",
+    "/ALFA_DATA/alfacgiapi/perl.alfa",
+)
+TRUSTED_CLOUDFLARE_RANGES = tuple(ipaddress.ip_network(value) for value in (
+    "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "104.16.0.0/13",
+    "104.24.0.0/14", "108.162.192.0/18", "131.0.72.0/22", "141.101.64.0/18",
+    "162.158.0.0/15", "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
+    "190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17", "2400:cb00::/32",
+    "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32",
+    "2a06:98c0::/29", "2c0f:f248::/32",
+))
+
+
+def _probe_path_matches(path):
+    path = str(path or "").split("?", 1)[0]
+    return any(path.startswith(pattern[:-1]) if pattern.endswith("*") else path == pattern
+               for pattern in UNIVERSAL_PROBE_PATHS)
+
+
+def _header_value(headers, name):
+    for key, value in (headers or {}).items():
+        if str(key).lower() == name.lower():
+            if isinstance(value, list):
+                value = value[0] if value else ""
+            return str(value).split(",", 1)[0].strip()
+    return ""
+
+
+def _public_ip(value):
+    try:
+        address = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return None
+    if any((address.is_private, address.is_loopback, address.is_reserved,
+            address.is_unspecified, address.is_multicast)):
+        return None
+    return str(address)
+
+
+def _probe_log_entry(line):
+    try:
+        entry = json.loads(line)
+        request = entry.get("request") or {}
+        path = request.get("uri", "")
+        if not _probe_path_matches(path):
+            return None
+        host = str(request.get("host", "")).split(":", 1)[0].lower().rstrip(".")
+        if not host:
+            return None
+        remote_ip = _public_ip(request.get("remote_ip", ""))
+        try:
+            remote_address = ipaddress.ip_address(request.get("remote_ip", ""))
+        except ValueError:
+            remote_address = None
+        cf_ip = _public_ip(_header_value(request.get("headers"), "cf-connecting-ip"))
+        trusted_proxy = remote_address and any(remote_address in network for network in TRUSTED_CLOUDFLARE_RANGES)
+        client_ip = cf_ip if trusted_proxy else remote_ip
+        return (host, client_ip, str(path).split("?", 1)[0]) if client_ip else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def start_probe_block_monitor(config):
+    """Turn one universal probe hit into a five-minute client IP rule."""
+    if not shutil.which("docker"):
+        return None
+
+    def loop():
+        seen = set()
+        while True:
+            try:
+                log_result = subprocess.run(
+                    ["docker", "logs", "--since", "10s", "--tail", "500", "Zeropanel-caddy"],
+                    capture_output=True, text=True, timeout=8,
+                )
+                output = log_result.stdout + log_result.stderr
+                hits = []
+                for line in output.splitlines():
+                    hit = _probe_log_entry(line)
+                    if hit and hit not in seen:
+                        seen.add(hit)
+                        hits.append(hit)
+                if len(seen) > 10000:
+                    seen.clear()
+
+                now = int(time.time())
+                with connect(config.db_path) as conn:
+                    expired = conn.execute(
+                        "SELECT id, account_id FROM ip_rules WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                        (now,),
+                    ).fetchall()
+                    expired_accounts = {int(row["account_id"]) for row in expired}
+                    if expired:
+                        conn.executemany("DELETE FROM ip_rules WHERE id = ?", [(row["id"],) for row in expired])
+                        for account_id in expired_accounts:
+                            enqueue_agent_job(conn, "sync_ip_rules", "hosting_account", account_id, {"reason": "probe_block_expired"})
+
+                    for host, client_ip, path in hits:
+                        website = conn.execute(
+                            "SELECT account_id FROM websites WHERE lower(domain) = ? LIMIT 1", (host,)
+                        ).fetchone()
+                        if not website and host.startswith("www."):
+                            website = conn.execute(
+                                "SELECT account_id FROM websites WHERE lower(domain) = ? LIMIT 1", (host[4:],)
+                            ).fetchone()
+                        if not website:
+                            continue
+                        account_id = int(website["account_id"])
+                        allowed = conn.execute(
+                            "SELECT 1 FROM ip_rules WHERE account_id = ? AND ip = ? AND type = 'allow' LIMIT 1",
+                            (account_id, client_ip),
+                        ).fetchone()
+                        if allowed:
+                            continue
+                        expires_at = now + 300
+                        existing = conn.execute(
+                            "SELECT id, source FROM ip_rules WHERE account_id = ? AND ip = ?",
+                            (account_id, client_ip),
+                        ).fetchone()
+                        if existing and existing["source"] == "manual":
+                            continue
+                        if existing:
+                            conn.execute(
+                                "UPDATE ip_rules SET type = 'block', expires_at = ?, source = 'automatic_probe', reason = ? WHERE id = ?",
+                                (expires_at, path, existing["id"]),
+                            )
+                        else:
+                            conn.execute(
+                                "INSERT INTO ip_rules(account_id, ip, type, expires_at, source, reason) VALUES (?, ?, 'block', ?, 'automatic_probe', ?)",
+                                (account_id, client_ip, expires_at, path),
+                            )
+                        rule = conn.execute(
+                            "SELECT id FROM ip_rules WHERE account_id = ? AND ip = ?", (account_id, client_ip)
+                        ).fetchone()
+                        log_audit(conn, "system", 0, "automatic_probe_ip_block", "ip_rule", rule["id"], client_ip,
+                                  {"host": host, "path": path, "expires_at": expires_at})
+                        enqueue_agent_job(conn, "sync_ip_rules", "hosting_account", account_id, {"reason": "automatic_probe", "ip": client_ip})
+            except Exception as exc:
+                logging.getLogger(__name__).warning("probe block monitor error: %s", exc)
+            time.sleep(5)
+
+    thread = threading.Thread(target=loop, name="Zeropanel-probe-blocks", daemon=True)
+    thread.start()
+    return thread
+FEATURE_STATUS = {
+    "dashboard": {"status": "functional", "label": "Functional"},
+    "wordpress-manager": {"status": "functional", "label": "Functional"},
+    "installer": {"status": "functional", "label": "Functional"},
+    "hosting-plan": {"status": "functional", "label": "Functional"},
+    "performance": {"status": "read_only", "label": "Read only"},
+    "analytics": {"status": "functional", "label": "Functional"},
+    "security": {"status": "functional", "label": "Functional"},
+    "domains": {"status": "functional", "label": "Functional"},
+    "website": {"status": "functional", "label": "Functional"},
+    "files": {"status": "functional", "label": "Functional"},
+    "databases": {"status": "functional", "label": "Functional"},
+    "email": {"status": "functional", "label": "Functional"},
+    "cron-jobs": {"status": "functional", "label": "Functional"},
+    "backups": {"status": "functional", "label": "Functional"},
+    "git": {"status": "functional", "label": "Functional"},
+    "ssh-access": {"status": "read_only", "label": "Read only"},
+    "php-configuration": {"status": "functional", "label": "Functional"},
+    "dns-zone-editor": {"status": "functional", "label": "Functional"},
+    "php-info": {"status": "read_only", "label": "Read only"},
+    "cache-manager": {"status": "functional", "label": "Functional"},
+    "password-protect-directories": {"status": "functional", "label": "Functional"},
+    "ip-manager": {"status": "functional", "label": "Functional"},
+    "hotlink-protection": {"status": "functional", "label": "Functional"},
+    "folder-index-manager": {"status": "functional", "label": "Functional"},
+    "fix-file-ownership": {"status": "functional", "label": "Functional"},
+    "services": {"status": "functional", "label": "Functional"},
+    "activity": {"status": "read_only", "label": "Read only"},
+    "settings": {"status": "functional", "label": "Functional"},
+    "redirects": {"status": "functional", "label": "Functional"},
+    "disk-usage": {"status": "read_only", "label": "Read only"},
+    "modsecurity": {"status": "functional", "label": "Functional"},
+    "mysql-database-wizard": {"status": "functional", "label": "Functional"},
+    "api-tokens": {"status": "functional", "label": "Functional"},
+    "two-factor-auth": {"status": "functional", "label": "Functional"},
+    "ftp-accounts": {"status": "functional", "label": "Functional"},
+    "images": {"status": "functional", "label": "Functional"},
+    "remote-mysql": {"status": "functional", "label": "Functional"},
+    "postgresql-databases": {"status": "functional", "label": "Functional"},
+    "postgresql-database-wizard": {"status": "functional", "label": "Functional"},
+    "site-builder": {"status": "functional", "label": "Functional"},
+    "ssl-tls": {"status": "functional", "label": "Functional"},
+    "visitors": {"status": "read_only", "label": "Read only"},
+    "errors": {"status": "read_only", "label": "Read only"},
+    "bandwidth": {"status": "read_only", "label": "Read only"},
+    "raw-access": {"status": "read_only", "label": "Read only"},
+    "webalizer": {"status": "disabled", "label": "Unavailable"},
+    "resource-usage": {"status": "read_only", "label": "Read only"},
+    "phppgadmin": {"status": "disabled", "label": "Unavailable"},
+}
+
+MAILPIT_BRAND_SVG = """<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 128 128\" role=\"img\" aria-label=\"ZeroPanel\">
+  <rect x=\"8\" y=\"8\" width=\"112\" height=\"112\" rx=\"28\" fill=\"#0f172a\"/>
+  <path d=\"M34 90V38h14l16 24 16-24h14v52H80V64l-16 22-16-22v26z\" fill=\"#f59e0b\"/>
+  <circle cx=\"94\" cy=\"34\" r=\"8\" fill=\"#34d399\"/>
+</svg>"""
+
+WEBMAIL_LOGIN_MAX_FAILURES = 5
+WEBMAIL_LOGIN_WINDOW_SECONDS = 10 * 60
+WEBMAIL_LOGIN_LOCK_SECONDS = 15 * 60
+AUTH_ATTEMPT_WINDOW_SECONDS = 5 * 60
+AUTH_ATTEMPT_MAX_FAILURES = 5
+DNS_RECORD_TYPES = {"A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"}
+DNS_PROVIDER_KEYS = {DNS_PROVIDER_LOCAL_POWERDNS, DNS_PROVIDER_CLOUDFLARE}
+DEFAULT_DNS_RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"]
+
+
+def normalize_public_host(value):
+    """Validate the base hostname used for account edge routes and URLs."""
+    host = str(value or "").strip().lower().rstrip(".")
+    if not host or len(host) > 253 or "://" in host or "/" in host or ":" in host:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_public_host")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if any(not label or len(label) > 63 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) for label in labels):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_public_host")
+    return host
+
+
+class ApiError(Exception):
+    def __init__(self, status, message):
+        self.status = status
+        self.message = message
+
+
+def auth_ip(conn, handler):
+    return client_ip(handler) or "unknown"
+
+
+def check_auth_rate_limit(conn, handler, actor_type):
+    ip = auth_ip(conn, handler)
+    row = conn.execute("SELECT * FROM auth_attempts WHERE ip_address = ? AND actor_type = ?", (ip, actor_type)).fetchone()
+    now = int(time.time())
+    if not row:
+        return
+    if int(row["blocked_until"] or 0) > now:
+        raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "authentication_temporarily_blocked")
+    if actor_type != "admin" and now - int(row["window_started_at"] or 0) < AUTH_ATTEMPT_WINDOW_SECONDS and int(row["failures"] or 0) >= AUTH_ATTEMPT_MAX_FAILURES:
+        raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "too_many_auth_attempts")
+
+
+def record_auth_failure(conn, handler, actor_type):
+    ip = auth_ip(conn, handler)
+    now = int(time.time())
+    row = conn.execute("SELECT * FROM auth_attempts WHERE ip_address = ? AND actor_type = ?", (ip, actor_type)).fetchone()
+    if not row or (actor_type != "admin" and now - int(row["window_started_at"] or 0) >= AUTH_ATTEMPT_WINDOW_SECONDS):
+        failures, window_started, block_seconds = 1, now, 0
+    else:
+        failures = int(row["failures"] or 0) + 1
+        window_started = int(row["window_started_at"] or now)
+        block_seconds = int(row["block_seconds"] or 0)
+
+    blocked_until = int(row["blocked_until"] or 0) if row else 0
+    last_alert = int(row["last_alert_at"] or 0) if row else 0
+
+    if actor_type == "admin":
+        if failures >= 3 and (not blocked_until or now >= blocked_until):
+            if block_seconds == 0:
+                block_seconds = 180
+            else:
+                block_seconds = block_seconds * 2
+            blocked_until = now + block_seconds
+            log_audit(
+                conn,
+                "security",
+                None,
+                "admin_authentication_alert",
+                "ip_address",
+                None,
+                metadata={"ip": ip, "block_seconds": block_seconds, "failures": failures},
+            )
+            last_alert = now
+
+    conn.execute(
+        """
+        INSERT INTO auth_attempts(ip_address, actor_type, window_started_at, failures, blocked_until, block_seconds, last_alert_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ip_address, actor_type) DO UPDATE SET
+          window_started_at=excluded.window_started_at,
+          failures=excluded.failures,
+          blocked_until=excluded.blocked_until,
+          block_seconds=excluded.block_seconds,
+          last_alert_at=excluded.last_alert_at
+        """,
+        (ip, actor_type, window_started, failures, blocked_until, block_seconds, last_alert),
+    )
+
+
+def clear_auth_attempts(conn, handler, actor_type):
+    ip = auth_ip(conn, handler)
+    conn.execute("DELETE FROM auth_attempts WHERE ip_address = ? AND actor_type = ?", (ip, actor_type))
+
+
+def is_user_reseller(conn, user_id):
+    # New architecture: user has is_reseller flag or is assigned a reseller plan
+    new_arch = conn.execute(
+        "SELECT id FROM users WHERE id = ? AND (is_reseller = 1 OR reseller_plan_id IS NOT NULL)",
+        (user_id,)
+    ).fetchone()
+    if new_arch:
+        return True
+    # Legacy architecture: user has an active hosting account on a reseller plan
+    legacy = conn.execute(
+        """
+        SELECT p.is_reseller
+        FROM hosting_accounts ha
+        JOIN plans p ON ha.plan_id = p.id
+        WHERE ha.user_id = ? AND ha.status = 'active' AND p.is_reseller = 1
+        LIMIT 1
+        """,
+        (user_id,)
+    ).fetchone()
+    return legacy is not None
+
+
+def require_admin_permission(actor, permission):
+    if not isinstance(actor, dict):
+        raise ApiError(HTTPStatus.FORBIDDEN, "insufficient_admin_permissions")
+    if "permissions" in actor and isinstance(actor["permissions"], list):
+        perms = set(actor["permissions"])
+        if "*" in perms or "all" in perms or permission in perms:
+            return True
+        parent_scope = permission.split(".")[0] + ".*" if "." in permission else ""
+        if parent_scope and parent_scope in perms:
+            return True
+        raise ApiError(HTTPStatus.FORBIDDEN, "insufficient_admin_permissions")
+
+    role = actor.get("role", "support_admin")
+    if role == "super_admin":
+        return True
+    permissions_by_role = {
+        "system_admin": {"clients.manage", "hosting.manage", "dns.manage", "billing.manage", "system.manage"},
+        "support_admin": {"clients.read", "hosting.read", "dns.read"},
+    }
+    allowed = permissions_by_role.get(role, set())
+    if permission not in allowed:
+        raise ApiError(HTTPStatus.FORBIDDEN, "insufficient_admin_permissions")
+    return True
+
+
+def sync_cloudflare_acme_rules(conn, config, website_id=None, account_id=None):
+    query = """
+        SELECT w.id AS website_id, w.account_id, w.domain, d.dns_provider, d.dns_provider_account_id,
+               c.encrypted_secret, da.external_account_id
+        FROM websites w
+        LEFT JOIN domains d ON d.linked_website_id = w.id
+        LEFT JOIN dns_provider_accounts da ON da.id = d.dns_provider_account_id
+        LEFT JOIN dns_provider_credentials c ON c.provider_account_id = da.id
+        WHERE w.status != 'deleted'
+    """
+    params = []
+    if website_id:
+        query += " AND w.id = ?"
+        params.append(website_id)
+    if account_id:
+        query += " AND w.account_id = ?"
+        params.append(account_id)
+
+    rows = conn.execute(query, params).fetchall()
+    results = []
+    for r in rows:
+        domain = r["domain"]
+        dns_provider = r["dns_provider"]
+        provider_account_id = r["dns_provider_account_id"]
+        secret = r["encrypted_secret"] if "encrypted_secret" in r.keys() else None
+        ext_id = r["external_account_id"] if "external_account_id" in r.keys() else None
+
+        if dns_provider != DNS_PROVIDER_CLOUDFLARE or not provider_account_id:
+            acc_row = conn.execute(
+                """
+                SELECT a.*, c.encrypted_secret
+                FROM dns_provider_accounts a
+                JOIN dns_providers p ON p.id = a.provider_id
+                LEFT JOIN dns_provider_credentials c ON c.provider_account_id = a.id
+                WHERE p.key = 'cloudflare'
+                ORDER BY a.id DESC LIMIT 1
+                """
+            ).fetchone()
+            if acc_row:
+                dns_provider = DNS_PROVIDER_CLOUDFLARE
+                secret = acc_row["encrypted_secret"]
+                ext_id = acc_row["external_account_id"]
+            else:
+                results.append({"website_id": r["website_id"], "domain": domain, "status": "skipped", "reason": "not_cloudflare"})
+                continue
+
+        if not secret:
+            results.append({"website_id": r["website_id"], "domain": domain, "status": "skipped", "reason": "no_secret"})
+            continue
+
+        try:
+            token = decrypt_secret(secret, config.jwt_secret)
+            if not token:
+                results.append({"website_id": r["website_id"], "domain": domain, "status": "skipped", "reason": "invalid_secret"})
+                continue
+            cf = CloudflareDNSProvider(token, account_id=ext_id, api_base=config.cloudflare_api_base)
+            rule_res = cf.ensure_acme_rule(domain)
+            results.append({"website_id": r["website_id"], "domain": domain, "rule_result": rule_res})
+        except Exception as exc:
+            results.append({"website_id": r["website_id"], "domain": domain, "status": "error", "error": str(exc)})
+
+    return results
+
+
+
+
+
+def get_cookie_domain(host_header):
+    if not host_header:
+        return ""
+    host = host_header.split(":")[0].lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return ""
+    if host.endswith(".localhost"):
+        return ".localhost"
+    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host):
+        return ""
+    if re.match(r"^(?:files|pma|mail)[-.]", host):
+        return ""
+    parts = host.split(".")
+    if len(parts) >= 2:
+        return "." + ".".join(parts[-2:])
+    return ""
+
+
+def is_request_https(headers):
+    if not headers:
+        return False
+    proto = headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+    ssl = headers.get("X-Forwarded-Ssl", "").strip().lower()
+    return proto == "https" or ssl == "on"
+
+
+def auth_cookie_header(token, host_header, max_age=None, is_https=False):
+    cookie_domain = get_cookie_domain(host_header)
+    domain_attr = f"; Domain={cookie_domain}" if cookie_domain else ""
+    ttl = CONFIG.token_ttl_seconds if max_age is None else max_age
+    secure = "; Secure" if is_https else ""
+    return f"mp_client_token={token}; Path=/; Max-Age={ttl}; HttpOnly; SameSite=Lax{secure}{domain_attr}"
+
+
+def auth_cookie_headers(token, host_header, is_https=False):
+    cookie_domain = get_cookie_domain(host_header)
+    if cookie_domain == ".localhost":
+        return [
+            f"mp_client_token={token}; Path=/; Max-Age={CONFIG.token_ttl_seconds}; HttpOnly; SameSite=Lax; Domain=localhost",
+            f"mp_client_token={token}; Path=/; Max-Age={CONFIG.token_ttl_seconds}; HttpOnly; SameSite=Lax; Domain=.localhost",
+        ]
+    return [auth_cookie_header(token, host_header, CONFIG.token_ttl_seconds, is_https=is_https)]
+
+
+def tool_access_cookie_headers(token, host_header, is_https=False):
+    """Use a separate host cookie so panel and tool sessions cannot collide."""
+    return named_cookie_headers("mp_tool_token", token, host_header, 600, is_https=is_https)
+
+
+def named_cookie_header(name, token, host_header, max_age=None, is_https=False):
+    cookie_domain = get_cookie_domain(host_header)
+    domain_attr = f"; Domain={cookie_domain}" if cookie_domain else ""
+    ttl = CONFIG.token_ttl_seconds if max_age is None else max_age
+    secure = "; Secure" if (CONFIG.env == "production" and is_https) else ""
+    return f"{name}={token}; Path=/; Max-Age={ttl}; HttpOnly; SameSite=Lax{secure}{domain_attr}"
+
+
+def named_cookie_headers(name, token, host_header, max_age=None, is_https=False):
+    cookie_domain = get_cookie_domain(host_header)
+    ttl = CONFIG.token_ttl_seconds if max_age is None else max_age
+    if cookie_domain == ".localhost":
+        return [
+            f"{name}={token}; Path=/; Max-Age={ttl}; HttpOnly; SameSite=Lax; Domain=localhost",
+            f"{name}={token}; Path=/; Max-Age={ttl}; HttpOnly; SameSite=Lax; Domain=.localhost",
+        ]
+    return [named_cookie_header(name, token, host_header, ttl, is_https=is_https)]
+
+
+def expired_auth_cookie_header(host_header):
+    cookie_domain = get_cookie_domain(host_header)
+    domain_attr = f"; Domain={cookie_domain}" if cookie_domain else ""
+    return f"mp_client_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax{domain_attr}"
+
+
+def expired_auth_cookie_headers(host_header):
+    cookie_domain = get_cookie_domain(host_header)
+    if cookie_domain == ".localhost":
+        return [
+            "mp_client_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax; Domain=localhost",
+            "mp_client_token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax; Domain=.localhost",
+        ]
+    return [expired_auth_cookie_header(host_header)]
+
+
+def expired_named_cookie_headers(name, host_header):
+    cookie_domain = get_cookie_domain(host_header)
+    if cookie_domain == ".localhost":
+        return [
+            f"{name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax; Domain=localhost",
+            f"{name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax; Domain=.localhost",
+        ]
+    domain_attr = f"; Domain={cookie_domain}" if cookie_domain else ""
+    return [f"{name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax{domain_attr}"]
+
+
+def normalize_account_relative_path(account, raw_path, label="path", allow_empty=False):
+    base_path = Path(account["base_path"]).resolve()
+    text = str(raw_path or "").strip()
+    if not text:
+        if allow_empty:
+            return base_path, ""
+        raise ApiError(HTTPStatus.BAD_REQUEST, "{}_required".format(label))
+    candidate = (base_path / text.lstrip("/")).resolve()
+    try:
+        rel = candidate.relative_to(base_path)
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_{}".format(label)) from exc
+    relative = "" if str(rel) == "." else rel.as_posix()
+    return candidate, relative
+
+
+def resolve_container_ip(container_name):
+    try:
+        res = subprocess.run(
+            ["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if res.returncode == 0:
+            ips = res.stdout.strip().split()
+            if ips:
+                return ips[0]
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def extract_magic_launch_token(forwarded_uri):
+    if not forwarded_uri:
+        return None
+    parsed = urlparse(forwarded_uri)
+    path = parsed.path if parsed.scheme else forwarded_uri
+    match = re.search(r"/auth/(?P<token>[A-Za-z0-9._-]{20,})(?:/|$)", path)
+    return match.group("token") if match else None
+
+
+def strip_magic_launch_segment(forwarded_uri):
+    if not forwarded_uri:
+        return "/"
+    parsed = urlparse(forwarded_uri)
+    path = parsed.path if parsed.scheme else forwarded_uri
+    cleaned = re.sub(r"/auth/[A-Za-z0-9._-]{20,}", "", path, count=1)
+    return cleaned or "/"
+
+
+def build_tool_redirect_url(host, path, is_https=False):
+    host = host or "localhost"
+    if not path.startswith("/"):
+        path = "/" + path
+    scheme = "https" if is_https else "http"
+    return f"{scheme}://{host}{path}"
+
+
+def resolve_tool_launch_url(tool_name, runtime_url, account, forwarded_host, is_https=False):
+    forwarded_host = (forwarded_host or "").strip()
+    acc_dict = dict(account) if account else {}
+    username = acc_dict.get("username", "user")
+    prefix = "files" if tool_name == "filebrowser" else ("pma" if tool_name == "phpmyadmin" else ("adminer" if tool_name == "adminer" else "mail"))
+
+    # Determine if a non-local public host is configured
+    public_host = (CONFIG.public_host or "").strip()
+    if not public_host or public_host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+        if acc_dict.get("public_host") and str(acc_dict.get("public_host")).strip() not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+            public_host = str(acc_dict["public_host"]).strip()
+    has_public_host = bool(public_host and public_host not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"})
+
+    def canonical_public_url(host):
+        if tool_name == "webmail":
+            return f"https://mail.{username}.{host}/webmail"
+        return f"https://{prefix}-{username}.{host}"
+
+    if not forwarded_host:
+        if has_public_host:
+            return canonical_public_url(public_host)
+        return runtime_url or ""
+
+    host_part = forwarded_host.split(":")[0].lower()
+
+    # Local development / loopback access (e.g. unit tests or SSH port-forward):
+    # If a real public host is configured, prefer it over unrouteable .localhost.
+    # Otherwise, preserve runtime_url for local development and unit tests.
+    if host_part in {"127.0.0.1", "localhost", "::1"}:
+        if has_public_host:
+            return canonical_public_url(public_host)
+        return runtime_url or ""
+
+    is_ip = bool(re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host_part))
+    if is_ip:
+        if has_public_host:
+            return canonical_public_url(public_host)
+        scheme = "https" if is_https else "http"
+        return f"{scheme}://{forwarded_host}"
+
+    # Accessed via domain name:
+    domain_base = host_part
+    if host_part.startswith("panel.") or host_part.startswith("admin."):
+        domain_base = host_part.split(".", 1)[1]
+    elif host_part.startswith(f"{prefix}-") or host_part.startswith("files-") or host_part.startswith("pma-") or host_part.startswith("adminer-") or host_part.startswith("mail-"):
+        domain_base = host_part.split(".", 1)[1] if "." in host_part else host_part
+    elif host_part.startswith(f"{prefix}.") or host_part.startswith("files.") or host_part.startswith("pma.") or host_part.startswith("adminer.") or host_part.startswith("mail."):
+        domain_base = host_part.split(".", 2)[2] if host_part.count(".") >= 2 else host_part
+
+    if tool_name == "webmail":
+        return f"https://mail.{username}.{domain_base}/webmail"
+
+    subdomain = f"{prefix}-{username}.{domain_base}"
+    scheme = "http" if subdomain.endswith(".localhost") or subdomain == "localhost" else "https"
+    return f"{scheme}://{subdomain}"
+
+
+def inject_filebrowser_custom_js(html: str) -> str:
+    if not html or "/files/custom.js" in html:
+        return html
+
+    for pattern in ["</head>", "</HEAD>"]:
+        if pattern in html:
+            return html.replace(pattern, '<script src="/files/custom.js"></script>' + pattern, 1)
+
+    if "<body" in html.lower():
+        return re.sub(r"(<body[^>]*>)", r"\1<script src=\"/files/custom.js\"></script>", html, count=1, flags=re.IGNORECASE)
+
+    return html + '<script src="/files/custom.js"></script>'
+
+
+def ensure_server_ssl_cert(cert_path=None, key_path=None):
+    cert_p = Path(cert_path or CONFIG.ssl_cert_path)
+    key_p = Path(key_path or CONFIG.ssl_key_path)
+    if cert_p.exists() and key_p.exists():
+        return cert_p, key_p
+
+    cert_p.parent.mkdir(parents=True, exist_ok=True)
+    key_p.parent.mkdir(parents=True, exist_ok=True)
+
+    openssl = shutil.which("openssl")
+    if openssl:
+        subprocess.run(
+            [
+                openssl,
+                "req",
+                "-x509",
+                "-nodes",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-days",
+                "3650",
+                "-subj",
+                "/CN=Zeropanel-admin",
+                "-keyout",
+                str(key_p),
+                "-out",
+                str(cert_p),
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return cert_p, key_p
+
+
+class MangoDualServer(ThreadingHTTPServer):
+    def __init__(self, server_address, RequestHandlerClass, ssl_cert_path=None, ssl_key_path=None, enable_ssl=None, bind_and_activate=True):
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
+        self.ssl_context = None
+        should_enable = CONFIG.enable_ssl if enable_ssl is None else enable_ssl
+        if should_enable:
+            try:
+                cert_p, key_p = ensure_server_ssl_cert(ssl_cert_path, ssl_key_path)
+                if cert_p.exists() and key_p.exists():
+                    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    ctx.load_cert_chain(certfile=str(cert_p), keyfile=str(key_p))
+                    self.ssl_context = ctx
+            except Exception as e:
+                print(f"Warning: Failed to initialize SSL context: {e}")
+
+    def get_request(self):
+        return self.socket.accept()
+
+
+class MangoHandler(BaseHTTPRequestHandler):
+    server_version = "ZeroPanel/0.1"
+
+    def setup(self):
+        self.connection = self.request
+        ssl_ctx = getattr(self.server, "ssl_context", None)
+        if ssl_ctx:
+            try:
+                self.connection.settimeout(2.0)
+                first_byte = self.connection.recv(1, socket.MSG_PEEK)
+                if first_byte == b"\x16":
+                    self.connection = ssl_ctx.wrap_socket(self.connection, server_side=True)
+                    self.request = self.connection
+                self.connection.settimeout(None)
+            except Exception:
+                try:
+                    self.connection.settimeout(None)
+                except Exception:
+                    pass
+        super().setup()
+
+    @property
+    def is_https(self):
+        if isinstance(getattr(self, "connection", None), ssl.SSLSocket):
+            return True
+        return is_request_https(self.headers)
+
+    def log_message(self, fmt, *args):
+        print("{} - {}".format(self.address_string(), fmt % args))
+
+    def do_GET(self):
+        self.dispatch("GET")
+
+    def do_POST(self):
+        self.dispatch("POST")
+
+    def do_PATCH(self):
+        self.dispatch("PATCH")
+
+    def do_PUT(self):
+        self.dispatch("PUT")
+
+    def do_DELETE(self):
+        self.dispatch("DELETE")
+
+    def dispatch(self, method):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        # Filebrowser uses a trailing slash on POST resource paths to mean
+        # "create directory".  Keep it intact when forwarding filebrowser
+        # requests; otherwise the upstream interprets the request as an
+        # empty-file upload.
+        if parsed.path.endswith("/") and (
+            parsed.path.startswith("/files/")
+            or parsed.path.startswith("/api/public/filebrowser/proxy/")
+        ):
+            path = parsed.path
+        self.query_params = parse_qs(parsed.query)
+        panel = getattr(self.server, "panel", "combined")
+
+        try:
+            if method == "GET" and (path in {"/", "/client"} or path.startswith("/client/")):
+                if panel == "reseller":
+                    return self.serve_file(PUBLIC_DIR / "reseller.html")
+                return self.serve_file(PUBLIC_DIR / "client.html")
+            if method == "GET" and (path in {"/home", "/home.html"} or path.startswith("/home/")):
+                if panel == "reseller":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+                return self.serve_file(PUBLIC_DIR / "client.html")
+            if method == "GET" and (path in {"/store", "/store.html"} or path.startswith("/store/")):
+                if panel == "reseller":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+                return self.serve_file(PUBLIC_DIR / "client.html")
+            if method == "GET" and (path in {"/reseller", "/reseller.html"} or path.startswith("/reseller/")):
+                if panel == "client":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+                return self.serve_file(PUBLIC_DIR / "reseller.html")
+            if path == "/signup":
+                return self.serve_file(PUBLIC_DIR / "signup.html")
+            if method == "GET" and (path in {"/login", "/login.html"}):
+                forwarded_host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(":")[0].strip().lower()
+                if forwarded_host.startswith("files-") or forwarded_host.startswith("files."):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+                return self.serve_file(PUBLIC_DIR / "login.html")
+            if method == "GET" and (path in {"/webmail", "/webmail.html"} or path.startswith("/webmail/login")):
+                if panel == "admin":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+                if path.startswith("/webmail/login"):
+                    return self.webmail_direct_login(path)
+                launch_token = self.query_params.get("launch", [""])[0].strip()
+                if launch_token:
+                    return self.webmail_launch_redirect(launch_token)
+                if path == "/webmail.html":
+                    return self.serve_file(PUBLIC_DIR / "webmail.html")
+                return self.redirect_response("/")
+            if path == "/admin/setup":
+                if panel == "client":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+                # The first-admin wizard is only valid for a fresh database.
+                # Do not expose a misleading setup form on configured panels.
+                if admin_count() != 0:
+                    return self.redirect_response("/admin")
+                return self.serve_file(PUBLIC_DIR / "admin_setup.html")
+            if path == "/admin":
+                if panel == "client":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+                if admin_count() == 0:
+                    return self.serve_file(PUBLIC_DIR / "admin_setup.html")
+                return self.serve_file(PUBLIC_DIR / "admin.html")
+            if path in {"/admin/plans", "/admin/default-page", "/admin/default_page"}:
+                if panel == "client":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "not_found")
+                if admin_count() == 0:
+                    return self.serve_file(PUBLIC_DIR / "admin_setup.html")
+                target = "default-page" if "default" in path else "plans"
+                return self.redirect_response(f"/admin#{target}")
+            if path in {"/docs", "/docs.html", "/docs/"}:
+                return self.serve_file(PUBLIC_DIR / "docs.html")
+            if path == "/status":
+                return self.serve_file(PUBLIC_DIR / "status.html")
+            if path == "/assets/admin.css":
+                return self.serve_file(PUBLIC_DIR / "assets" / "app.css")
+            if path.startswith("/assets/"):
+                return self.serve_file(PUBLIC_DIR / path.lstrip("/"))
+            if path == "/health":
+                return self.json_response({"status": "ok", "service": "Zeropanel-api"})
+
+            if path.startswith("/api/") or path.startswith("/auth/") or path.startswith("/files/"):
+                return with_db_retry(lambda: self.route_api(method, path, self.query_params))
+
+            self.json_response({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        except ApiError as exc:
+            self.json_response({"error": exc.message}, exc.status)
+        except sqlite3.OperationalError as exc:
+            err_msg = str(exc).lower()
+            if any(k in err_msg for k in ["locked", "busy", "unable to open"]):
+                print(f"[DB BUSY] {self.path} - {exc}")
+                self.json_response(
+                    {
+                        "error": "database_busy",
+                        "detail": "Database is currently busy. Please retry in a moment.",
+                        "retry_after": 1,
+                    },
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            else:
+                import traceback
+                traceback.print_exc()
+                payload = {"error": "internal_error"}
+                if CONFIG.expose_internal_errors:
+                    payload["detail"] = str(exc)
+                self.json_response(payload, HTTPStatus.INTERNAL_SERVER_ERROR)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            payload = {"error": "internal_error"}
+            if CONFIG.expose_internal_errors:
+                payload["detail"] = str(exc)
+            self.json_response(payload, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def route_api(self, method, path, query):
+        panel = getattr(self.server, "panel", "combined")
+        if panel == "client" and path == "/api/public/admin-setup":
+            raise ApiError(HTTPStatus.NOT_FOUND, "unknown_public_route")
+        if panel == "admin" and path == "/api/public/signup":
+            raise ApiError(HTTPStatus.NOT_FOUND, "unknown_public_route")
+        if method == "POST" and path in {"/api/client/auth/exchange-impersonation", "/api/reseller/auth/exchange-impersonation"}:
+            return self.exchange_impersonation()
+        if method == "POST" and path in {"/api/client/auth/login", "/api/admin/auth/login", "/api/reseller/auth/login"}:
+            if panel == "client" and (path.startswith("/api/admin/") or path.startswith("/api/reseller/")):
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_api_route")
+            if panel == "admin" and (path.startswith("/api/client/") or path.startswith("/api/reseller/")):
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_api_route")
+            if panel == "reseller" and (path.startswith("/api/client/") or path.startswith("/api/admin/")):
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_api_route")
+            actor_type = "admin" if "/api/admin/" in path else ("reseller" if "/api/reseller/" in path else "user")
+            return self.login(actor_type)
+
+        if method == "POST" and path in {"/api/client/auth/logout", "/api/admin/auth/logout", "/api/reseller/auth/logout"}:
+            actor_type = "admin" if "/api/admin/" in path else ("reseller" if "/api/reseller/" in path else "user")
+            return self.logout(actor_type)
+        if method == "POST" and path in {"/api/client/auth/totp/verify", "/api/admin/auth/totp/verify", "/api/reseller/auth/totp/verify"}:
+            actor_type = "admin" if "/api/admin/" in path else ("reseller" if "/api/reseller/" in path else "user")
+            return self.verify_totp_challenge(actor_type)
+
+        if path.startswith("/auth/") or path.startswith("/api/public/") or path.startswith("/files/"):
+            return self.public_api(method, path)
+
+        if path.startswith("/api/public/status"):
+            return self.public_status(path)
+
+        if path.startswith("/api/client/"):
+            actor = self.require_auth("user", "admin")
+            return self.client_api(method, path, query, actor)
+
+        if path.startswith("/api/reseller/"):
+            actor = self.require_auth("reseller")
+            return self.route_reseller_api(method, path, query, actor)
+
+        if path.startswith("/api/admin/"):
+            if panel == "client":
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_api_route")
+            actor = self.require_auth("admin")
+            return self.admin_api(method, path, query, actor)
+
+        raise ApiError(HTTPStatus.NOT_FOUND, "unknown_api_route")
+
+    def public_api(self, method, path):
+        if path.startswith("/api/public/status"):
+            return self.public_status(path)
+        if path == "/api/public/mail-brand.svg" and method == "GET":
+            return self.svg_response(MAILPIT_BRAND_SVG)
+        if path == "/api/public/mail-edge/manifest" and method == "GET":
+            return self.public_mail_edge_manifest()
+        if path == "/api/public/bootstrap" and method == "GET":
+            admin_setup_required = admin_count() == 0
+            server_ip = ""
+            if admin_setup_required:
+                with connect(CONFIG.db_path) as conn:
+                    server_ip = get_host_public_ip(conn, self.headers.get("Host"))
+            return self.json_response({"admin_setup_required": admin_setup_required, "server_ip": server_ip})
+        if path == "/api/public/signup" and method == "POST":
+            body = self.read_json()
+            return self.signup_customer(body)
+        if path == "/api/public/admin-setup" and method == "POST":
+            body = self.read_json()
+            return self.setup_first_admin(body)
+        if path == "/api/public/totp/verify" and method == "POST":
+            body = self.read_json()
+            return self.verify_totp_secret(body)
+        if path == "/api/public/webmail/session" and method == "GET":
+            return self.public_webmail_session()
+        if path == "/api/public/webmail/exchange" and method == "POST":
+            return self.public_webmail_exchange()
+        if path == "/api/public/webmail/login" and method == "POST":
+            return self.public_webmail_login()
+        if path == "/api/public/webmail/messages" and method == "GET":
+            return self.public_webmail_messages()
+        if path.startswith("/api/public/webmail/messages/"):
+            if method in {"PATCH", "GET"}:
+                return self.public_webmail_message(path, method)
+        if path == "/api/public/webmail/send" and method == "POST":
+            return self.public_webmail_send()
+        if path == "/api/public/webmail/logout" and method == "POST":
+            return self.public_webmail_logout()
+        if path == "/api/public/mail-jmap" and method == "GET":
+            return self.public_mail_jmap()
+        if path in {"/files/api/usage", "/api/public/filebrowser/usage"} and method == "GET":
+            return self.serve_filebrowser_usage()
+        if path in {"/files/custom.js", "/api/public/filebrowser/custom.js"} and method == "GET":
+            return self.serve_filebrowser_custom_js()
+        if path in {"/files/api/extract", "/api/public/filebrowser/extract"} and method == "POST":
+            return self.extract_file_archive()
+        if (path.startswith("/api/public/filebrowser/proxy") or path.startswith("/files/")) and method in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}:
+            return self.public_filebrowser_proxy(path)
+        if (path.startswith("/api/public/phpmyadmin/proxy") or path.startswith("/db/")) and method in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}:
+            return self.public_phpmyadmin_proxy(path)
+        if path.startswith("/auth/") and method == "GET":
+            return self.public_tool_launch(path)
+        if path.startswith("/api/public/tool-launch/") and method == "GET":
+            return self.public_tool_launch(path)
+        if path == "/api/public/auth-verify":
+            return self.forward_auth_verify()
+        raise ApiError(HTTPStatus.NOT_FOUND, "unknown_public_route")
+
+    def public_mail_edge_manifest(self):
+        forwarded_host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(":")[0].strip().lower()
+        edge_host = shared_mail_edge_host().lower()
+        if forwarded_host and forwarded_host != edge_host:
+            raise ApiError(HTTPStatus.NOT_FOUND, "unknown_public_route")
+        with connect(CONFIG.db_path) as conn:
+            return self.json_response(shared_mail_edge_manifest(conn))
+
+    def public_tool_launch(self, path):
+        forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+        tool = None
+        if forwarded_host:
+            host_part = forwarded_host.split(":")[0]
+            if host_part.startswith("files-") or host_part.startswith("files."):
+                tool = "filebrowser"
+            elif host_part.startswith("pma-") or host_part.startswith("pma."):
+                tool = "phpmyadmin"
+            elif host_part.startswith("mail-") or host_part.startswith("mail."):
+                tool = "webmail"
+
+        token = None
+        suffix = ""
+        if path.startswith("/auth/"):
+            match = re.match(r"^/auth/(?P<token>[A-Za-z0-9._-]{20,})(?P<suffix>/.*)?$", path)
+            if not match:
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_public_route")
+            token = match.group("token")
+            suffix = match.group("suffix") or ""
+        else:
+            match = re.match(
+                r"^/api/public/tool-launch/(?P<tool>filebrowser|phpmyadmin|webmail)/auth/(?P<token>[A-Za-z0-9._-]{20,})(?P<suffix>/.*)?$",
+                path,
+            )
+            if not match:
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_public_route")
+            tool = match.group("tool")
+            token = match.group("token")
+            suffix = match.group("suffix") or ""
+
+        username = None
+        if forwarded_host:
+            host_part = forwarded_host.split(":")[0]
+            match = re.match(r"^(?:files|pma|mail)[-.](\w+)\.", host_part)
+            if match:
+                username = match.group(1)
+
+        payload = verify_jwt(token, CONFIG.jwt_secret)
+        if not payload or payload.get("purpose") != "tool_launch":
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_tool_launch")
+
+        if not tool:
+            tool = payload.get("tool")
+
+        if not tool or payload.get("tool") != tool:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_tool_launch")
+
+        actor_type = payload.get("actor_type")
+        actor_id = payload.get("sub")
+        if actor_type != "user":
+            raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+
+        if not username:
+            username = payload.get("username")
+
+        with connect(CONFIG.db_path) as conn:
+            user = conn.execute("SELECT status FROM users WHERE id = ?", (actor_id,)).fetchone()
+            if not user or user["status"] != "active":
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "inactive_user")
+
+            account = None
+            req_acc_id = payload.get("account_id")
+            if req_acc_id:
+                account = conn.execute(
+                    "SELECT * FROM hosting_accounts WHERE id = ? AND status = 'active'",
+                    (req_acc_id,),
+                ).fetchone()
+            elif username:
+                account = conn.execute(
+                    "SELECT * FROM hosting_accounts WHERE username = ? AND status = 'active'",
+                    (username,),
+                ).fetchone()
+            else:
+                account = conn.execute(
+                    "SELECT * FROM hosting_accounts WHERE user_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+                    (actor_id,),
+                ).fetchone()
+
+            if not account:
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+
+            acc_dict = dict(account)
+            if acc_dict["user_id"] != actor_id:
+                scope = get_collaborator_scope(conn, actor_id, acc_dict["id"])
+                if not scope.get("is_collaborator"):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+                if tool == "filebrowser" and scope.get("allowed_menus") is not None and "files" not in scope.get("allowed_menus", []):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "menu_access_denied")
+                if tool == "phpmyadmin" and scope.get("allowed_menus") is not None and "databases" not in scope.get("allowed_menus", []):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "menu_access_denied")
+
+            access_token = create_jwt(
+                {"sub": actor_id, "actor_type": actor_type, "purpose": "access", "jti": secrets.token_urlsafe(16)},
+                CONFIG.jwt_secret,
+                600,
+            )
+            access_payload = verify_jwt(access_token, CONFIG.jwt_secret)
+            conn.execute(
+                "INSERT INTO sessions(actor_type, actor_id, token_id, expires_at) VALUES (?, ?, ?, ?)",
+                (actor_type, actor_id, access_payload["jti"], int(time.time()) + 600),
+            )
+            redirect_host = forwarded_host
+            redirect_host_part = (redirect_host or "").split(":", 1)[0].lower()
+            is_local = redirect_host_part.endswith(".localhost") or redirect_host_part in {"127.0.0.1", "localhost", "::1"} or bool(re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", redirect_host_part))
+            default_path = ("/files" if is_local else "/files/files/") if tool == "filebrowser" else "/db/"
+            if tool == "webmail":
+                default_path = "/webmail"
+            clean_path = suffix or default_path
+            if tool == "filebrowser":
+                if suffix:
+                    s = suffix.strip("/")
+                    if is_local:
+                        clean_path = "/" + s if s.startswith("files") else "/files/" + s
+                    else:
+                        clean_path = "/files/files/" + (s[len("files/"):].lstrip("/") if s.startswith("files/") else s.lstrip("/"))
+                else:
+                    clean_path = default_path
+
+            if tool == "phpmyadmin":
+                clean_p = clean_path.rstrip("/")
+                if clean_p in {"", "/db"}:
+                    clean_path = "/db/"
+
+            # A proxy must not be allowed to turn a tool launch into a
+            # localhost URL.  In particular, some reverse-proxy chains omit
+            # X-Forwarded-Host and leave the panel's 127.0.0.1 host here.
+            # Derive the canonical public tool host from the account
+            # instead of sending that unusable host to the user's browser.
+            redirect_host_part = (redirect_host or "").split(":", 1)[0].lower()
+            prefix = "files" if tool == "filebrowser" else ("pma" if tool == "phpmyadmin" else "mail")
+            if (
+                not redirect_host_part.startswith(f"{prefix}-")
+                and not redirect_host_part.startswith(f"{prefix}.")
+                or redirect_host_part in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+            ):
+                public_host = (CONFIG.public_host or "").strip()
+                if not public_host or public_host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+                    persisted = get_system_setting(conn, "public_host", "")
+                    if persisted and str(persisted).strip() not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+                        public_host = str(persisted).strip()
+                if public_host and public_host not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+                    canonical_host = f"{prefix}-{acc_dict['username']}.{public_host}"
+                    if redirect_host_part != canonical_host:
+                        target_url = f"https://{canonical_host}/auth/{token}"
+                        if clean_path:
+                            target_url += clean_path if clean_path.startswith("/") else "/" + clean_path
+                        self.send_response(HTTPStatus.FOUND)
+                        self.send_header("Location", target_url)
+                        self.end_headers()
+                        return
+            self.send_response(HTTPStatus.FOUND)
+            cookie_headers = tool_access_cookie_headers(access_token, forwarded_host, is_https=self.is_https)
+            if tool == "webmail":
+                mail_access_token = create_jwt(
+                    {
+                        "sub": actor_id,
+                        "actor_type": actor_type,
+                        "purpose": "mail_webmail",
+                        "mailbox_id": payload.get("mailbox_id"),
+                        "account_id": payload.get("account_id"),
+                        "jti": secrets.token_urlsafe(16),
+                    },
+                    CONFIG.jwt_secret,
+                    3600,
+                )
+                cookie_headers = named_cookie_headers("mp_mail_token", mail_access_token, forwarded_host, 3600, is_https=self.is_https)
+            for cookie_header in cookie_headers:
+                self.send_header("Set-Cookie", cookie_header)
+            self.send_header("Location", build_tool_redirect_url(redirect_host, clean_path, is_https=self.is_https))
+            self.end_headers()
+            return
+
+    def serve_filebrowser_custom_js(self):
+        body = FILEBROWSER_CUSTOM_JS.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.record_access_log(HTTPStatus.OK, len(body))
+
+    def serve_filebrowser_usage(self, account=None):
+        with connect(CONFIG.db_path) as conn:
+            if not account:
+                forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+                username = None
+                if forwarded_host:
+                    match = re.match(r"^(?:files|pma|mail)[-.](\w+)\.", forwarded_host)
+                    if match:
+                        username = match.group(1)
+                if username:
+                    account = conn.execute("SELECT * FROM hosting_accounts WHERE username = ? AND status = 'active'", (username,)).fetchone()
+                if not account:
+                    account = conn.execute("SELECT * FROM hosting_accounts WHERE status = 'active' ORDER BY id ASC LIMIT 1").fetchone()
+
+            used_mb = 0
+            limit_mb = 1000
+            if account:
+                usage = conn.execute(
+                    "SELECT storage_mb, storage_limit_mb FROM resource_usage_samples WHERE account_id = ? ORDER BY sampled_at DESC LIMIT 1",
+                    (account["id"],)
+                ).fetchone()
+                used_mb = usage["storage_mb"] if usage else 0
+                limit_mb = usage["storage_limit_mb"] if usage else 0
+                if limit_mb == 0:
+                    plan = conn.execute("SELECT storage_mb FROM plans WHERE id = ?", (account["plan_id"],)).fetchone()
+                    limit_mb = plan["storage_mb"] if plan else 1000
+
+            total_bytes = int(round(limit_mb * 1024 * 1024))
+            used_bytes = int(round(used_mb * 1024 * 1024))
+            return self.json_response({"total": total_bytes, "used": used_bytes})
+
+    def public_filebrowser_proxy(self, path):
+        clean_path_raw = path.replace("/api/public/filebrowser/proxy", "") or "/files/"
+        # dispatch() passes the parsed path without its query string. Preserve
+        # Filebrowser resource-operation parameters such as action=rename and
+        # destination=... when proxying the request.
+        request_query = urlparse(self.path).query
+        clean_path_no_query = urlparse(clean_path_raw).path.rstrip("/")
+        is_login_endpoint = clean_path_no_query in {"/files/login", "/login", "/files/api/login", "/api/login"} or clean_path_no_query.endswith("/files/login") or clean_path_no_query.endswith("/api/login")
+
+        forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+        username = None
+        if forwarded_host:
+            match = re.match(r"^(?:files|pma|mail)[-.](\w+)\.", forwarded_host)
+            if match:
+                username = match.group(1)
+
+        token = None
+        cookie_header = self.headers.get("Cookie", "")
+        if cookie_header:
+            m = re.search(r'(?:^|;\s*)(?:mp_tool_token|mp_auth|mp_client_token)=([^;]+)', cookie_header)
+            if m:
+                token = m.group(1).strip()
+        if not token:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth.removeprefix("Bearer ").strip()
+
+        # Filebrowser's noauth frontend still calls POST /api/login once on
+        # startup to obtain its local JWT.  Requests reaching this proxy from
+        # the public Filebrowser host have already passed Caddy's
+        # /files forward-auth check; rejecting this bootstrap request here
+        # makes the Filebrowser SPA redirect to its login route.  Keep the
+        # endpoint available to the noauth backend and let forward-auth
+        # enforce panel authentication at the edge.
+        if is_login_endpoint and not token:
+            raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+
+        with connect(CONFIG.db_path) as conn:
+            account = None
+            if username:
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE username = ? AND status = 'active'", (username,)).fetchone()
+            if not account:
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE status = 'active' ORDER BY id ASC LIMIT 1").fetchone()
+            if not account:
+                raise ApiError(HTTPStatus.NOT_FOUND, "account_not_found")
+
+            if token:
+                payload = verify_jwt(token, CONFIG.jwt_secret)
+                if payload and payload.get("sub"):
+                    actor_id = payload["sub"]
+                    scope = get_collaborator_scope(conn, actor_id, account["id"])
+                    if scope and scope.get("is_collaborator") and scope.get("allowed_website_ids") is not None:
+                        allowed_ws = scope["allowed_website_ids"]
+                        allowed_domains = []
+                        if allowed_ws:
+                            placeholders = ",".join("?" for _ in allowed_ws)
+                            allowed_domains = [r["domain"].lower() for r in conn.execute(f"SELECT domain FROM websites WHERE account_id = ? AND id IN ({placeholders})", [account["id"], *allowed_ws]).fetchall()]
+                        
+                        import urllib.parse
+                        decoded_path = urllib.parse.unquote(path)
+                        clean_p = decoded_path.replace("/api/public/filebrowser/proxy", "").replace("/files", "")
+                        
+                        subpath = None
+                        for prefix in ["/api/resources", "/api/raw", "/api/preview"]:
+                            if clean_p.startswith(prefix):
+                                subpath = clean_p[len(prefix):] or "/"
+                                break
+
+                        if subpath is None and clean_p.startswith("/domains/"):
+                            subpath = clean_p
+
+                        if subpath is not None:
+                            subpath = "/" + subpath.lstrip("/").rstrip("/")
+                            permitted = False
+                            for dom in allowed_domains:
+                                dom_prefix = f"/domains/{dom}"
+                                if subpath == dom_prefix or subpath.startswith(f"{dom_prefix}/"):
+                                    permitted = True
+                                    break
+                            if not permitted:
+                                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_collaborator_restricted_path")
+
+            container_name = f"mp-{account['username']}-filebrowser"
+            clean_path = path.replace("/api/public/filebrowser/proxy", "") or "/files/"
+            if not clean_path.startswith("/"):
+                clean_path = "/" + clean_path
+
+            # The Filebrowser SPA requests the account root as
+            # /files/api/resources/, but the upstream canonical root API is
+            # /api/resources/. Domain resource paths already include their
+            # directory and must retain the normal /files baseURL.
+            if clean_path.rstrip("/") == "/files/api/resources":
+                clean_path = "/api/resources/"
+
+            if clean_path.rstrip("/") in {"/api/usage", "/files/api/usage"}:
+                return self.serve_filebrowser_usage(account)
+
+            container_ip = resolve_container_ip(container_name)
+            upstream_url = f"http://{container_ip}:80{clean_path}"
+            if request_query:
+                upstream_url += f"?{request_query}"
+
+            req_headers = {}
+            for k, v in self.headers.items():
+                kl = k.lower()
+                if kl not in {"host", "content-length", "x-forwarded-uri", "x-forwarded-prefix", "x-forwarded-path", "x-original-uri", "accept-encoding"}:
+                    req_headers[k] = v
+            req_headers["X-Forwarded-Uri"] = clean_path
+            req_headers["Accept-Encoding"] = "identity"
+
+            import urllib.request
+
+            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            opener = urllib.request.build_opener(NoRedirectHandler)
+            request_body = None
+            if self.command in {"POST", "PUT", "PATCH"}:
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0") or 0)
+                except (TypeError, ValueError):
+                    content_length = 0
+                if content_length > 0:
+                    request_body = self.rfile.read(content_length)
+            req = urllib.request.Request(
+                upstream_url,
+                data=request_body,
+                headers=req_headers,
+                method=self.command,
+            )
+            try:
+                resp = opener.open(req, timeout=FILEBROWSER_UPSTREAM_TIMEOUT)
+                data = resp.read()
+                status = resp.status
+                resp_headers = resp.headers
+            except urllib.error.HTTPError as e:
+                data = e.read()
+                status = e.code
+                resp_headers = e.headers
+            except Exception as e:
+                raise ApiError(HTTPStatus.BAD_GATEWAY, f"filebrowser_proxy_error: {e}")
+
+            location = resp_headers.get("Location", "")
+            if status in {301, 302, 303, 307, 308}:
+                # Filebrowser emits API redirects without its configured
+                # baseURL when resolving the account root.  Keep those
+                # redirects inside the public /files proxy route.
+                if location:
+                    parsed_location = urlparse(location)
+                    location_path = parsed_location.path or ""
+                    if location_path.startswith("/api/") or location_path in {"/login", "/login/"}:
+                        if not location_path.startswith("/files/"):
+                            parsed_location = parsed_location._replace(path=f"/files{location_path}")
+                            location = urlunparse(parsed_location)
+                            del resp_headers["Location"]
+                            resp_headers["Location"] = location
+                # Filebrowser occasionally emits the baseURL without its
+                # trailing slash.  Behind Caddy this is sent through the
+                # /files forward-auth route again and can oscillate between
+                # /files and /files/. Keep the public base URL canonical.
+                if location and urlparse(location).path.rstrip("/") == "/files":
+                    parsed_location = urlparse(location)
+                    location = urlunparse(parsed_location._replace(path="/files/"))
+                    del resp_headers["Location"]
+                    resp_headers["Location"] = location
+                if "/login" in location or location.endswith("/login"):
+                    target_url = f"http://{container_ip}:80/files/"
+                    try:
+                        resp2 = opener.open(urllib.request.Request(target_url, headers=req_headers), timeout=FILEBROWSER_UPSTREAM_TIMEOUT)
+                        data = resp2.read()
+                        status = resp2.status
+                        resp_headers = resp2.headers
+                    except Exception:
+                        pass
+
+            content_type = resp_headers.get("Content-Type", "")
+            content_encoding = (resp_headers.get("Content-Encoding") or "").lower()
+
+            if "text/html" in content_type:
+                if content_encoding == "gzip":
+                    import gzip
+                    try:
+                        data = gzip.decompress(data)
+                    except Exception:
+                        pass
+                html = data.decode("utf-8", errors="ignore")
+                data = inject_filebrowser_custom_js(html).encode("utf-8")
+
+            self.send_response(status)
+            for hk, hv in resp_headers.items():
+                if hk.lower() not in {"content-length", "transfer-encoding", "content-encoding"}:
+                    self.send_header(hk, hv)
+
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            self.record_access_log(status, len(data))
+
+    def public_phpmyadmin_proxy(self, path):
+        forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+        username = None
+        if forwarded_host:
+            match = re.match(r"^(?:files|pma|mail)[-.](\w+)\.", forwarded_host)
+            if match:
+                username = match.group(1)
+
+        token = None
+        cookie_header = self.headers.get("Cookie", "")
+        if cookie_header:
+            m = re.search(r'(?:^|;\s*)(?:mp_tool_token|mp_auth|mp_client_token)=([^;]+)', cookie_header)
+            if m:
+                token = m.group(1).strip()
+        if not token:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth.removeprefix("Bearer ").strip()
+
+        with connect(CONFIG.db_path) as conn:
+            account = None
+            if username:
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE username = ? AND status = 'active'", (username,)).fetchone()
+            if not account and token:
+                payload = verify_jwt(token, CONFIG.jwt_secret)
+                if payload and payload.get("sub"):
+                    actor_id = payload["sub"]
+                    account = conn.execute("SELECT * FROM hosting_accounts WHERE user_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1", (actor_id,)).fetchone()
+            if not account:
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE status = 'active' ORDER BY id ASC LIMIT 1").fetchone()
+            if not account:
+                raise ApiError(HTTPStatus.NOT_FOUND, "account_not_found")
+
+            container_name = f"mp-{account['username']}-phpmyadmin"
+            clean_path = path.replace("/api/public/phpmyadmin/proxy", "") or "/db/"
+            if not clean_path.startswith("/"):
+                clean_path = "/" + clean_path
+
+            request_query = urlparse(self.path).query
+            container_ip = resolve_container_ip(container_name)
+            upstream_url = f"http://{container_ip}:80{clean_path}"
+            if request_query:
+                upstream_url += f"?{request_query}"
+
+            req_headers = {}
+            for k, v in self.headers.items():
+                kl = k.lower()
+                if kl not in {"host", "content-length", "accept-encoding"}:
+                    req_headers[k] = v
+            req_headers["Accept-Encoding"] = "identity"
+
+            import urllib.request
+
+            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            opener = urllib.request.build_opener(NoRedirectHandler)
+            request_body = None
+            if self.command in {"POST", "PUT", "PATCH"}:
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0") or 0)
+                except (TypeError, ValueError):
+                    content_length = 0
+                if content_length > 0:
+                    request_body = self.rfile.read(content_length)
+            req = urllib.request.Request(
+                upstream_url,
+                data=request_body,
+                headers=req_headers,
+                method=self.command,
+            )
+            try:
+                resp = opener.open(req, timeout=10)
+                data = resp.read()
+                status = resp.status
+                resp_headers = resp.headers
+            except urllib.error.HTTPError as e:
+                data = e.read()
+                status = e.code
+                resp_headers = e.headers
+            except Exception as e:
+                raise ApiError(HTTPStatus.BAD_GATEWAY, f"phpmyadmin_proxy_error: {e}")
+
+            self.send_response(status)
+            for hk, hv in resp_headers.items():
+                if hk.lower() not in {"content-length", "transfer-encoding", "content-encoding"}:
+                    self.send_header(hk, hv)
+
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            self.record_access_log(status, len(data))
+
+    def extract_file_archive(self, account=None, actor=None):
+        body = self.read_json()
+        raw_path = body.get("path", "").strip()
+        if not raw_path:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "path_required")
+
+        with connect(CONFIG.db_path) as conn:
+            if not account:
+                forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+                username = None
+                if forwarded_host:
+                    match = re.match(r"^(?:files|pma|mail)[-.](\w+)\.", forwarded_host)
+                    if match:
+                        username = match.group(1)
+
+                if username:
+                    account = conn.execute(
+                        "SELECT * FROM hosting_accounts WHERE username = ? AND status = 'active'", (username,)
+                    ).fetchone()
+
+                if not account and actor:
+                    account = conn.execute(
+                        "SELECT * FROM hosting_accounts WHERE user_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+                        (actor["id"],),
+                    ).fetchone()
+
+                if not account:
+                    cookie_header = self.headers.get("Cookie", "")
+                    from http.cookies import SimpleCookie
+                    cookies = SimpleCookie(cookie_header)
+                    token_cookie = cookies.get("mp_client_token")
+                    if token_cookie:
+                        payload = verify_jwt(token_cookie.value, CONFIG.jwt_secret)
+                        if payload and payload.get("sub"):
+                            account = conn.execute(
+                                "SELECT * FROM hosting_accounts WHERE user_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+                                (payload["sub"],),
+                            ).fetchone()
+
+            if not account:
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+
+            clean_path = raw_path
+            if clean_path.startswith("/files/files/"):
+                clean_path = clean_path[len("/files/files/"):]
+            elif clean_path.startswith("/files/"):
+                clean_path = clean_path[len("/files/"):]
+
+            abs_path, rel_path = normalize_account_relative_path(account, clean_path)
+            abs_file = str(abs_path)
+
+            actor_id = actor["id"] if actor else None
+            if not actor_id:
+                cookie_header = self.headers.get("Cookie", "")
+                from http.cookies import SimpleCookie
+                cookies = SimpleCookie(cookie_header)
+                token_cookie = cookies.get("mp_tool_token") or cookies.get("mp_client_token") or cookies.get("mp_auth")
+                if token_cookie:
+                    payload = verify_jwt(token_cookie.value, CONFIG.jwt_secret)
+                    if payload and payload.get("sub"):
+                        actor_id = payload["sub"]
+
+            if not actor_id:
+                raise ApiError(HTTPStatus.FORBIDDEN, "authentication_required")
+
+            if account and account["user_id"] != actor_id:
+                scope = get_collaborator_scope(conn, actor_id, account["id"])
+                if not scope.get("is_collaborator"):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+                if scope.get("allowed_menus") is not None and "files" not in scope.get("allowed_menus", []):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "menu_access_denied")
+                if scope.get("allowed_website_ids") is not None:
+                    allowed_ws = scope["allowed_website_ids"]
+                    allowed_domains = []
+                    if allowed_ws:
+                        placeholders = ",".join("?" for _ in allowed_ws)
+                        allowed_domains = [r["domain"].lower() for r in conn.execute(f"SELECT domain FROM websites WHERE account_id = ? AND id IN ({placeholders})", [account["id"], *allowed_ws]).fetchall()]
+
+                    sub_p = "/" + rel_path.lstrip("/")
+                    permitted = False
+                    for dom in allowed_domains:
+                        dom_prefix = f"/domains/{dom}"
+                        if sub_p == dom_prefix or sub_p.startswith(f"{dom_prefix}/"):
+                            permitted = True
+                            break
+                    if not permitted:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_collaborator_restricted_path")
+
+            if not os.path.exists(abs_file):
+                raise ApiError(HTTPStatus.NOT_FOUND, "file_not_found")
+            if os.path.isdir(abs_file):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "path_is_a_directory")
+
+            dest_dir = os.path.realpath(os.path.dirname(abs_file))
+            account_base = os.path.realpath(account["base_path"])
+
+            extracted_count = 0
+            archive_name = os.path.basename(abs_file)
+
+            if abs_file.lower().endswith(".zip"):
+                import zipfile
+                with zipfile.ZipFile(abs_file, "r") as zf:
+                    for member in zf.infolist():
+                        target_path = os.path.realpath(os.path.join(dest_dir, member.filename))
+                        if not target_path.startswith(account_base + os.sep) and target_path != account_base:
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_path_traversal")
+                        zf.extract(member, dest_dir)
+                        extracted_count += 1
+            elif abs_file.lower().endswith((".tar.gz", ".tgz", ".tar", ".gz")):
+                import tarfile
+                with tarfile.open(abs_file, "r:*") as tf:
+                    for member in tf.getmembers():
+                        target_path = os.path.realpath(os.path.join(dest_dir, member.name))
+                        if not target_path.startswith(account_base + os.sep) and target_path != account_base:
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_path_traversal")
+                        tf.extract(member, dest_dir)
+                        extracted_count += 1
+            else:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "unsupported_archive_format")
+
+            uid = 5000 + int(account["id"])
+            gid = 5000 + int(account["id"])
+            if uid and gid:
+                try:
+                    subprocess.run(["chown", "-R", f"{uid}:{gid}", dest_dir], check=False)
+                    subprocess.run(["chmod", "-R", "a+rwX", dest_dir], check=False)
+                except Exception:
+                    pass
+                for root, dirs, files in os.walk(dest_dir):
+                    for d in dirs:
+                        try:
+                            os.chown(os.path.join(root, d), uid, gid)
+                            os.chmod(os.path.join(root, d), 0o777)
+                        except Exception:
+                            pass
+                    for f in files:
+                        try:
+                            filepath = os.path.join(root, f)
+                            os.chown(filepath, uid, gid)
+                            st_mode = os.stat(filepath).st_mode
+                            if st_mode & 0o111:
+                                os.chmod(filepath, 0o777)
+                            else:
+                                os.chmod(filepath, 0o666)
+                        except Exception:
+                            pass
+
+            # Extraction can leave files with archive-provided modes or
+            # ownership. Queue the canonical ownership/permission repair for
+            # the website containing public_html (including nested folders).
+            permission_fix_job_id = None
+            destination = Path(dest_dir).resolve()
+            websites = conn.execute(
+                "SELECT id, document_root FROM websites WHERE account_id = ?",
+                (account["id"],),
+            ).fetchall()
+            for website in websites:
+                document_root = Path(website["document_root"])
+                if not document_root.is_absolute():
+                    document_root = (Path(account["base_path"]) / document_root).resolve()
+                else:
+                    document_root = document_root.resolve()
+                if destination == document_root or str(destination).startswith(str(document_root) + os.sep):
+                    permission_fix_job_id = enqueue_agent_job(
+                        conn,
+                        "fix_file_ownership",
+                        "hosting_account",
+                        account["id"],
+                        {"website_id": website["id"]},
+                    )
+                    break
+
+            actor_id = actor["id"] if actor else account["user_id"]
+            log_activity(conn, actor_id, "archive_extracted", {"account_id": account["id"], "path": rel_path, "items_extracted": extracted_count})
+            return self.json_response({
+                "success": True,
+                "message": f"Successfully extracted {archive_name} ({extracted_count} items)",
+                "extracted_count": extracted_count,
+                "permission_fix_job_id": permission_fix_job_id,
+            })
+
+    def webmail_session_context(self):
+        from http.cookies import SimpleCookie
+        cookie_header = self.headers.get("Cookie", "")
+        cookies = SimpleCookie(cookie_header)
+        token_cookie = cookies.get("mp_mail_token")
+        token = token_cookie.value if token_cookie else None
+        if not token:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth.removeprefix("Bearer ").strip()
+        if not token:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "missing_mail_session")
+        payload = verify_jwt(token, CONFIG.jwt_secret)
+        if not payload or payload.get("purpose") != "mail_webmail":
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_mail_session")
+        mailbox_id = int(payload.get("mailbox_id") or 0)
+        if mailbox_id <= 0:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_mail_session")
+        return payload, mailbox_id
+
+    def load_webmail_mailbox(self, conn, payload, mailbox_id):
+        mailbox = conn.execute(
+            """
+            SELECT m.*, ha.username AS account_username, ha.base_path AS account_base_path,
+                   ha.id AS account_id, ha.user_id AS owner_user_id, p.daily_email_limit
+            FROM mailboxes m
+            JOIN hosting_accounts ha ON ha.id = m.account_id
+            JOIN plans p ON p.id = ha.plan_id
+            WHERE m.id = ? AND m.status = 'active' AND ha.status = 'active'
+            """,
+            (mailbox_id,),
+        ).fetchone()
+        if not mailbox:
+            raise ApiError(HTTPStatus.NOT_FOUND, "mailbox_not_found")
+        # Client launch tokens use `sub` for the user, while mail-session
+        # tokens use it for the account. Prefer the explicit account claim.
+        token_account_id = payload.get("account_id") or payload.get("sub")
+        if int(token_account_id or 0) != int(mailbox["account_id"]):
+            raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+        return mailbox
+
+    def load_mailbox_for_direct_login(self, conn, mailbox_id=None, email=None):
+        if mailbox_id:
+            mailbox = conn.execute(
+                """
+                SELECT m.*, ha.username AS account_username, ha.base_path AS account_base_path,
+                       ha.id AS account_id, ha.user_id AS owner_user_id, p.daily_email_limit
+                FROM mailboxes m
+                JOIN hosting_accounts ha ON ha.id = m.account_id
+                JOIN plans p ON p.id = ha.plan_id
+                WHERE m.id = ? AND m.status = 'active' AND ha.status = 'active'
+                """,
+                (mailbox_id,),
+            ).fetchone()
+        else:
+            mailbox = conn.execute(
+                """
+                SELECT m.*, ha.username AS account_username, ha.base_path AS account_base_path,
+                       ha.id AS account_id, ha.user_id AS owner_user_id, p.daily_email_limit
+                FROM mailboxes m
+                JOIN hosting_accounts ha ON ha.id = m.account_id
+                JOIN plans p ON p.id = ha.plan_id
+                WHERE m.email = ? AND m.status = 'active' AND ha.status = 'active'
+                """,
+                (email,),
+            ).fetchone()
+        if not mailbox:
+            raise ApiError(HTTPStatus.NOT_FOUND, "mailbox_not_found")
+        return mailbox
+
+    def snappymail_launch_url(self, conn, mailbox, password=None):
+        runtime = account_runtime(conn, mailbox["account_id"])
+        mail_host = runtime.get("mail_host") or runtime.get("mail_edge_host", "")
+        if not mail_host:
+            raise ApiError(HTTPStatus.BAD_GATEWAY, "mail_webmail_unavailable")
+        # The panel performs the SSO handoff on /webmail?launch=... and sets
+        # SnappyMail's cookies.  After that handoff the browser must land on
+        # SnappyMail itself; returning to /webmail would route back through
+        # this handler without the one-time launch token and discard the SSO
+        # session by redirecting to the panel root.
+        if mail_host.endswith(".localhost") or mail_host in {"localhost", "127.0.0.1"}:
+            return f"http://{mail_host}/webmail"
+        return f"https://{mail_host}/"
+
+    def snappymail_backend_url(self, conn, mailbox):
+        runtime = account_runtime(conn, mailbox["account_id"])
+        # Webmail sessions are account-scoped.  Never fall back to the shared
+        # mail edge, because that can land a mailbox on another account's
+        # SnappyMail instance.
+        backend_url = runtime.get("mail_webmail_backend_url") or ""
+        if backend_url:
+            return backend_url
+        mail_host = runtime.get("mail_host", "")
+        if not mail_host:
+            raise ApiError(HTTPStatus.BAD_GATEWAY, "mail_webmail_unavailable")
+        return f"http://{mail_host}"
+
+    def snappymail_login_session(self, conn, mailbox):
+        mailbox_payload = row_to_dict(mailbox)
+        password = decrypt_secret(mailbox_payload.get("password_secret") or "", CONFIG.jwt_secret)
+        if not password:
+            raise ApiError(HTTPStatus.BAD_GATEWAY, "mail_webmail_unavailable")
+        backend_url = self.snappymail_backend_url(conn, mailbox)
+        return request_login_session(backend_url, email=mailbox_payload["email"], password=password)
+
+    def redirect_response(self, location, cookies=None, status=HTTPStatus.FOUND):
+        self.send_response(status)
+        for cookie_header in cookies or []:
+            self.send_header("Set-Cookie", cookie_header)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Location", location)
+        self.end_headers()
+        return
+
+    def webmail_launch_redirect(self, launch_token):
+        payload = verify_jwt(launch_token, CONFIG.jwt_secret)
+        if not payload or payload.get("purpose") != "tool_launch" or payload.get("tool") != "webmail":
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_tool_launch")
+        mailbox_id = int(payload.get("mailbox_id") or 0)
+        account_id = int(payload.get("account_id") or 0)
+        if mailbox_id <= 0 or account_id <= 0:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_tool_launch")
+        with connect(CONFIG.db_path) as conn:
+            user = conn.execute("SELECT status FROM users WHERE id = ?", (payload.get("sub"),)).fetchone()
+            if not user or user["status"] != "active":
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "inactive_user")
+            account = conn.execute(
+                "SELECT * FROM hosting_accounts WHERE id = ? AND user_id = ? AND status = 'active'",
+                (account_id, payload.get("sub")),
+            ).fetchone()
+            if not account:
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+            mailbox = self.load_webmail_mailbox(conn, payload, mailbox_id)
+            cookies = []
+            if CONFIG.agent_mode == "docker":
+                try:
+                    session = self.snappymail_login_session(conn, mailbox)
+                    cookies = session.get("cookies") or []
+                except Exception as exc:
+                    # A mail-edge outage must not turn a valid launch token
+                    # into an opaque 500. Open webmail and let the user log
+                    # in normally while retaining the server-side detail.
+                    logging.warning(
+                        "SnappyMail SSO handoff failed for mailbox %s: %s",
+                        mailbox["id"],
+                        exc,
+                    )
+            self.redirect_response(self.snappymail_launch_url(conn, mailbox), cookies)
+        return
+
+    def webmail_direct_login(self, path):
+        mailbox_id = path_int_id(path, "/webmail/login/")
+        launch_token = self.query_params.get("launch", [""])[0].strip()
+        if launch_token:
+            return self.webmail_launch_redirect(launch_token)
+        email_raw = str(self.query_params.get("email", [""])[0] or "").strip()
+        from urllib.parse import quote
+        target_url = f"/webmail.html?mailbox_id={mailbox_id}" if mailbox_id else "/webmail.html"
+        if email_raw:
+            target_url += f"&email={quote(email_raw)}"
+        return self.redirect_response(target_url)
+
+    def webmail_login_attempt_key(self, mailbox_id=None, email=None):
+        ip = client_ip(self) or "unknown"
+        if mailbox_id:
+            target = f"mailbox:{int(mailbox_id)}"
+        elif email:
+            target = f"email:{str(email).strip().lower()}"
+        else:
+            target = "unknown"
+        return f"{target}|ip:{ip}"
+
+    def webmail_login_attempt_row(self, conn, attempt_key):
+        row = conn.execute(
+            "SELECT * FROM webmail_login_attempts WHERE attempt_key = ?",
+            (attempt_key,),
+        ).fetchone()
+        if not row:
+            return None
+        now = int(time.time())
+        first_failed_at = int(row["first_failed_at"] or 0)
+        locked_until = int(row["locked_until"] or 0)
+        if first_failed_at and now - first_failed_at > WEBMAIL_LOGIN_WINDOW_SECONDS:
+            conn.execute("DELETE FROM webmail_login_attempts WHERE attempt_key = ?", (attempt_key,))
+            return None
+        if locked_until and locked_until > now:
+            return row
+        return row
+
+    def webmail_login_failure(self, conn, attempt_key, email="", mailbox_id=None):
+        now = int(time.time())
+        row = self.webmail_login_attempt_row(conn, attempt_key)
+        attempts = int(row["attempts"] or 0) if row else 0
+        first_failed_at = int(row["first_failed_at"] or now) if row else now
+        locked_until = int(row["locked_until"] or 0) if row else 0
+        attempts += 1
+        if attempts >= WEBMAIL_LOGIN_MAX_FAILURES:
+            locked_until = now + WEBMAIL_LOGIN_LOCK_SECONDS
+        conn.execute(
+            """
+            INSERT INTO webmail_login_attempts(attempt_key, attempts, first_failed_at, last_failed_at, locked_until, last_ip, last_email, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(attempt_key) DO UPDATE SET
+              attempts = excluded.attempts,
+              first_failed_at = excluded.first_failed_at,
+              last_failed_at = excluded.last_failed_at,
+              locked_until = excluded.locked_until,
+              last_ip = excluded.last_ip,
+              last_email = excluded.last_email,
+              updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                attempt_key,
+                attempts,
+                first_failed_at,
+                now,
+                locked_until,
+                client_ip(self) or "",
+                str(email or ""),
+            ),
+        )
+        return locked_until > now
+
+    def webmail_login_clear(self, conn, attempt_key):
+        conn.execute("DELETE FROM webmail_login_attempts WHERE attempt_key = ?", (attempt_key,))
+
+    def public_webmail_session(self):
+        with connect(CONFIG.db_path) as conn:
+            payload, mailbox_id = self.webmail_session_context()
+            mailbox = self.load_webmail_mailbox(conn, payload, mailbox_id)
+            mailbox_payload = mailbox_row_payload(conn, mailbox)
+            settings = {
+                "smtp_host": mailbox_payload.get("smtp_host", ""),
+                "smtp_port": mailbox_payload.get("smtp_port", 0),
+                "smtp_tls_port": mailbox_payload.get("smtp_tls_port", 0),
+                "imap_host": mailbox_payload.get("imap_host", ""),
+                "imap_port": mailbox_payload.get("imap_port", 0),
+                "imap_tls_port": mailbox_payload.get("imap_tls_port", 0),
+                "pop_host": mailbox_payload.get("pop_host", ""),
+                "pop_port": mailbox_payload.get("pop_port", 0),
+                "pop_tls_port": mailbox_payload.get("pop_tls_port", 0),
+                "sieve_port": mailbox_payload.get("sieve_port", 0),
+                "webmail_login_url": mailbox_payload.get("mailbox_login_url", ""),
+                "webmail_url": mailbox_payload.get("webmail_url", ""),
+                "jmap_url": mailbox_payload.get("jmap_url", ""),
+                "mail_host": mailbox_payload.get("mail_host", ""),
+                "storage_path": mailbox_payload.get("storage_path", ""),
+                "storage_bytes": mailbox_payload.get("storage_bytes", 0),
+                "storage_used_percent": mailbox_payload.get("storage_used_percent", 0),
+            }
+            return self.json_response(
+                {
+                    "mailbox": mailbox_payload,
+                    "settings": settings,
+                    "daily_email_limit": int(mailbox["daily_email_limit"] or 0),
+                    "remaining_today": self.mailbox_remaining_today(conn, mailbox["id"], int(mailbox["daily_email_limit"] or 0)),
+                }
+            )
+
+    def public_webmail_exchange(self):
+        body = self.read_json()
+        launch_token = str(body.get("launch_token") or "").strip()
+        if not launch_token:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "launch_token_required")
+        payload = verify_jwt(launch_token, CONFIG.jwt_secret)
+        if not payload or payload.get("purpose") != "tool_launch" or payload.get("tool") != "webmail":
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_tool_launch")
+        mailbox_id = int(payload.get("mailbox_id") or 0)
+        account_id = int(payload.get("account_id") or 0)
+        if mailbox_id <= 0 or account_id <= 0:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_tool_launch")
+        with connect(CONFIG.db_path) as conn:
+            user = conn.execute("SELECT status FROM users WHERE id = ?", (payload.get("sub"),)).fetchone()
+            if not user or user["status"] != "active":
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "inactive_user")
+            account = conn.execute(
+                "SELECT * FROM hosting_accounts WHERE id = ? AND user_id = ? AND status = 'active'",
+                (account_id, payload.get("sub")),
+            ).fetchone()
+            if not account:
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+            mailbox = self.load_webmail_mailbox(conn, payload, mailbox_id)
+            runtime = account_runtime(conn, mailbox["account_id"])
+            launch_url = mailbox_row_payload(conn, mailbox).get("webmail_url") or f"http://{runtime.get('mail_host')}/"
+            mail_access_token = create_jwt(
+                {
+                    "sub": mailbox["account_id"],
+                    "actor_type": payload.get("actor_type"),
+                    "purpose": "mail_webmail",
+                    "mailbox_id": mailbox["id"],
+                    "account_id": account["id"],
+                    "user_id": payload.get("sub"),
+                    "jti": secrets.token_urlsafe(16),
+                },
+                CONFIG.jwt_secret,
+                3600,
+            )
+            self.send_response(HTTPStatus.OK)
+            for cookie_header in named_cookie_headers("mp_mail_token", mail_access_token, self.headers.get("Host", ""), 3600):
+                self.send_header("Set-Cookie", cookie_header)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "exchanged": True,
+                        "expires_in": 3600,
+                        "launch_url": launch_url,
+                        "email": mailbox["email"],
+                    }
+                ).encode("utf-8")
+            )
+            return
+
+    def public_webmail_login(self):
+        body = self.read_json()
+        mailbox_id_raw = body.get("mailbox_id")
+        mailbox_id = int(mailbox_id_raw or 0)
+        email_raw = str(body.get("email") or "").strip()
+        email = normalize_email(email_raw) if email_raw else ""
+        password = str(body.get("password") or "").strip()
+        if not password:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "mailbox_password_required")
+        attempt_key = self.webmail_login_attempt_key(mailbox_id=mailbox_id or None, email=email or email_raw)
+        with connect(CONFIG.db_path) as conn:
+            attempt_row = self.webmail_login_attempt_row(conn, attempt_key)
+            if attempt_row and int(attempt_row["locked_until"] or 0) > int(time.time()):
+                raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "mailbox_login_locked")
+            try:
+                mailbox = self.load_mailbox_for_direct_login(conn, mailbox_id=mailbox_id or None, email=email or None)
+                if email and normalize_email(mailbox["email"]) != email:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+                
+                authed = verify_password(password, mailbox["password_hash"])
+                if not authed:
+                    owner = conn.execute("SELECT * FROM users WHERE id = ?", (mailbox["owner_user_id"],)).fetchone()
+                    if owner and verify_password(password, owner["password_hash"]):
+                        if owner["totp_secret"]:
+                            totp_code_input = str(body.get("totp_code") or body.get("totp") or body.get("code") or "").strip()
+                            dev_bypass_ok = CONFIG.is_development and CONFIG.dev_auth_test_mode and totp_code_input == "000000"
+                            if not dev_bypass_ok and not verify_totp(owner["totp_secret"], totp_code_input):
+                                raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_totp_code")
+                        authed = True
+                if not authed:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_mailbox_credentials")
+            except ApiError as exc:
+                if exc.status in {HTTPStatus.NOT_FOUND, HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}:
+                    locked = self.webmail_login_failure(
+                        conn,
+                        attempt_key,
+                        email=email or email_raw,
+                        mailbox_id=mailbox_id or None,
+                    )
+                    if locked:
+                        raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "mailbox_login_locked") from exc
+                raise
+            runtime = account_runtime(conn, mailbox["account_id"])
+            launch_url = self.snappymail_launch_url(conn, mailbox, password=password)
+            mail_access_token = create_jwt(
+                {
+                    "sub": mailbox["account_id"],
+                    "actor_type": "user",
+                    "purpose": "mail_webmail",
+                    "mailbox_id": mailbox["id"],
+                    "account_id": mailbox["account_id"],
+                    "user_id": mailbox["owner_user_id"],
+                    "jti": secrets.token_urlsafe(16),
+                },
+                CONFIG.jwt_secret,
+                3600,
+            )
+            self.webmail_login_clear(conn, attempt_key)
+            self.send_response(HTTPStatus.OK)
+            for cookie_header in named_cookie_headers("mp_mail_token", mail_access_token, self.headers.get("Host", ""), 3600):
+                self.send_header("Set-Cookie", cookie_header)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "logged_in": True,
+                        "expires_in": 3600,
+                        "launch_url": launch_url,
+                        "email": mailbox["email"],
+                        "mailbox": mailbox_row_payload(conn, mailbox),
+                    }
+                ).encode("utf-8")
+            )
+            return
+
+    def mailbox_remaining_today(self, conn, mailbox_id, limit):
+        row = conn.execute("SELECT sent_today_count, sent_today_on FROM mailboxes WHERE id = ?", (mailbox_id,)).fetchone()
+        if not row:
+            return 0
+        today = time.strftime("%Y-%m-%d")
+        if str(row["sent_today_on"] or "") != today:
+            return limit
+        remaining = limit - int(row["sent_today_count"] or 0)
+        return remaining if remaining > 0 else 0
+
+    def public_webmail_messages(self):
+        with connect(CONFIG.db_path) as conn:
+            payload, mailbox_id = self.webmail_session_context()
+            mailbox = self.load_webmail_mailbox(conn, payload, mailbox_id)
+            qp = getattr(self, "query_params", {})
+            folder = str((qp.get("folder") or ["all"])[0]).strip().lower()
+            search = str((qp.get("q") or [""])[0]).strip().lower()
+            page = max(1, positive_int((qp.get("page") or ["1"])[0], "invalid_page", minimum=1, maximum=100000))
+            limit = positive_int((qp.get("limit") or ["20"])[0], "invalid_limit", minimum=1, maximum=100)
+            offset = (page - 1) * limit
+            params = [mailbox["id"]]
+            where = ["mailbox_id = ?"]
+            if folder and folder != "all":
+                where.append("folder = ?")
+                params.append(folder)
+            if search:
+                where.append("(lower(subject) LIKE ? OR lower(sender_email) LIKE ? OR lower(body_preview) LIKE ?)")
+                needle = f"%{search}%"
+                params.extend([needle, needle, needle])
+            where_sql = " AND ".join(where)
+            total = conn.execute(f"SELECT COUNT(*) AS count FROM mail_messages WHERE {where_sql}", tuple(params)).fetchone()["count"]
+            unread = conn.execute(
+                "SELECT COUNT(*) AS count FROM mail_messages WHERE mailbox_id = ? AND folder = 'inbox' AND is_read = 0",
+                (mailbox["id"],),
+            ).fetchone()["count"]
+            rows = conn.execute(
+                f"""
+                SELECT * FROM mail_messages
+                WHERE {where_sql}
+                ORDER BY datetime(created_at) DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params + [limit, offset]),
+            ).fetchall()
+            messages = rows_to_dicts(rows)
+            for message in messages:
+                message["recipients"] = parse_json_field(message.get("recipients_json"), [])
+                message["headers"] = parse_json_field(message.get("headers_json"), {})
+            return self.json_response(
+                {
+                    "messages": messages,
+                    "mailbox": mailbox_row_payload(conn, mailbox),
+                    "folder": folder or "inbox",
+                    "query": search,
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "has_more": offset + len(messages) < total,
+                    "unread_count": unread,
+                }
+            )
+
+    def public_webmail_message(self, path, method):
+        with connect(CONFIG.db_path) as conn:
+            payload, mailbox_id = self.webmail_session_context()
+            mailbox = self.load_webmail_mailbox(conn, payload, mailbox_id)
+            message_id = path_int_id(path, "/api/public/webmail/messages/")
+            message = conn.execute(
+                "SELECT * FROM mail_messages WHERE id = ? AND mailbox_id = ?",
+                (message_id, mailbox["id"]),
+            ).fetchone()
+            if not message:
+                raise ApiError(HTTPStatus.NOT_FOUND, "message_not_found")
+            if method == "GET":
+                if int(message["is_read"] or 0) == 0:
+                    conn.execute("UPDATE mail_messages SET is_read = 1 WHERE id = ?", (message_id,))
+                payload = row_to_dict(message)
+                payload["recipients"] = parse_json_field(payload.get("recipients_json"), [])
+                payload["headers"] = parse_json_field(payload.get("headers_json"), {})
+                payload["content"] = parse_mail_message_file(payload.get("storage_path"))
+                return self.json_response({"message": payload, "mailbox": mailbox_row_payload(conn, mailbox)})
+            body = self.read_json()
+            updates = []
+            params = []
+            if "is_read" in body:
+                updates.append("is_read = ?")
+                params.append(1 if body.get("is_read") else 0)
+            if "folder" in body:
+                folder = clean_text(body.get("folder"), message["folder"] or "inbox")
+                updates.append("folder = ?")
+                params.append(folder or "inbox")
+            if not updates:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "message_update_required")
+            params.append(message_id)
+            conn.execute(f"UPDATE mail_messages SET {', '.join(updates)} WHERE id = ?", tuple(params))
+            updated = conn.execute("SELECT * FROM mail_messages WHERE id = ?", (message_id,)).fetchone()
+            payload = row_to_dict(updated)
+            payload["recipients"] = parse_json_field(payload.get("recipients_json"), [])
+            payload["headers"] = parse_json_field(payload.get("headers_json"), {})
+            payload["content"] = parse_mail_message_file(payload.get("storage_path"))
+            return self.json_response({"message": payload, "mailbox": mailbox_row_payload(conn, mailbox)})
+
+    def public_webmail_send(self):
+        body = self.read_json()
+        recipient = normalize_email(body.get("to"))
+        subject = clean_text(body.get("subject"), "No subject")
+        message_body = str(body.get("body") or "").strip()
+        if not message_body:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "message_body_required")
+        with connect(CONFIG.db_path) as conn:
+            payload, mailbox_id = self.webmail_session_context()
+            mailbox = self.load_webmail_mailbox(conn, payload, mailbox_id)
+            limit = mailbox_send_budget(conn, mailbox["account_id"])
+            today = time.strftime("%Y-%m-%d")
+            mailbox_reset_send_count_if_needed(conn, mailbox["id"], today)
+            current = conn.execute("SELECT sent_today_count, sent_today_on FROM mailboxes WHERE id = ?", (mailbox["id"],)).fetchone()
+            sent_today = int(current["sent_today_count"] or 0) if current and current["sent_today_on"] == today else 0
+            if limit and sent_today >= limit:
+                raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, "daily_email_limit_reached")
+            mailbox_increment_send_count(conn, mailbox["id"], today)
+            recipient_targets = mailbox_resolve_recipients(conn, mailbox["account_id"], recipient)
+            outbound_id = mailbox_store_message(
+                conn,
+                mailbox["account_id"],
+                mailbox,
+                "outbound",
+                mailbox["email"],
+                [recipient],
+                subject,
+                message_body,
+                "outbound",
+                status="sent",
+            )
+            conn.execute(
+                "UPDATE mailboxes SET last_outbound_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (mailbox["id"],),
+            )
+            for target in recipient_targets:
+                if target["type"] == "mailbox" or target["type"] in {"alias", "forwarder", "catch_all"}:
+                    target_mailbox = target["mailbox"]
+                    mailbox_store_message(
+                        conn,
+                        mailbox["account_id"],
+                        target_mailbox,
+                        "inbound",
+                        mailbox["email"],
+                        [recipient],
+                        subject,
+                        message_body,
+                        "inbound",
+                        status="stored",
+                    )
+                    conn.execute("UPDATE mailboxes SET last_inbound_at = CURRENT_TIMESTAMP WHERE id = ?", (target_mailbox["id"],))
+                    log_mail_delivery(
+                        conn,
+                        mailbox["account_id"],
+                        "message_delivered",
+                        source_email=mailbox["email"],
+                        destination_email=target_mailbox["email"],
+                        mailbox_id=target_mailbox["id"],
+                        direction="inbound",
+                        details={"message_id": outbound_id},
+                        status="stored",
+                    )
+                else:
+                    log_mail_delivery(
+                        conn,
+                        mailbox["account_id"],
+                        "message_forwarded_external",
+                        source_email=mailbox["email"],
+                        destination_email=target["email"],
+                        mailbox_id=mailbox["id"],
+                        direction="outbound",
+                        details={"message_id": outbound_id},
+                        status="sent",
+                    )
+            log_mail_delivery(
+                conn,
+                mailbox["account_id"],
+                "message_sent",
+                source_email=mailbox["email"],
+                destination_email=recipient,
+                mailbox_id=mailbox["id"],
+                direction="outbound",
+                details={"message_id": outbound_id},
+                status="sent",
+            )
+            return self.json_response(
+                {
+                    "sent": True,
+                    "message_id": outbound_id,
+                    "remaining_today": self.mailbox_remaining_today(conn, mailbox["id"], limit),
+                },
+                HTTPStatus.CREATED,
+            )
+
+    def public_webmail_logout(self):
+        host = self.headers.get("Host", "localhost")
+        self.send_response(HTTPStatus.NO_CONTENT)
+        for cookie_header in expired_named_cookie_headers("mp_mail_token", host):
+            self.send_header("Set-Cookie", cookie_header)
+        self.end_headers()
+        return
+
+    def public_mail_jmap(self):
+        with connect(CONFIG.db_path) as conn:
+            payload, mailbox_id = self.webmail_session_context()
+            mailbox = self.load_webmail_mailbox(conn, payload, mailbox_id)
+            mailbox_payload = mailbox_row_payload(conn, mailbox)
+            return self.json_response(
+                {
+                    "enabled": True,
+                    "implementation": "compatibility-adapter",
+                    "capabilities": {
+                        "mailbox_native": True,
+                        "submission": True,
+                        "imap": True,
+                        "pop": True,
+                        "webmail": True,
+                    },
+                    "mailbox": {
+                        "id": mailbox_payload["id"],
+                        "email": mailbox_payload["email"],
+                        "username": mailbox_payload.get("mail_username", mailbox_payload["email"]),
+                        "host": mailbox_payload.get("mail_edge_host") or mailbox_payload.get("smtp_host") or "",
+                        "submission_host": mailbox_payload.get("smtp_host") or "",
+                        "submission_port": mailbox_payload.get("smtp_port") or 0,
+                        "submission_encryption": mailbox_payload.get("smtp_encryption") or "STARTTLS",
+                        "imap_host": mailbox_payload.get("imap_host") or "",
+                        "imap_port": mailbox_payload.get("imap_port") or 0,
+                        "imap_encryption": mailbox_payload.get("imap_encryption") or "STARTTLS",
+                        "pop_host": mailbox_payload.get("pop_host") or "",
+                        "pop_port": mailbox_payload.get("pop_port") or 0,
+                        "pop_encryption": mailbox_payload.get("pop_encryption") or "STARTTLS",
+                        "webmail_url": mailbox_payload.get("webmail_url") or "",
+                        "webmail_login_url": mailbox_payload.get("webmail_login_url") or "",
+                        "jmap_url": mailbox_payload.get("jmap_url") or "",
+                    },
+                    "user": {
+                        "account_id": mailbox["account_id"],
+                        "account_username": mailbox["account_username"],
+                    },
+                }
+            )
+
+    def forward_auth_verify(self):
+        from http.cookies import SimpleCookie
+        cookie_header = self.headers.get("Cookie", "")
+        cookies = SimpleCookie(cookie_header)
+        token_cookie = cookies.get("mp_tool_token") or cookies.get("mp_client_token") or cookies.get("mp_auth")
+        token = token_cookie.value if token_cookie else None
+
+        if not token:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth.removeprefix("Bearer ").strip()
+
+        forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+        forwarded_uri = self.headers.get("X-Forwarded-Uri", "")
+
+        is_login_request = False
+        if forwarded_uri:
+            parsed_uri_path = urlparse(forwarded_uri).path.rstrip("/")
+            is_login_request = parsed_uri_path in {"/files/login", "/login", "/files/api/login", "/api/login"} or parsed_uri_path.endswith("/files/login") or parsed_uri_path.endswith("/api/login")
+
+        if forwarded_host:
+            host_part = forwarded_host.split(":")[0].lower()
+            if host_part.startswith("files-") or host_part.startswith("files."):
+                if forwarded_uri:
+                    uri_path = urlparse(forwarded_uri).path.rstrip("/")
+                    is_login_request = is_login_request or uri_path in {"/login", "/files/login", "/api/login", "/files/api/login"} or uri_path.endswith("/login")
+
+        if forwarded_uri and (
+            forwarded_uri.startswith("/files/static/")
+            or "/static/" in forwarded_uri
+            or forwarded_uri.startswith("/db/themes/")
+            or forwarded_uri.startswith("/db/js/")
+            or forwarded_uri.startswith("/db/favicon")
+            or forwarded_uri.startswith("/webmail/assets/")
+        ):
+            self.send_response(HTTPStatus.OK)
+            self.end_headers()
+            return
+
+        magic_token = extract_magic_launch_token(forwarded_uri)
+        magic_mode = False
+        if not token and magic_token:
+            token = magic_token
+            magic_mode = True
+
+        username = None
+        if forwarded_host:
+            match = re.match(r"^(?:files|pma)[-.](\w+)\.", forwarded_host)
+            if match:
+                username = match.group(1)
+
+        if not token:
+            if is_login_request or (forwarded_host and (forwarded_host.startswith("files-") or forwarded_host.startswith("files."))):
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+            if "text/html" in self.headers.get("Accept", ""):
+                redirect_host = CONFIG.public_host
+                if forwarded_host:
+                    host_part = forwarded_host.split(":")[0]
+                    if host_part.endswith(".localhost"):
+                        redirect_host = "localhost"
+                    elif "." in host_part:
+                        parts = host_part.split(".")
+                        if len(parts) >= 2 and not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host_part):
+                            redirect_host = ".".join(parts[-2:])
+                scheme = "https" if self.is_https else "http"
+                port_str = "" if forwarded_host else (f":{CONFIG.client_port}" if CONFIG.client_port not in {80, 443} else "")
+                login_url = f"{scheme}://{redirect_host}{port_str}/login"
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", login_url)
+                self.end_headers()
+                return
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "missing_auth_session")
+
+        payload = verify_jwt(token, CONFIG.jwt_secret)
+        if not payload or payload.get("purpose") not in {"access", "tool_launch"}:
+            if is_login_request or (forwarded_host and (forwarded_host.startswith("files-") or forwarded_host.startswith("files."))):
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+            if "text/html" in self.headers.get("Accept", ""):
+                redirect_host = CONFIG.public_host
+                if forwarded_host:
+                    host_part = forwarded_host.split(":")[0]
+                    if host_part.endswith(".localhost"):
+                        redirect_host = "localhost"
+                    elif "." in host_part:
+                        parts = host_part.split(".")
+                        if len(parts) >= 2 and not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host_part):
+                            redirect_host = ".".join(parts[-2:])
+                scheme = "https" if self.is_https else "http"
+                port_str = "" if forwarded_host else (f":{CONFIG.client_port}" if CONFIG.client_port not in {80, 443} else "")
+                login_url = f"{scheme}://{redirect_host}{port_str}/login"
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", login_url)
+                self.end_headers()
+                return
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_auth_session")
+
+        actor_type = payload.get("actor_type")
+        actor_id = payload.get("sub")
+        if not username:
+            username = payload.get("username")
+
+        with connect(CONFIG.db_path) as conn:
+            if actor_type == "admin":
+                admin = conn.execute("SELECT status FROM admins WHERE id = ?", (actor_id,)).fetchone()
+                if not admin or admin["status"] != "active":
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "inactive_admin")
+                self.send_response(HTTPStatus.OK)
+                self.end_headers()
+                return
+            elif actor_type == "user":
+                user = conn.execute("SELECT status FROM users WHERE id = ?", (actor_id,)).fetchone()
+                if not user or user["status"] != "active":
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "inactive_user")
+                account = None
+                req_acc_id = payload.get("account_id")
+                if req_acc_id:
+                    account = conn.execute(
+                        "SELECT * FROM hosting_accounts WHERE id = ? AND status = 'active'",
+                        (req_acc_id,),
+                    ).fetchone()
+                elif username:
+                    account = conn.execute(
+                        "SELECT * FROM hosting_accounts WHERE username = ? AND status = 'active'",
+                        (username,),
+                    ).fetchone()
+                else:
+                    account = conn.execute(
+                        "SELECT * FROM hosting_accounts WHERE user_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+                        (actor_id,),
+                    ).fetchone()
+
+                if not account:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+
+                acc_dict = dict(account)
+                if acc_dict["user_id"] != actor_id:
+                    scope = get_collaborator_scope(conn, actor_id, acc_dict["id"])
+                    if not scope.get("is_collaborator"):
+                        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+                    
+                    if scope.get("allowed_menus") is not None and "files" not in scope.get("allowed_menus", []):
+                        raise ApiError(HTTPStatus.FORBIDDEN, "menu_access_denied")
+                    
+                    if scope.get("allowed_website_ids") is not None and forwarded_uri:
+                        allowed_ws = scope["allowed_website_ids"]
+                        allowed_domains = []
+                        if allowed_ws:
+                            placeholders = ",".join("?" for _ in allowed_ws)
+                            allowed_domains = [r["domain"].lower() for r in conn.execute(f"SELECT domain FROM websites WHERE account_id = ? AND id IN ({placeholders})", [acc_dict["id"], *allowed_ws]).fetchall()]
+                        
+                        import urllib.parse
+                        decoded_uri = urllib.parse.unquote(forwarded_uri)
+                        clean_uri = decoded_uri.replace("/api/public/filebrowser/proxy", "")
+                        if clean_uri.startswith("/files"):
+                            clean_uri = clean_uri[len("/files"):]
+                        
+                        subpath = None
+                        for prefix in ["/api/resources", "/api/raw", "/api/preview"]:
+                            if clean_uri.startswith(prefix):
+                                subpath = clean_uri[len(prefix):] or "/"
+                                break
+
+                        if subpath is not None:
+                            subpath = "/" + subpath.lstrip("/").rstrip("/")
+                            permitted = False
+                            for dom in allowed_domains:
+                                dom_prefix = f"/domains/{dom}"
+                                if subpath == dom_prefix or subpath.startswith(f"{dom_prefix}/"):
+                                    permitted = True
+                                    break
+                            if not permitted:
+                                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_collaborator_restricted_path")
+
+                if magic_mode:
+                    access_token = create_jwt(
+                        {"sub": actor_id, "actor_type": actor_type, "purpose": "access", "jti": secrets.token_urlsafe(16)},
+                        CONFIG.jwt_secret,
+                        600,
+                    )
+                    access_payload = verify_jwt(access_token, CONFIG.jwt_secret)
+                    conn.execute(
+                        "INSERT INTO sessions(actor_type, actor_id, token_id, expires_at) VALUES (?, ?, ?, ?)",
+                        (actor_type, actor_id, access_payload["jti"], int(time.time()) + 600),
+                    )
+                    clean_path = strip_magic_launch_segment(forwarded_uri)
+                    self.send_response(HTTPStatus.FOUND)
+                    for cookie_header in tool_access_cookie_headers(access_token, forwarded_host, is_https=self.is_https):
+                        self.send_header("Set-Cookie", cookie_header)
+                    self.send_header("Location", build_tool_redirect_url(forwarded_host, clean_path, is_https=self.is_https))
+                    self.end_headers()
+                    return
+
+                session = conn.execute(
+                    "SELECT id FROM sessions WHERE actor_type = ? AND actor_id = ? AND token_id = ? AND expires_at > ?",
+                    (actor_type, actor_id, payload.get("jti"), int(time.time()))
+                ).fetchone()
+                if not session:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "expired_auth_session")
+
+                self.send_response(HTTPStatus.OK)
+                self.end_headers()
+                return
+
+        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+
+    def signup_customer(self, body):
+        email = normalize_email(body.get("email"))
+        full_name = clean_text(body.get("full_name"), "Customer")
+        password = validate_password(body.get("password", ""))
+        totp_secret = generate_totp_secret()
+        with connect(CONFIG.db_path) as conn:
+            if conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
+                raise ApiError(HTTPStatus.CONFLICT, "email_already_registered")
+            cur = conn.execute(
+                """
+                INSERT INTO users(email, password_hash, full_name, totp_secret)
+                VALUES (?, ?, ?, ?)
+                """,
+                (email, hash_password(password), full_name, totp_secret),
+            )
+            user_id = cur.lastrowid
+            account_payload = create_initial_hosting_account(conn, user_id, request_headers=self.headers)
+            log_audit(conn, "public", None, "customer_signup", "user", user_id, self.client_address[0], {"email": email})
+            log_activity(conn, user_id, "customer_signup", {"email": email})
+            return self.json_response(
+                {
+                    "user": {"id": user_id, "email": email, "full_name": full_name},
+                    "totp_secret": totp_secret,
+                    "totp_uri": otpauth_uri("ZeroPanel", email, totp_secret),
+                    "hosting_account": account_payload,
+                },
+                HTTPStatus.CREATED,
+            )
+
+    def setup_first_admin(self, body):
+        email = normalize_email(body.get("email"))
+        full_name = clean_text(body.get("full_name"), "Super Admin")
+        password = validate_password(body.get("password", ""))
+        public_host = normalize_public_host(body.get("public_host"))
+        try:
+            ipaddress.ip_address(public_host)
+            raise ApiError(HTTPStatus.BAD_REQUEST, "panel_domain_must_be_a_hostname")
+        except ValueError:
+            pass
+        totp_secret = generate_totp_secret()
+        with connect(CONFIG.db_path) as conn:
+            conn.execute("BEGIN EXCLUSIVE")
+            if conn.execute("SELECT COUNT(*) AS count FROM admins").fetchone()["count"] != 0:
+                raise ApiError(HTTPStatus.CONFLICT, "admin_already_configured")
+            set_system_setting(conn, "public_host", public_host)
+            CONFIG.public_host = public_host
+            cur = conn.execute(
+                """
+                INSERT INTO admins(email, password_hash, full_name, role, totp_secret)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (email, hash_password(password), full_name, "super_admin", totp_secret),
+            )
+            admin_id = cur.lastrowid
+            log_audit(conn, "public", None, "first_admin_signup", "admin", admin_id, self.client_address[0], {"email": email})
+            if CONFIG.agent_mode == "docker" and CONFIG.env != "development":
+                start_edge_proxy(public_host)
+            return self.json_response(
+                {
+                    "admin": {"id": admin_id, "email": email, "full_name": full_name, "role": "super_admin"},
+                    "totp_secret": totp_secret,
+                    "totp_uri": otpauth_uri("ZeroPanel Admin", email, totp_secret),
+                },
+                HTTPStatus.CREATED,
+            )
+
+    def verify_totp_secret(self, body):
+        secret = str(body.get("totp_secret", "")).strip()
+        code = str(body.get("code", "")).strip()
+        if not secret:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "missing_totp_secret")
+        return self.json_response({"valid": verify_totp(secret, code)})
+
+    def login(self, actor_type):
+        body = self.read_json()
+        email = body.get("email", "").strip().lower()
+        password = body.get("password", "")
+        table = "admins" if actor_type == "admin" else "users"
+        with connect(CONFIG.db_path) as conn:
+            check_auth_rate_limit(conn, self, actor_type)
+            actor = conn.execute(f"SELECT * FROM {table} WHERE email = ? AND status = 'active'", (email,)).fetchone()
+            if not actor or not verify_password(password, actor["password_hash"]):
+                record_auth_failure(conn, self, actor_type)
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_credentials")
+            if actor_type == "reseller" and not is_user_reseller(conn, actor["id"]):
+                record_auth_failure(conn, self, actor_type)
+                raise ApiError(HTTPStatus.FORBIDDEN, "reseller_plan_required")
+            log_audit(conn, actor_type, actor["id"], "login_password_ok", table, actor["id"], self.client_address[0])
+            
+            if actor["totp_secret"]:
+                token = create_jwt(
+                    {"sub": actor["id"], "actor_type": actor_type, "purpose": "totp_challenge"},
+                    CONFIG.jwt_secret,
+                    CONFIG.totp_challenge_ttl_seconds,
+                )
+                return self.json_response({"totp_required": True, "challenge_token": token})
+            else:
+                clear_auth_attempts(conn, self, actor_type)
+                token_id = secrets.token_urlsafe(16)
+                access_token = create_jwt(
+                    {"sub": actor["id"], "actor_type": actor_type, "purpose": "access", "jti": token_id},
+                    CONFIG.jwt_secret,
+                    CONFIG.token_ttl_seconds,
+                )
+                conn.execute(
+                    "INSERT INTO sessions(actor_type, actor_id, token_id, expires_at) VALUES (?, ?, ?, ?)",
+                    (actor_type, actor["id"], token_id, int(time.time()) + CONFIG.token_ttl_seconds),
+                )
+                log_audit(conn, actor_type, actor["id"], "login_totp_ok", table, actor["id"], self.client_address[0])
+                return self.json_response(
+                    {
+                        "access_token": access_token,
+                        "expires_in": CONFIG.token_ttl_seconds,
+                    }
+                )
+
+    def verify_totp_challenge(self, actor_type):
+        body = self.read_json()
+        payload = verify_jwt(body.get("challenge_token", ""), CONFIG.jwt_secret)
+        if not payload or payload.get("purpose") != "totp_challenge" or payload.get("actor_type") != actor_type:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_totp_challenge")
+        table = "admins" if actor_type == "admin" else "users"
+        with connect(CONFIG.db_path) as conn:
+            check_auth_rate_limit(conn, self, actor_type)
+            actor = conn.execute(f"SELECT * FROM {table} WHERE id = ? AND status = 'active'", (payload["sub"],)).fetchone()
+            if not actor:
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "actor_not_found")
+            code = body.get("code", "")
+            dev_bypass_ok = CONFIG.is_development and CONFIG.dev_auth_test_mode and code == "000000"
+            if not dev_bypass_ok and not verify_totp(actor["totp_secret"], code):
+                record_auth_failure(conn, self, actor_type)
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_totp")
+            clear_auth_attempts(conn, self, actor_type)
+
+            token_id = secrets.token_urlsafe(16)
+            access_token = create_jwt(
+                {"sub": actor["id"], "actor_type": actor_type, "purpose": "access", "jti": token_id},
+                CONFIG.jwt_secret,
+                CONFIG.token_ttl_seconds,
+            )
+            conn.execute(
+                "INSERT INTO sessions(actor_type, actor_id, token_id, expires_at) VALUES (?, ?, ?, ?)",
+                (actor_type, actor["id"], token_id, int(time.time()) + CONFIG.token_ttl_seconds),
+            )
+            log_audit(conn, actor_type, actor["id"], "login_totp_ok", table, actor["id"], self.client_address[0])
+            return self.json_response(
+                {
+                    "access_token": access_token,
+                    "actor": {"id": actor["id"], "email": actor["email"], "full_name": actor["full_name"], "type": actor_type},
+                }
+            )
+
+    def logout(self, actor_type):
+        from http.cookies import SimpleCookie
+        cookie_header = self.headers.get("Cookie", "")
+        cookies = SimpleCookie(cookie_header)
+        token_cookie = cookies.get("mp_client_token")
+        token = token_cookie.value if token_cookie else None
+
+        if not token:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth.removeprefix("Bearer ").strip()
+
+        if token:
+            payload = verify_jwt(token, CONFIG.jwt_secret)
+            if payload and payload.get("purpose") == "access":
+                token_id = payload.get("jti")
+                if token_id:
+                    with connect(CONFIG.db_path) as conn:
+                        conn.execute(
+                            "DELETE FROM sessions WHERE actor_type = ? AND token_id = ?",
+                            (actor_type, token_id)
+                        )
+
+        # Respond with expired cookie header to clear it in browser
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        for cookie_header in expired_auth_cookie_headers(self.headers.get("Host", "localhost")):
+            self.send_header("Set-Cookie", cookie_header)
+        self.end_headers()
+        self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
+
+    def require_auth(self, *allowed_actor_types):
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            token_q = (self.query_params.get("token") or self.query_params.get("api_key") or [""])[0].strip()
+            if token_q:
+                auth = f"Bearer {token_q}"
+        if not auth.startswith("Bearer "):
+            api_key_hdr = self.headers.get("X-API-Key", "").strip()
+            if api_key_hdr:
+                auth = f"Bearer {api_key_hdr}"
+        if not auth.startswith("Bearer "):
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "missing_bearer_token")
+        raw_token = auth.removeprefix("Bearer ").strip()
+
+        # Check if this is an Admin Panel API token (starts with "mp_admin_")
+        if raw_token.startswith("mp_admin_") and "admin" in allowed_actor_types:
+            token_hex = raw_token.removeprefix("mp_admin_")
+            token_hash = hashlib.sha256(token_hex.encode("utf-8")).hexdigest()
+            now = int(time.time())
+            with connect(CONFIG.db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT t.id AS token_id, t.admin_id, t.permissions_json, t.expires_at, a.*
+                    FROM admin_api_tokens t
+                    JOIN admins a ON a.id = t.admin_id
+                    WHERE t.token_hash = ? AND a.status = 'active'
+                    """,
+                    (token_hash,),
+                ).fetchone()
+                if not row:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_admin_api_token")
+                if row["expires_at"] and int(row["expires_at"]) < now:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "admin_api_token_expired")
+
+                try:
+                    conn.execute("UPDATE admin_api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", (row["token_id"],))
+                except Exception:
+                    pass
+                admin_dict = row_to_dict(row)
+                admin_dict["actor_type"] = "admin"
+                admin_dict["permissions"] = parse_json_field(row["permissions_json"] if "permissions_json" in row.keys() else None, ["*"])
+                return admin_dict
+
+        # Check if this is a Reseller Panel API token (starts with "mp_reseller_")
+        if raw_token.startswith("mp_reseller_") and ("reseller" in allowed_actor_types or "user" in allowed_actor_types):
+            token_hex = raw_token.removeprefix("mp_reseller_")
+            token_hash = hashlib.sha256(token_hex.encode("utf-8")).hexdigest()
+            now = int(time.time())
+            with connect(CONFIG.db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT t.id AS token_id, t.reseller_user_id, t.permissions_json, t.expires_at, u.*
+                    FROM reseller_api_tokens t
+                    JOIN users u ON u.id = t.reseller_user_id
+                    WHERE t.token_hash = ? AND u.status = 'active'
+                    """,
+                    (token_hash,),
+                ).fetchone()
+                if not row:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_reseller_api_token")
+                if row["expires_at"] and int(row["expires_at"]) < now:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "reseller_api_token_expired")
+
+                try:
+                    conn.execute("UPDATE reseller_api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", (row["token_id"],))
+                except Exception:
+                    pass
+                reseller_dict = row_to_dict(row)
+                reseller_dict["actor_type"] = "reseller"
+                reseller_dict["permissions"] = parse_json_field(row["permissions_json"] if "permissions_json" in row.keys() else None, ["*"])
+                return reseller_dict
+
+        # Check if this is a Client Panel API token (starts with "mp_")
+        if raw_token.startswith("mp_") and not raw_token.startswith("mp_admin_") and not raw_token.startswith("mp_reseller_") and "user" in allowed_actor_types:
+            token_hex = raw_token.removeprefix("mp_")
+            token_hash = hashlib.sha256(token_hex.encode("utf-8")).hexdigest()
+            now = int(time.time())
+            with connect(CONFIG.db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT t.id AS token_id, t.account_id, t.expires_at, ha.user_id, u.*, p.allow_api_access
+                    FROM api_tokens t
+                    JOIN hosting_accounts ha ON ha.id = t.account_id
+                    JOIN users u ON u.id = ha.user_id
+                    JOIN plans p ON p.id = ha.plan_id
+                    WHERE t.token_hash = ? AND u.status = 'active'
+                    """,
+                    (token_hash,),
+                ).fetchone()
+                if not row:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_api_token")
+                if not row["allow_api_access"]:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "api_access_disabled_for_plan")
+                if row["expires_at"] and int(row["expires_at"]) < now:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "api_token_expired")
+
+                try:
+                    conn.execute("UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", (row["token_id"],))
+                except Exception:
+                    pass
+                user_dict = row_to_dict(row)
+                user_dict["actor_type"] = "user"
+                user_dict["api_token_account_id"] = row["account_id"]
+                return user_dict
+
+        payload = verify_jwt(raw_token, CONFIG.jwt_secret)
+        if not payload:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_access_token")
+
+        if payload.get("purpose") == "impersonation_exchange" and "user" in allowed_actor_types:
+            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            now = int(time.time())
+            with connect(CONFIG.db_path) as conn:
+                row = conn.execute("SELECT * FROM impersonation_tokens WHERE token_hash = ?", (token_hash,)).fetchone()
+                if row and int(row["expires_at"] or 0) >= now:
+                    if row["used_at"] is None:
+                        conn.execute("UPDATE impersonation_tokens SET used_at = CURRENT_TIMESTAMP WHERE token_hash = ?", (token_hash,))
+                    user = conn.execute("SELECT * FROM users WHERE id = ? AND status = 'active'", (payload["sub"],)).fetchone()
+                    if user:
+                        user_dict = row_to_dict(user)
+                        user_dict["actor_type"] = "user"
+                        return user_dict
+
+        token_actor_type = payload.get("actor_type")
+        if payload.get("purpose") != "access":
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_access_token")
+
+        # Browser login tokens are backed by a server-side session so password,
+        # email, 2FA, logout, and admin-forced resets can revoke them. Keep
+        # API-token authentication separate; it is handled above.
+        if CONFIG.env == "production" and payload.get("jti") and token_actor_type in {"user", "admin"}:
+            with connect(CONFIG.db_path) as conn:
+                session = conn.execute(
+                    "SELECT id FROM sessions WHERE actor_type = ? AND actor_id = ? AND token_id = ? AND expires_at > ? AND revoked_at IS NULL",
+                    (token_actor_type, payload.get("sub"), payload.get("jti"), int(time.time())),
+                ).fetchone()
+            if not session:
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "expired_auth_session")
+
+        if "reseller" in allowed_actor_types and token_actor_type in {"user", "reseller"}:
+            with connect(CONFIG.db_path) as conn:
+                actor = conn.execute("SELECT * FROM users WHERE id = ? AND status = 'active'", (payload["sub"],)).fetchone()
+                if not actor:
+                    raise ApiError(HTTPStatus.UNAUTHORIZED, "actor_not_found")
+                if not is_user_reseller(conn, actor["id"]):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "reseller_plan_required")
+                actor_dict = row_to_dict(actor)
+                actor_dict["actor_type"] = "reseller"
+                return actor_dict
+
+        if token_actor_type not in allowed_actor_types:
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_access_token")
+
+        table = "admins" if token_actor_type == "admin" else "users"
+        with connect(CONFIG.db_path) as conn:
+            actor = conn.execute(f"SELECT * FROM {table} WHERE id = ? AND status = 'active'", (payload["sub"],)).fetchone()
+            if not actor:
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "actor_not_found")
+            actor_dict = row_to_dict(actor)
+            actor_dict["actor_type"] = token_actor_type
+            return actor_dict
+
+    def exchange_impersonation(self):
+        body = self.read_json()
+        token = str(body.get("impersonation_token") or body.get("token") or "").strip()
+        if not token:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "impersonation_token_required")
+        payload = verify_jwt(token, CONFIG.jwt_secret)
+        if not payload or payload.get("purpose") != "impersonation_exchange" or payload.get("actor_type") != "user":
+            raise ApiError(HTTPStatus.UNAUTHORIZED, "invalid_impersonation_token")
+        user_id = int(payload.get("sub") or 0)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        now = int(time.time())
+        with connect(CONFIG.db_path) as conn:
+            row = conn.execute("SELECT * FROM impersonation_tokens WHERE token_hash = ?", (token_hash,)).fetchone()
+            if not row or row["used_at"] is not None or int(row["expires_at"] or 0) < now:
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "impersonation_token_expired_or_used")
+            conn.execute("UPDATE impersonation_tokens SET used_at = CURRENT_TIMESTAMP WHERE token_hash = ?", (token_hash,))
+            user = conn.execute("SELECT * FROM users WHERE id = ? AND status = 'active'", (user_id,)).fetchone()
+
+
+            if not user:
+                raise ApiError(HTTPStatus.UNAUTHORIZED, "user_not_found")
+            
+            token_id = secrets.token_urlsafe(16)
+            access_token = create_jwt(
+                {"sub": user_id, "actor_type": "user", "purpose": "access", "jti": token_id},
+                CONFIG.jwt_secret,
+                CONFIG.token_ttl_seconds,
+            )
+            conn.execute(
+                "INSERT INTO sessions(actor_type, actor_id, token_id, expires_at) VALUES (?, ?, ?, ?)",
+                ("user", user_id, token_id, now + CONFIG.token_ttl_seconds),
+            )
+            log_audit(conn, "user", user_id, "impersonation_token_exchanged", "user", user_id, self.client_address[0])
+            self.send_response(HTTPStatus.OK)
+            for cookie_header in auth_cookie_headers(access_token, self.headers.get("Host", "")):
+                self.send_header("Set-Cookie", cookie_header)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"access_token": access_token, "expires_in": CONFIG.token_ttl_seconds}).encode("utf-8"))
+            return
+
+    def client_api(self, method, path, query, actor):
+        req_account_id = None
+        hdr_acc = self.headers.get("X-Hosting-Account-ID", "").strip() or self.headers.get("X-Account-ID", "").strip()
+        if hdr_acc and hdr_acc.isdigit():
+            req_account_id = int(hdr_acc)
+        elif "account_id" in query and query["account_id"][0].isdigit():
+            req_account_id = int(query["account_id"][0])
+
+        with connect(CONFIG.db_path) as conn:
+            if path == "/api/client/store" and method == "GET":
+                if actor.get("actor_type") != "user":
+                    raise ApiError(HTTPStatus.FORBIDDEN, "client_account_required")
+                balance = conn.execute("SELECT balance_cents FROM wallets WHERE user_id = ?", (actor["id"],)).fetchone()
+                orders = conn.execute(
+                    "SELECT id FROM store_orders WHERE user_id = ? ORDER BY id DESC LIMIT 50",
+                    (actor["id"],),
+                ).fetchall()
+                return self.json_response({
+                    "categories": store_catalog(conn),
+                    "balance_cents": int(balance["balance_cents"]) if balance else 0,
+                    "orders": [store_order(conn, row["id"], user_id=actor["id"]) for row in orders],
+                })
+            if path == "/api/client/store/orders" and method == "POST":
+                if actor.get("actor_type") != "user":
+                    raise ApiError(HTTPStatus.FORBIDDEN, "client_account_required")
+                body = self.read_json()
+                try:
+                    created = place_order(conn, actor["id"], body.get("store_plan_id"))
+                except StoreError as exc:
+                    raise ApiError(exc.status, exc.code)
+                return self.json_response({"order": created}, HTTPStatus.CREATED)
+            if path == "/api/client/minecraft-servers" and method == "GET":
+                if actor.get("actor_type") != "user":
+                    raise ApiError(HTTPStatus.FORBIDDEN, "client_account_required")
+                servers = conn.execute(
+                    "SELECT * FROM minecraft_servers WHERE user_id = ? ORDER BY id DESC",
+                    (actor["id"],),
+                ).fetchall()
+                return self.json_response({"servers": rows_to_dicts(servers)})
+            if path == "/api/client/application-servers" and method == "GET":
+                if actor.get("actor_type") != "user":
+                    raise ApiError(HTTPStatus.FORBIDDEN, "client_account_required")
+                from .application_server import get_application_servers
+                servers = get_application_servers(conn, actor["id"])
+                return self.json_response({"servers": servers})
+            app_server_match = re.fullmatch(r"/api/client/application-servers/(\d+)(?:/(action|console|stats|startup|files)?)?", path)
+            if app_server_match:
+                if actor.get("actor_type") != "user":
+                    raise ApiError(HTTPStatus.FORBIDDEN, "client_account_required")
+                from .application_server import get_application_server, server_action, get_server_logs, get_server_stats, update_application_server, ApplicationServerError
+                server_id = int(app_server_match.group(1))
+                subpath = app_server_match.group(2)
+                
+                try:
+                    server = get_application_server(conn, server_id, actor["id"])
+                except ApplicationServerError as exc:
+                    raise ApiError(exc.status, exc.code)
+                
+                if not subpath and method == "GET":
+                    return self.json_response({"server": server})
+                if not subpath and method == "PATCH":
+                    body = self.read_json()
+                    try:
+                        updated = update_application_server(conn, server_id, actor["id"], body)
+                    except ApplicationServerError as exc:
+                        raise ApiError(exc.status, exc.code)
+                    return self.json_response({"server": updated})
+                if subpath == "action" and method == "POST":
+                    body = self.read_json()
+                    action = body.get("action")
+                    try:
+                        result = server_action(conn, server_id, actor["id"], action)
+                    except ApplicationServerError as exc:
+                        raise ApiError(exc.status, exc.code)
+                    return self.json_response(result)
+                if subpath == "console" and method == "GET":
+                    lines = int(query.get("lines", [100])[0])
+                    logs = get_server_logs(conn, server_id, actor["id"], lines)
+                    return self.json_response(logs)
+                if subpath == "stats" and method == "GET":
+                    stats = get_server_stats(conn, server_id, actor["id"])
+                    return self.json_response(stats)
+                if subpath == "startup" and method == "GET":
+                    return self.json_response({"server": server})
+                if subpath == "startup" and method == "PATCH":
+                    body = self.read_json()
+                    try:
+                        updated = update_application_server(conn, server_id, actor["id"], body)
+                    except ApplicationServerError as exc:
+                        raise ApiError(exc.status, exc.code)
+                    return self.json_response({"server": updated})
+            if path == "/api/client/minecraft-servers/versions" and method == "GET":
+                server_type = query.get("type", [""])[0].strip().upper()
+                if not server_type or server_type not in MCJARS_TYPES:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_minecraft_server_type")
+                return self.json_response({"versions": minecraft_versions(server_type)})
+            minecraft_match = re.fullmatch(r"/api/client/minecraft-servers/(\d+)(?:/(versions|metrics|action|console|version|settings|files|files/content|files/create|files/item|files/upload|files/download|backups(?:/[A-Za-z0-9_-]+(?:/(?:download|restore))?)?))?", path)
+            if minecraft_match:
+                if actor.get("actor_type") != "user":
+                    raise ApiError(HTTPStatus.FORBIDDEN, "client_account_required")
+                server_row = conn.execute(
+                    """SELECT ms.*, o.status AS order_status FROM minecraft_servers ms
+                       JOIN store_orders o ON o.id = ms.store_order_id
+                       WHERE ms.id = ? AND ms.user_id = ?""",
+                    (int(minecraft_match.group(1)), actor["id"]),
+                ).fetchone()
+                if not server_row:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "minecraft_server_not_found")
+                server = row_to_dict(server_row)
+                subpath = minecraft_match.group(2)
+                if server.get("order_status") != "approved" and subpath in {"action", "console", "version", "settings"}:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "minecraft_service_suspended")
+                if server.get("order_status") != "approved" and subpath == "files/content" and method == "PUT":
+                    raise ApiError(HTTPStatus.FORBIDDEN, "minecraft_service_suspended")
+                try:
+                    if not subpath and method == "GET":
+                        settings = json.loads(server.get("settings_json") or "{}")
+                        return self.json_response({"server": server, "settings": settings if isinstance(settings, dict) else {}})
+                    if not subpath and method == "PATCH":
+                        body = self.read_json()
+                        new_server_type = body.get("server_type")
+                        new_version = body.get("version")
+                        
+                        if new_server_type:
+                            if new_server_type not in MCJARS_TYPES:
+                                raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_minecraft_server_type")
+                            # Validate that the new version exists for the new server type
+                            if new_version and new_version not in minecraft_versions(new_server_type):
+                                raise ApiError(HTTPStatus.BAD_REQUEST, "version_not_available_for_server_type")
+                        
+                        was_running = server.get("status") == "running"
+                        
+                        # Stop server if running before changing software
+                        if was_running:
+                            run_minecraft_action(server, "stop")
+                        
+                        # Update server type and version
+                        updates = {"updated_at": "CURRENT_TIMESTAMP"}
+                        if new_server_type:
+                            updates["server_type"] = new_server_type
+                        if new_version:
+                            updates["version"] = new_version
+                        
+                        conn.execute(
+                            f"UPDATE minecraft_servers SET {', '.join(f'{k} = ?' for k in updates.keys())} WHERE id = ?",
+                            (*updates.values(), server["id"])
+                        )
+                        
+                        # Restart if it was running
+                        if was_running:
+                            server.update(updates)
+                            result = run_minecraft_action(server, "start")
+                            conn.execute(
+                                "UPDATE minecraft_servers SET status = ?, port = ?, container_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (result["status"], result.get("port"), result.get("container_name"), server["id"]),
+                            )
+                            server.update(result)
+                        
+                        log_activity(conn, actor["id"], "minecraft_server_software_changed", {"server_id": server["id"], "server_name": server["name"], "server_type": new_server_type, "version": new_version})
+                        
+                        # Return updated server
+                        updated_server = conn.execute("SELECT * FROM minecraft_servers WHERE id = ?", (server["id"],)).fetchone()
+                        return self.json_response({"server": row_to_dict(updated_server)})
+                    if subpath == "metrics" and method == "GET":
+                        return self.json_response({"metrics": minecraft_runtime_metrics(server)})
+                    if subpath == "versions" and method == "GET":
+                        return self.json_response({"versions": minecraft_versions(server["server_type"])})
+                    if subpath == "action" and method == "POST":
+                        action = str(self.read_json().get("action") or "").lower()
+                        result = run_minecraft_action(server, action)
+                        conn.execute(
+                            "UPDATE minecraft_servers SET status = ?, port = ?, container_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (result["status"], result.get("port"), result.get("container_name", server.get("container_name")), server["id"]),
+                        )
+                        log_activity(conn, actor["id"], f"minecraft_server_{action}", {"server_id": server["id"], "server_name": server["name"]})
+                        server.update(result)
+                        return self.json_response({"server": server})
+                    if subpath == "console" and method == "GET":
+                        return self.json_response({"output": console_output(server)})
+                    if subpath == "console" and method == "POST":
+                        send_minecraft_command(server, self.read_json().get("command"))
+                        log_activity(conn, actor["id"], "minecraft_server_command_sent", {"server_id": server["id"], "server_name": server["name"]})
+                        return self.json_response({"success": True})
+                    if subpath == "version" and method == "PATCH":
+                        requested_version = str(self.read_json().get("version") or "").strip()
+                        if requested_version not in minecraft_versions(server["server_type"]):
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "unsupported_minecraft_version")
+                        result = update_server_version(server, requested_version)
+                        conn.execute(
+                            "UPDATE minecraft_servers SET version = ?, status = ?, port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (result["version"], result["status"], result["port"], server["id"]),
+                        )
+                        log_activity(conn, actor["id"], "minecraft_server_version_changed", {"server_id": server["id"], "server_name": server["name"], "version": result["version"]})
+                        server.update(result)
+                        return self.json_response({"server": server})
+                    if subpath == "settings" and method == "PATCH":
+                        body = self.read_json()
+                        result = update_server_settings(server, body)
+                        server_name = str(body.get("name", server["name"]) or "").strip()
+                        if not server_name or len(server_name) > 64 or any(char in server_name for char in "\r\n\x00"):
+                            raise MinecraftError("invalid_minecraft_server_name")
+                        conn.execute(
+                            "UPDATE minecraft_servers SET name = ?, settings_json = ?, status = ?, port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (server_name, json.dumps(result["settings"], sort_keys=True), result["status"], result["port"], server["id"]),
+                        )
+                        action = "minecraft_server_renamed" if server_name != server["name"] else "minecraft_server_settings_updated"
+                        log_activity(conn, actor["id"], action, {"server_id": server["id"], "server_name": server_name})
+                        return self.json_response({"settings": result["settings"], "server_name": server_name})
+                    if subpath == "files" and method == "GET":
+                        return self.json_response({"files": list_minecraft_files(server, (query.get("path") or [""])[0])})
+                    if subpath == "files/create" and method == "POST":
+                        body = self.read_json()
+                        created = create_minecraft_path(server, body.get("path"), body.get("kind"))
+                        log_activity(conn, actor["id"], "minecraft_server_file_created", {"server_id": server["id"], "server_name": server["name"], "path": body.get("path")})
+                        return self.json_response({"file": created}, HTTPStatus.CREATED)
+                    if subpath == "files/item" and method == "PATCH":
+                        body = self.read_json()
+                        renamed = rename_minecraft_path(server, body.get("path"), body.get("name"))
+                        log_activity(conn, actor["id"], "minecraft_server_file_renamed", {"server_id": server["id"], "server_name": server["name"], "path": body.get("path"), "name": renamed["name"]})
+                        return self.json_response({"file": renamed})
+                    if subpath == "files/item" and method == "DELETE":
+                        body = self.read_json()
+                        result = delete_minecraft_path(server, body.get("path"))
+                        log_activity(conn, actor["id"], "minecraft_server_file_deleted", {"server_id": server["id"], "server_name": server["name"], "path": body.get("path")})
+                        return self.json_response(result)
+                    if subpath == "files/upload" and method == "POST":
+                        body = self.read_json()
+                        entries = []
+                        try:
+                            for entry in body.get("files", []):
+                                if not isinstance(entry, dict):
+                                    raise ValueError("invalid entry")
+                                entries.append({"name": entry.get("name"), "content": base64.b64decode(entry.get("content_base64", ""), validate=True)})
+                        except (TypeError, ValueError) as exc:
+                            raise MinecraftError("invalid_minecraft_upload") from exc
+                        uploaded = upload_minecraft_files(server, body.get("path", ""), entries)
+                        log_activity(conn, actor["id"], "minecraft_server_files_uploaded", {"server_id": server["id"], "server_name": server["name"], "files": len(uploaded)})
+                        return self.json_response({"files": uploaded}, HTTPStatus.CREATED)
+                    if subpath == "files/download" and method == "GET":
+                        relative_path = (query.get("path") or [""])[0]
+                        body = read_minecraft_binary_file(server, relative_path)
+                        self.bytes_response(body, "application/octet-stream", Path(relative_path).name)
+                        return None
+                    if subpath == "backups" and method == "GET":
+                        return self.json_response({"backups": list_minecraft_backups(server)})
+                    if subpath == "backups" and method == "POST":
+                        backup = create_minecraft_backup(server)
+                        log_activity(conn, actor["id"], "minecraft_server_backup_created", {"server_id": server["id"], "server_name": server["name"], "backup_id": backup["id"], "size": backup["size"]})
+                        return self.json_response({"backup": backup}, HTTPStatus.CREATED)
+                    backup_match = re.fullmatch(r"backups/([A-Za-z0-9_-]+)(?:/(download|restore))?", subpath or "")
+                    if backup_match:
+                        backup_id, action = backup_match.groups()
+                        if action == "download" and method == "GET":
+                            self.file_response(minecraft_backup_path(server, backup_id), "application/zip")
+                            return None
+                        if action == "restore" and method == "POST":
+                            result = restore_minecraft_backup(server, backup_id)
+                            log_activity(conn, actor["id"], "minecraft_server_backup_restored", {"server_id": server["id"], "server_name": server["name"], "backup_id": backup_id})
+                            return self.json_response(result)
+                        if not action and method == "DELETE":
+                            result = delete_minecraft_backup(server, backup_id)
+                            log_activity(conn, actor["id"], "minecraft_server_backup_deleted", {"server_id": server["id"], "server_name": server["name"], "backup_id": backup_id})
+                            return self.json_response(result)
+                    if subpath == "files/content" and method == "GET":
+                        return self.json_response({"content": read_minecraft_file(server, (query.get("path") or [""])[0])})
+                    if subpath == "files/content" and method == "PUT":
+                        body = self.read_json()
+                        write_minecraft_file(server, body.get("path"), body.get("content"))
+                        log_activity(conn, actor["id"], "minecraft_server_file_updated", {"server_id": server["id"], "server_name": server["name"], "path": body.get("path")})
+                        return self.json_response({"success": True})
+                except MinecraftError as exc:
+                    raise ApiError(exc.status, exc.code)
+            if actor.get("actor_type") == "admin":
+                if req_account_id:
+                    account = conn.execute(
+                        """
+                        SELECT ha.*, p.memory_mb, p.storage_mb, p.inode_limit
+                        FROM hosting_accounts ha
+                        LEFT JOIN plans p ON p.id = ha.plan_id
+                        WHERE ha.id = ?
+                        """,
+                        (req_account_id,),
+                    ).fetchone()
+                else:
+                    account = conn.execute(
+                        """
+                        SELECT ha.*, p.memory_mb, p.storage_mb, p.inode_limit
+                        FROM hosting_accounts ha
+                        LEFT JOIN plans p ON p.id = ha.plan_id
+                        ORDER BY ha.id LIMIT 1
+                        """,
+                    ).fetchone()
+            elif req_account_id:
+                account = conn.execute(
+                    """
+                    SELECT ha.*, p.memory_mb, p.storage_mb, p.inode_limit
+                    FROM hosting_accounts ha
+                    LEFT JOIN plans p ON p.id = ha.plan_id
+                    WHERE ha.id = ? AND ha.user_id = ?
+                    """,
+                    (req_account_id, actor["id"]),
+                ).fetchone()
+                if not account:
+                    # Check if actor is a collaborator on this account
+                    collab_check = conn.execute(
+                        """
+                        SELECT id FROM collaborators
+                        WHERE hosting_account_id = ?
+                          AND (target_user_id = ? OR LOWER(invited_email) = LOWER(?))
+                          AND status = 'active'
+                        """,
+                        (req_account_id, actor["id"], actor.get("email", "")),
+                    ).fetchone()
+                    if collab_check:
+                        account = conn.execute(
+                            """
+                            SELECT ha.*, p.memory_mb, p.storage_mb, p.inode_limit
+                            FROM hosting_accounts ha
+                            LEFT JOIN plans p ON p.id = ha.plan_id
+                            WHERE ha.id = ?
+                            """,
+                            (req_account_id,),
+                        ).fetchone()
+                    if not account:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "hosting_account_access_denied")
+            else:
+                account = None
+                default_acc_id = actor.get("api_token_account_id")
+                if default_acc_id:
+                    account = conn.execute(
+                        """
+                        SELECT ha.*, p.memory_mb, p.storage_mb, p.inode_limit
+                        FROM hosting_accounts ha
+                        LEFT JOIN plans p ON p.id = ha.plan_id
+                        WHERE ha.id = ? AND ha.user_id = ?
+                        """,
+                        (default_acc_id, actor["id"]),
+                    ).fetchone()
+                if not account:
+                    account = conn.execute(
+                        """
+                        SELECT ha.*, p.memory_mb, p.storage_mb, p.inode_limit
+                        FROM hosting_accounts ha
+                        LEFT JOIN plans p ON p.id = ha.plan_id
+                        WHERE ha.user_id = ?
+                        ORDER BY ha.id LIMIT 1
+                        """,
+                        (actor["id"],),
+                    ).fetchone()
+
+            if account is not None:
+                account = row_to_dict(account)
+
+            path = path.rstrip("/")
+            if path == "/api/client/profile" and actor.get("actor_type") == "user":
+                if method == "GET":
+                    return self.json_response({"profile": user_profile_payload(conn, actor["id"])})
+                if method == "PATCH":
+                    body = self.read_json()
+                    current = user_profile_payload(conn, actor["id"])
+                    email = normalize_email(body.get("email", actor["email"]))
+                    email_changed = email != str(actor["email"]).lower()
+                    if email_changed:
+                        verify_user_sensitive_change(actor, body, "email_change")
+                        duplicate = conn.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id != ?", (email, actor["id"])).fetchone()
+                        if duplicate:
+                            raise ApiError(HTTPStatus.CONFLICT, "email_already_registered")
+                    full_name = clean_text(body.get("full_name", actor["full_name"]), actor["full_name"])
+                    billing = profile_billing_payload(body.get("billing") or body, current["billing"])
+                    conn.execute("UPDATE users SET email = ?, full_name = ? WHERE id = ?", (email, full_name, actor["id"]))
+                    save_user_profile(conn, actor["id"], billing)
+                    if email_changed:
+                        revoke_user_sessions(conn, actor["id"])
+                    log_activity(conn, actor["id"], "user_profile_updated", {"email_changed": email_changed})
+                    return self.json_response({
+                        "profile": user_profile_payload(conn, actor["id"]),
+                        "reauth_required": email_changed,
+                    })
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_profile_method")
+            if path == "/api/client/settings/timezone":
+                require_account(account)
+                if method == "GET":
+                    return self.json_response({"timezone": account["timezone"] or "UTC"})
+                if method == "PATCH":
+                    body = self.read_json(); value = str(body.get("timezone") or "UTC").strip()
+                    try: ZoneInfo(value)
+                    except ZoneInfoNotFoundError: raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_timezone")
+                    conn.execute("UPDATE hosting_accounts SET timezone = ? WHERE id = ?", (value, account["id"]))
+                    log_activity(conn, actor["id"], "account_timezone_changed", {"timezone": value})
+                    return self.json_response({"timezone": value})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_timezone_method")
+            if path == "/api/client/home" and method == "GET":
+                user_id = account["user_id"] if account else actor["id"]
+                active_account_id = account["id"] if account else None
+                return self.json_response(client_home(conn, user_id, active_account_id=active_account_id, request_host=self.headers.get("Host")))
+            if path == "/api/client/feature-status" and method == "GET":
+                return self.json_response({"features": FEATURE_STATUS})
+            if path == "/api/client/sync-jobs" and method == "GET":
+                require_account(account)
+                return self.json_response({"jobs": client_sync_jobs(conn, account)})
+            if path == "/api/client/hosting-accounts" and method == "GET":
+                user_id = account["user_id"] if account else actor["id"]
+                rows = conn.execute(
+                    """
+                    SELECT ha.*, p.name AS plan_name, n.name AS node_name
+                    FROM hosting_accounts ha
+                    JOIN plans p ON p.id = ha.plan_id
+                    JOIN nodes n ON n.id = ha.node_id
+                    WHERE ha.user_id = ?
+                    ORDER BY ha.id
+                    """,
+                    (user_id,),
+                ).fetchall()
+                accounts = rows_to_dicts(rows)
+                for item in accounts:
+                    item["runtime"] = account_runtime(conn, item["id"])
+                return self.json_response({"hosting_accounts": accounts})
+            if path == "/api/client/resource-usage" and method == "GET":
+                require_account(account)
+                window_key = query.get("range", ["30m"])[0]
+                payload = resource_usage_payload(conn, account, window_key)
+                return self.json_response(payload)
+            if (
+                path in {
+                    "/api/client/recalculate-usage",
+                    "/api/client/recalculate_usage",
+                    "/api/client/plans/recalculate-usage",
+                    "/api/client/plans/recalculate_usage",
+                    "/api/client/hosting-accounts/recalculate-usage",
+                    "/api/client/hosting-accounts/recalculate_usage",
+                }
+                or (path.startswith("/api/client/") and path.endswith("/recalculate_usage"))
+                or (path.startswith("/api/client/") and path.endswith("/recalculate-usage"))
+            ) and method == "POST":
+                require_active_account(account)
+                job_id = enqueue_agent_job(conn, "recalculate_usage", "hosting_account", account["id"], {"account_id": account["id"], "reason": "client_requested"})
+                log_activity(conn, actor["id"], "recalculate_usage", {"account_id": account["id"], "job_id": job_id})
+                user_id = account["user_id"] if account else actor["id"]
+                active_account_id = account["id"] if account else None
+                return self.json_response({
+                    "ok": True,
+                    "job_id": job_id,
+                    "message": "Usage recalculation queued.",
+                    "resources": client_home(conn, user_id, active_account_id=active_account_id, request_host=self.headers.get("Host"))["resources"],
+                })
+            if path == "/api/client/php-info" and method == "GET":
+                require_account(account)
+                website_id = optional_positive_int(query.get("website_id", [""])[0])
+                return self.json_response(client_php_info_payload(conn, account, website_id))
+            if path == "/api/client/analytics" and method == "GET":
+                require_account(account)
+                _analytics_website_id = optional_positive_int(query.get("website_id", [""])[0])
+                _analytics_filter_key = str(query.get("filter", ["top-countries"])[0] or "top-countries")
+                return self.json_response(client_analytics_payload(conn, account["id"], _analytics_website_id, _analytics_filter_key))
+            if path == "/api/client/subdomains" and method == "GET":
+                require_account(account)
+                rows = conn.execute(
+                    """
+                    SELECT w.*, d.name AS parent_domain, d.dns_provider, d.dns_status,
+                           d.id AS parent_domain_id
+                    FROM websites w
+                    LEFT JOIN domains d ON d.id = w.parent_domain_id
+                    WHERE w.account_id = ? AND w.is_subdomain = 1
+                    ORDER BY w.id DESC
+                    """, (account["id"],)
+                ).fetchall()
+                scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                if scope.get("is_collaborator") and scope.get("allowed_subdomain_ids") is not None:
+                    allowed_ids = scope["allowed_subdomain_ids"]
+                    rows = [row for row in rows if row["id"] in allowed_ids]
+                plan = conn.execute("SELECT max_subdomains FROM plans WHERE id = ?", (account["plan_id"],)).fetchone()
+                return self.json_response({
+                    "subdomains": rows_to_dicts(rows),
+                    "domains": rows_to_dicts(conn.execute("SELECT id, name, dns_provider, dns_status FROM domains WHERE account_id = ? ORDER BY name", (account["id"],)).fetchall()),
+                    "usage": len(rows),
+                    "limit": int(plan["max_subdomains"] if plan else 0),
+                })
+            if path == "/api/client/subdomains" and method == "POST":
+                require_active_account(account)
+                require_collaborator_permission(conn, actor["id"], account["id"], "can_create_subdomains")
+                require_plan_capacity(conn, account["id"], "subdomains", "max_subdomains", "subdomain_limit_reached")
+                require_inode_capacity(conn, account["id"])
+                body = self.read_json()
+                parent_id = positive_int(body.get("parent_domain_id"), "invalid_parent_domain_id")
+                parent = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (parent_id, account["id"])).fetchone()
+                if not parent:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "parent_domain_not_found")
+                label = str(body.get("subdomain") or body.get("label") or "").strip().lower().rstrip(".")
+                if not label or len(label) > 253 or any(part == "" or len(part) > 63 or not re.match(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$", part) for part in label.split(".")):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_subdomain")
+                domain = sanitize_domain(f"{label}.{parent['name']}")
+                if conn.execute("SELECT id FROM websites WHERE account_id = ? AND domain = ?", (account["id"], domain)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "subdomain_already_exists")
+                mode = str(body.get("hosting_mode") or "separate").strip().lower()
+                if mode not in {"separate", "inside"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_subdomain_hosting_mode")
+                parent_site = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (parent["linked_website_id"], account["id"])).fetchone() if parent["linked_website_id"] else None
+                if mode == "inside" and not parent_site:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "parent_domain_has_no_website")
+                relative_path = str(body.get("path") or body.get("subdomain_path") or f"subdomains/{label}").strip().strip("/")
+                if mode == "inside" and (not relative_path or relative_path.startswith(".") or any(part in {"", ".", ".."} for part in relative_path.split("/")) or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/" for ch in relative_path)):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_subdomain_path")
+                if mode == "inside":
+                    document_root = str((Path(parent_site["document_root"]).resolve() / relative_path).resolve())
+                    try:
+                        Path(document_root).relative_to(Path(parent_site["document_root"]).resolve())
+                    except ValueError:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_subdomain_path")
+                else:
+                    relative_path = ""
+                    document_root = f"{account['base_path']}/domains/{domain}/public_html"
+                cur = conn.execute(
+                    """INSERT INTO websites(account_id, domain, document_root, php_version, ssl_status, status, analytics_enabled, created_by_user_id, is_subdomain, parent_domain_id, hosting_mode, subdomain_path)
+                       VALUES (?, ?, ?, ?, 'missing', 'active', ?, ?, 1, ?, ?, ?)""",
+                    (account["id"], domain, document_root, body.get("php_version", "8.3"), default_analytics_enabled(conn, account["id"]), actor["id"], parent_id, mode, relative_path or None),
+                )
+                website_id = cur.lastrowid
+                # Create the folder immediately. Provisioning is queued and
+                # may be delayed or fail while Docker is being rebuilt; the
+                # committed website must still have a File Browser target.
+                Path(document_root).mkdir(parents=True, exist_ok=True)
+                Path(document_root).parent.joinpath("logs").mkdir(parents=True, exist_ok=True)
+                Path(document_root).parent.joinpath("tmp").mkdir(parents=True, exist_ok=True)
+                public_ip = get_host_public_ip(conn)
+                dns_job_id = None
+                dns_record_id = None
+                configure_dns = body.get("configure_dns") is True
+                managed_provider = parent["dns_provider"] in {DNS_PROVIDER_LOCAL, DNS_PROVIDER_LOCAL_POWERDNS, DNS_PROVIDER_CLOUDFLARE}
+                if configure_dns and managed_provider:
+                    record_name = label
+                    record = conn.execute("SELECT id, system_record, value FROM dns_records WHERE domain_id = ? AND type = 'A' AND name = ?", (parent_id, record_name)).fetchone()
+                    if record:
+                        dns_record_id = record["id"]
+                        # The user explicitly granted permission to manage DNS,
+                        # so an existing A record is updated rather than
+                        # treated as a conflict or blocking subdomain setup.
+                        conn.execute(
+                            "UPDATE dns_records SET value = ?, system_record = 1, locked = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (public_ip, dns_record_id),
+                        )
+                    else:
+                        dns_record_id = conn.execute("INSERT INTO dns_records(domain_id, type, name, value, ttl, system_record, locked) VALUES (?, 'A', ?, ?, 300, 1, 1)", (parent_id, record_name, public_ip)).lastrowid
+                    dns_job_id = enqueue_agent_job(conn, "sync_dns_zone", "domain", parent_id, {"reason": "subdomain_created", "record_id": dns_record_id})
+                job_id = enqueue_agent_job(conn, "create_website", "website", website_id, {"domain": domain, "subdomain": True})
+                ssl_job_id = enqueue_agent_job(conn, "issue_ssl", "website", website_id, {"mode": "auto"})
+                log_activity(conn, actor["id"], "subdomain_created", {"website_id": website_id, "domain": domain, "parent_domain": parent["name"], "hosting_mode": mode})
+                return self.json_response({"subdomain": row_to_dict(conn.execute("SELECT * FROM websites WHERE id = ?", (website_id,)).fetchone()), "job_id": job_id, "ssl_job_id": ssl_job_id, "dns_job_id": dns_job_id, "dns_record_id": dns_record_id}, HTTPStatus.CREATED)
+            match = re.match(r"^/api/client/subdomains/(\d+)$", path)
+            if match and method == "DELETE":
+                require_active_account(account)
+                website_id = int(match.group(1))
+                website = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ? AND is_subdomain = 1", (website_id, account["id"])).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "subdomain_not_found")
+                require_collaborator_permission(conn, actor["id"], account["id"], "can_delete_subdomains", resource_type="subdomain", resource_id=website_id)
+                parent_id = website["parent_domain_id"]
+                label = website["domain"][:-len(conn.execute("SELECT name FROM domains WHERE id = ?", (parent_id,)).fetchone()["name"]) - 1] if parent_id else website["domain"]
+                if parent_id:
+                    conn.execute("DELETE FROM dns_records WHERE domain_id = ? AND name = ? AND system_record = 1", (parent_id, label))
+                    enqueue_agent_job(conn, "sync_dns_zone", "domain", parent_id, {"reason": "subdomain_deleted"})
+                job_id = delete_client_website(conn, account, website)
+                log_activity(conn, actor["id"], "subdomain_deleted", {"website_id": website_id, "domain": website["domain"]})
+                return self.json_response({"deleted": True, "job_id": job_id})
+            if path == "/api/client/websites" and method == "GET":
+                def check_domain_tls_handshake(domain):
+                    try:
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        with socket.create_connection(("127.0.0.1", 443), timeout=1.5) as sock:
+                            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+                                return True
+                    except Exception:
+                        return False
+                if account:
+                    scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                    if scope and scope.get("is_collaborator") and scope.get("allowed_website_ids") is not None:
+                        allowed_ws = scope["allowed_website_ids"]
+                        if allowed_ws:
+                            placeholders = ",".join("?" for _ in allowed_ws)
+                            rows = conn.execute(
+                                f"""
+                                SELECT w.*, d.id AS domain_id, d.nameservers_json, d.provider_state_json, d.dns_provider, d.dns_status
+                                FROM websites w
+                                JOIN hosting_accounts ha ON ha.id = w.account_id
+                                LEFT JOIN domains d ON d.linked_website_id = w.id
+                                WHERE w.account_id = ? AND w.id IN ({placeholders})
+                                ORDER BY w.id
+                                """,
+                                [account["id"], *allowed_ws],
+                            ).fetchall()
+                        else:
+                            rows = []
+                    else:
+                        rows = conn.execute(
+                            """
+                            SELECT w.*, d.id AS domain_id, d.nameservers_json, d.provider_state_json, d.dns_provider, d.dns_status
+                            FROM websites w
+                            JOIN hosting_accounts ha ON ha.id = w.account_id
+                            LEFT JOIN domains d ON d.linked_website_id = w.id
+                            WHERE w.account_id = ?
+                            ORDER BY w.id
+                            """,
+                            (account["id"],),
+                        ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT w.*, d.id AS domain_id, d.nameservers_json, d.provider_state_json, d.dns_provider, d.dns_status
+                        FROM websites w
+                        JOIN hosting_accounts ha ON ha.id = w.account_id
+                        LEFT JOIN domains d ON d.linked_website_id = w.id
+                        WHERE ha.user_id = ?
+                        ORDER BY w.id
+                        """,
+                        (actor["id"],),
+                    ).fetchall()
+                websites = rows_to_dicts(rows)
+                analytics_mode, analytics_available = account_analytics_policy(conn, account["id"]) if account else ("on", True)
+                for website in websites:
+                    website["analytics_mode"] = analytics_mode
+                    website["analytics_available"] = analytics_available
+                    registrar_assignment = conn.execute(
+                        """SELECT r.id, r.domain_name, r.nameservers_json, ra.label AS account_label
+                           FROM registrar_domain_records r
+                           JOIN registrar_accounts ra ON ra.id = r.registrar_account_id
+                           WHERE lower(r.domain_name) = lower(?) AND r.client_user_id = ? AND ra.status != 'deleted'
+                           LIMIT 1""",
+                        (website["domain"], actor["id"]),
+                    ).fetchone()
+                    website["registrar_assigned"] = bool(registrar_assignment)
+                    website["registrar_account_label"] = registrar_assignment["account_label"] if registrar_assignment else ""
+                    runtime = account_runtime(conn, website["account_id"])
+                    website["public_url"] = f"http://{website['domain']}"
+                    website["host_header"] = website["domain"]
+                    website["nameservers"] = website_dns_nameservers(website)
+                    website["dns_provider_label"] = "Cloudflare" if website.get("dns_provider") == DNS_PROVIDER_CLOUDFLARE else "Local DNS"
+
+                    website_ip = None
+                    if website.get("domain_id"):
+                        a_rec = conn.execute(
+                            "SELECT value FROM dns_records WHERE domain_id = ? AND type = 'A' AND name = '@' ORDER BY system_record DESC, id LIMIT 1",
+                            (website["domain_id"],)
+                        ).fetchone()
+                        if a_rec and a_rec["value"]:
+                            website_ip = a_rec["value"]
+                    host_ip = get_host_public_ip(conn, request_host=self.headers.get("Host"))
+                    if not website_ip or (website_ip in ("127.0.0.1", "0.0.0.0", "localhost", "157.15.203.66") and host_ip not in ("127.0.0.1", "0.0.0.0", "localhost")):
+                        account_dict = dict(account) if account else {}
+                        if account_dict.get("dedicated_ip_id"):
+                            ded = conn.execute("SELECT ip_address FROM server_ips WHERE id = ?", (account_dict["dedicated_ip_id"],)).fetchone()
+                            if ded and ded["ip_address"] and ded["ip_address"] not in ("157.15.203.66", "127.0.0.1", "0.0.0.0", ""):
+                                website_ip = ded["ip_address"]
+                        if not website_ip or website_ip in ("127.0.0.1", "0.0.0.0", "localhost", "157.15.203.66"):
+                            website_ip = host_ip
+                    website["server_ip"] = website_ip
+                    website["ip_address"] = website_ip
+                    provider_state = parse_json_field(website.get("provider_state_json"), {})
+                    website["provider_state"] = provider_state
+                    website["dns_last_error"] = provider_state.get("last_error") or ""
+                    website["dns_warnings"] = dns_state_warnings(website)
+
+                    if website.get("ssl_status") != "custom":
+                        has_tls = check_domain_tls_handshake(website["domain"])
+                        real_status = "active" if has_tls else "missing"
+                        if website.get("ssl_status") != real_status:
+                            website["ssl_status"] = real_status
+                            try:
+                                conn.execute("UPDATE websites SET ssl_status = ? WHERE id = ?", (real_status, website["id"]))
+                                conn.execute("UPDATE ssl_certificates SET status = ? WHERE website_id = ? AND status != 'custom'", (real_status, website["id"]))
+                            except Exception:
+                                pass
+                return self.json_response({"websites": websites})
+            if path == "/api/client/dns/check-domain" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                domain_name = body.get("domain", "")
+                if not domain_name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_domain")
+                return self.json_response(check_domain_dns_provider(conn, account, domain_name))
+            if path == "/api/client/dns/preview-website" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                domain_name = body.get("domain", "")
+                if not domain_name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_domain")
+                return self.json_response(preview_domain_dns(conn, account, domain_name))
+            if path == "/api/client/dns/sync-cloudflare-rules" and method == "POST":
+                require_active_account(account)
+                body = self.read_json() if self.headers.get("content-length") else {}
+                website_id = optional_positive_int(body.get("website_id"))
+                results = sync_cloudflare_acme_rules(conn, CONFIG, website_id=website_id, account_id=account["id"])
+                return self.json_response({"success": True, "results": results})
+            if path == "/api/client/websites" and method == "POST":
+                require_active_account(account)
+                require_collaborator_permission(conn, actor["id"], account["id"], "can_create_websites")
+                require_plan_capacity(conn, account["id"], "websites", "max_websites", "website_limit_reached")
+                require_inode_capacity(conn, account["id"])
+                body = self.read_json()
+                domain = sanitize_domain(body.get("domain", ""))
+                dns_action = body.get("dns_action") or body.get("dns_choice", "keep")
+
+                dns_check = check_domain_dns_provider(conn, account, domain)
+                if dns_check.get("exists") and dns_check.get("blocked"):
+                    raise ApiError(HTTPStatus.CONFLICT, dns_check["error_message"])
+
+                other_hosted_website = conn.execute(
+                    """
+                    SELECT id FROM websites
+                    WHERE lower(domain) = lower(?) AND account_id != ?
+                      AND lower(COALESCE(status, 'active')) NOT IN ('deleted', 'removed')
+                    LIMIT 1
+                    """,
+                    (domain, account["id"]),
+                ).fetchone()
+                if other_hosted_website:
+                    raise ApiError(HTTPStatus.CONFLICT, "domain_already_hosted_on_another_account")
+
+                existing_website = conn.execute(
+                    "SELECT id FROM websites WHERE account_id = ? AND domain = ?",
+                    (account["id"], domain),
+                ).fetchone()
+                if existing_website:
+                    raise ApiError(HTTPStatus.CONFLICT, "domain_already_exists")
+
+                existing_domain = conn.execute(
+                    "SELECT id, linked_website_id FROM domains WHERE account_id = ? AND name = ?",
+                    (account["id"], domain),
+                ).fetchone()
+                other_unlinked_domain = conn.execute(
+                    "SELECT id FROM domains WHERE name = ? AND account_id != ? AND linked_website_id IS NULL",
+                    (domain, account["id"]),
+                ).fetchone()
+                if other_unlinked_domain:
+                    raise ApiError(HTTPStatus.CONFLICT, "domain_already_registered_to_another_account")
+                if existing_domain and existing_domain["linked_website_id"]:
+                    linked_site = conn.execute(
+                        "SELECT id FROM websites WHERE id = ?",
+                        (existing_domain["linked_website_id"],),
+                    ).fetchone()
+                    if linked_site:
+                        raise ApiError(HTTPStatus.CONFLICT, "domain_already_exists")
+
+                document_root = f"{account['base_path']}/domains/{domain}/public_html"
+                cur = conn.execute(
+                    """
+                    INSERT INTO websites(account_id, domain, document_root, php_version, ssl_status, status, analytics_enabled, created_by_user_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (account["id"], domain, document_root, body.get("php_version", "8.3"), "missing", "active", default_analytics_enabled(conn, account["id"]), actor["id"]),
+                )
+                website_id = cur.lastrowid
+                # Materialize the root before the asynchronous provisioning
+                # job so a new site is usable even while the stack is queued.
+                Path(document_root).mkdir(parents=True, exist_ok=True)
+                Path(document_root).parent.joinpath("logs").mkdir(parents=True, exist_ok=True)
+                Path(document_root).parent.joinpath("tmp").mkdir(parents=True, exist_ok=True)
+                dns_assignment = default_domain_dns_assignment(conn, account["id"])
+                if dns_check.get("exists") and dns_check.get("dns_provider") == DNS_PROVIDER_CLOUDFLARE and dns_check.get("dns_provider_account_id"):
+                    dns_assignment["dns_provider_account_id"] = dns_check["dns_provider_account_id"]
+                if dns_assignment["dns_provider"] == DNS_PROVIDER_CLOUDFLARE:
+                    provider_account_id = dns_assignment.get("dns_provider_account_id")
+                    if provider_account_id:
+                        acc_row = conn.execute("SELECT * FROM dns_provider_accounts WHERE id = ?", (provider_account_id,)).fetchone()
+                        if acc_row:
+                            try:
+                                token = decrypt_secret(acc_row["encrypted_secret"], CONFIG.jwt_secret) if "encrypted_secret" in acc_row.keys() and acc_row["encrypted_secret"] else ""
+                                cf_account_id = acc_row["external_account_id"] if "external_account_id" in acc_row.keys() else None
+                                if token:
+                                    cf = CloudflareDNSProvider(token, account_id=cf_account_id, api_base=CONFIG.cloudflare_api_base)
+                                    if cf.configured():
+                                        zone = cf.ensure_zone(domain)
+                                        cf.ensure_acme_rule(domain)
+                                        if zone and isinstance(zone, dict):
+                                            cf_ns = zone.get("name_servers") or zone.get("nameservers")
+                                            if cf_ns and isinstance(cf_ns, list):
+                                                dns_assignment["nameservers"] = [str(ns).strip() for ns in cf_ns if str(ns).strip()]
+                                                dns_assignment["dns_status"] = "active"
+                            except Exception as exc:
+                                logging.warning("Cloudflare zone creation during website insert failed: %s", exc)
+                if existing_domain:
+                    conn.execute(
+                        """
+                        UPDATE domains SET
+                          linked_website_id = ?, status = 'active', dns_provider = ?,
+                          dns_provider_account_id = ?, nameservers_json = ?, dns_status = ?,
+                          provider_state_json = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            website_id,
+                            dns_assignment["dns_provider"],
+                            dns_assignment["dns_provider_account_id"],
+                            json.dumps(dns_assignment["nameservers"]),
+                            dns_assignment["dns_status"],
+                            json.dumps(dns_assignment["provider_state"], sort_keys=True),
+                            existing_domain["id"],
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO domains(
+                          account_id, name, kind, status, linked_website_id, dns_provider,
+                          dns_provider_account_id, nameservers_json, dns_status, provider_state_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            account["id"],
+                            domain,
+                            "managed",
+                            "active",
+                            website_id,
+                            dns_assignment["dns_provider"],
+                            dns_assignment["dns_provider_account_id"],
+                            json.dumps(dns_assignment["nameservers"]),
+                            dns_assignment["dns_status"],
+                            json.dumps(dns_assignment["provider_state"], sort_keys=True),
+                        ),
+                    )
+                job_id = enqueue_agent_job(conn, "create_website", "website", website_id, {"domain": domain})
+                domain_link = conn.execute(
+                    "SELECT id FROM domains WHERE linked_website_id = ?",
+                    (website_id,),
+                ).fetchone()
+                if not domain_link:
+                    raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "domain_record_missing")
+                mail_host = mail_dns_target_for_account(account["username"])
+
+                if dns_check.get("exists") and dns_check.get("dns_provider") == "cloudflare" and dns_action == "keep":
+                    import_remote_cloudflare_records(conn, domain_link["id"], domain, dns_check.get("remote_records", []))
+
+                seed_website_dns_records(conn, domain_link["id"], domain, mail_host)
+                dns_job_id = enqueue_agent_job(conn, "sync_dns_zone", "domain", domain_link["id"], {"reason": "website_created"})
+
+                log_activity(conn, actor["id"], "website_created", {"domain": domain})
+                website = row_to_dict(conn.execute("SELECT * FROM websites WHERE id = ?", (website_id,)).fetchone())
+                domain_row = conn.execute(
+                    """
+                    SELECT d.*, z.nameservers_json AS zone_nameservers_json
+                    FROM domains d
+                    LEFT JOIN dns_zones z ON z.domain_id = d.id
+                    WHERE d.linked_website_id = ?
+                    """,
+                    (website_id,),
+                ).fetchone()
+                if domain_row:
+                    domain_info = row_to_dict(domain_row)
+                    website["domain_record"] = decorate_domain(domain_row)
+                    website["nameservers"] = website_dns_nameservers(website["domain_record"]) or parse_json_field(domain_info.get("zone_nameservers_json"), [])
+                    website["dns_provider_label"] = website["domain_record"]["dns_provider_label"]
+                return self.json_response(
+                    {"website": website, "job_id": job_id, "dns_job_id": dns_job_id},
+                    HTTPStatus.CREATED,
+                )
+            if path.startswith("/api/client/websites/") and not path.endswith("/php") and not path.endswith("/modsec") and not path.endswith("/connection-check"):
+                require_active_account(account)
+                website_id = path_int_id(path, "/api/client/websites/")
+                website = require_owned_website(conn, account["id"], website_id, actor["id"])
+                if method == "PATCH":
+                    require_collaborator_permission(
+                        conn, actor["id"], account["id"], "can_edit_websites",
+                        resource_type="website", resource_id=website_id,
+                    )
+                    body = self.read_json()
+                    analytics_mode, analytics_available = account_analytics_policy(conn, account["id"])
+                    allowed_php = {"7.4", "8.0", "8.1", "8.2", "8.3", "8.4"}
+                    php_version = body.get("php_version", website["php_version"])
+                    if php_version not in allowed_php:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_php_version")
+                    status = body.get("status", website["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website_status")
+                    
+                    php_ini_str = (website["php_ini"] if website["php_ini"] is not None else "{}")
+                    if "php_ini" in body:
+                        php_ini_str = json.dumps(body["php_ini"])
+                        
+                    if "index_enabled" in body:
+                        try:
+                            index_enabled = int(body.get("index_enabled"))
+                        except (TypeError, ValueError):
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_index_enabled")
+                        if index_enabled not in {0, 1}:
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_index_enabled")
+                    else:
+                        index_enabled = int(website["index_enabled"] if website["index_enabled"] is not None else 0)
+                    try:
+                        modsec_enabled = int(body.get("modsec_enabled", (website["modsec_enabled"] if website["modsec_enabled"] is not None else 1)))
+                    except (TypeError, ValueError):
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_modsec_enabled")
+                    if modsec_enabled not in {0, 1}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_modsec_enabled")
+                    if "analytics_enabled" in body:
+                        try:
+                            analytics_enabled = int(body.get("analytics_enabled"))
+                        except (TypeError, ValueError):
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_analytics_enabled")
+                        if analytics_enabled not in {0, 1}:
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_analytics_enabled")
+                        if analytics_mode == "disabled" and analytics_enabled:
+                            raise ApiError(HTTPStatus.FORBIDDEN, "analytics_disabled_for_plan")
+                    else:
+                        analytics_enabled = 0 if analytics_mode == "disabled" else int(website["analytics_enabled"] if website["analytics_enabled"] is not None else 1)
+                        
+                    php_timeout = dict(website).get("php_timeout")
+                    if "php_timeout" in body:
+                        php_timeout = optional_positive_int(body.get("php_timeout"))
+                    elif "php_ini" in body and isinstance(body["php_ini"], dict) and body["php_ini"].get("max_execution_time"):
+                        try:
+                            php_timeout = int(body["php_ini"]["max_execution_time"])
+                        except (TypeError, ValueError):
+                            pass
+
+                    conn.execute(
+                        "UPDATE websites SET php_version = ?, status = ?, php_ini = ?, index_enabled = ?, modsec_enabled = ?, analytics_enabled = ?, php_timeout = ? WHERE id = ?",
+                        (php_version, status, php_ini_str, index_enabled, modsec_enabled, analytics_enabled, php_timeout, website_id),
+                    )
+                    job_id = None
+                    if "php_version" in body:
+                        job_id = enqueue_agent_job(
+                            conn,
+                            "update_website_php",
+                            "website",
+                            website_id,
+                            {"php_version": php_version, "previous_php_version": website["php_version"]},
+                        )
+                    elif "php_ini" in body:
+                        job_id = enqueue_agent_job(conn, "update_website_php_ini", "website", website_id, {})
+                    if "index_enabled" in body:
+                        job_id = enqueue_agent_job(conn, "sync_website_index", "website", website_id, {})
+                    if "modsec_enabled" in body:
+                        job_id = enqueue_agent_job(conn, "sync_website_modsec", "website", website_id, {})
+                    if "analytics_enabled" in body:
+                        job_id = enqueue_agent_job(conn, "sync_website_analytics", "website", website_id, {})
+                        
+                    log_activity(conn, actor["id"], "website_updated", {"website_id": website_id, "php_version": php_version, "index_enabled": index_enabled, "modsec_enabled": modsec_enabled, "analytics_enabled": analytics_enabled})
+                    updated = conn.execute("SELECT * FROM websites WHERE id = ?", (website_id,)).fetchone()
+                    return self.json_response({"website": row_to_dict(updated), "job_id": job_id})
+                if method == "DELETE":
+                    require_collaborator_permission(
+                        conn, actor["id"], account["id"], "can_delete_websites",
+                        resource_type="website", resource_id=website_id,
+                    )
+                    domain = website["domain"]
+                    job_id = delete_client_website(conn, account, website)
+                    log_activity(conn, actor["id"], "website_deleted", {"website_id": website_id, "domain": domain})
+                    return self.json_response({"deleted": True, "job_id": job_id})
+                raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+            if path == "/api/client/php-versions" and method == "GET":
+                require_account(account)
+                return self.json_response({"php_versions": ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"]})
+            if path == "/api/client/domains" and method == "GET":
+                if account:
+                    scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                    if scope and scope.get("is_collaborator") and scope.get("allowed_website_ids") is not None:
+                        allowed_ws = scope["allowed_website_ids"]
+                        if allowed_ws:
+                            placeholders = ",".join("?" for _ in allowed_ws)
+                            rows = conn.execute(
+                                f"""
+                                SELECT d.*, z.nameservers_json AS zone_nameservers_json
+                                FROM domains d
+                                JOIN hosting_accounts ha ON ha.id = d.account_id
+                                LEFT JOIN dns_zones z ON z.domain_id = d.id
+                                WHERE d.account_id = ? AND d.linked_website_id IN ({placeholders})
+                                ORDER BY d.name
+                                """,
+                                [account["id"], *allowed_ws],
+                            ).fetchall()
+                        else:
+                            rows = []
+                    else:
+                        rows = conn.execute(
+                            """
+                            SELECT d.*, z.nameservers_json AS zone_nameservers_json
+                            FROM domains d
+                            JOIN hosting_accounts ha ON ha.id = d.account_id
+                            LEFT JOIN dns_zones z ON z.domain_id = d.id
+                            WHERE d.account_id = ?
+                            ORDER BY d.name
+                            """,
+                            (account["id"],),
+                        ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT d.*, z.nameservers_json AS zone_nameservers_json
+                        FROM domains d
+                        JOIN hosting_accounts ha ON ha.id = d.account_id
+                        LEFT JOIN dns_zones z ON z.domain_id = d.id
+                        WHERE ha.user_id = ?
+                        ORDER BY d.name
+                        """,
+                        (actor["id"],),
+                    ).fetchall()
+                registered_rows = conn.execute(
+                    """SELECT r.domain_name, r.status, r.expiry_at, r.registered_at,
+                              r.auto_renew, r.transfer_lock, r.auth_code_available,
+                              r.nameservers_json, ra.label AS registrar_account,
+                              rp.display_name AS registrar_name
+                       FROM registrar_domain_records r
+                       JOIN registrar_accounts ra ON ra.id = r.registrar_account_id
+                       JOIN registrar_providers rp ON rp.id = ra.provider_id
+                       WHERE r.client_user_id = ? AND ra.status != 'deleted'
+                       ORDER BY r.domain_name COLLATE NOCASE""",
+                    (actor["id"],),
+                ).fetchall()
+                registered_domains = []
+                for registered in registered_rows:
+                    item = row_to_dict(registered)
+                    item["nameservers"] = parse_json_field(item.pop("nameservers_json", "[]"), [])
+                    item["auto_renew"] = bool(item.get("auto_renew"))
+                    item["transfer_lock"] = bool(item.get("transfer_lock"))
+                    item["auth_code_available"] = bool(item.get("auth_code_available"))
+                    registered_domains.append(item)
+                return self.json_response({"domains": [decorate_domain(row) for row in rows], "registered_domains": registered_domains})
+            registered_action = re.match(r"^/api/client/registered-domains/([^/]+)/(renew|whois|whois-update|nameservers)/?$", path)
+            if registered_action:
+                domain_name = sanitize_domain(registered_action.group(1))
+                action = registered_action.group(2)
+                record = conn.execute(
+                    """SELECT r.*, ra.label AS account_label, rp.key AS provider_key
+                       FROM registrar_domain_records r
+                       JOIN registrar_accounts ra ON ra.id = r.registrar_account_id
+                       JOIN registrar_providers rp ON rp.id = ra.provider_id
+                       WHERE lower(r.domain_name) = lower(?) AND r.client_user_id = ? AND ra.status != 'deleted'""",
+                    (domain_name, actor["id"]),
+                ).fetchone()
+                if not record:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "registered_domain_not_found")
+                if action == "whois":
+                    whois = parse_json_field(record["whois_json"], {})
+                    nameservers = parse_json_field(record["nameservers_json"], [])
+                    metadata = parse_json_field(record["metadata_json"], {})
+                    refresh_error = ""
+                    account = conn.execute("SELECT ra.*, rp.key AS provider_key FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id WHERE ra.id = ?", (record["registrar_account_id"],)).fetchone()
+                    try:
+                        fresh = registrar_for(account["provider_key"], registrar_account_settings(conn, account)).get_details(domain_name)
+                        whois = fresh.get("whois") or whois
+                        nameservers = fresh.get("nameservers") or nameservers
+                        metadata = fresh.get("metadata") or metadata
+                        conn.execute("UPDATE registrar_domain_records SET whois_json = ?, nameservers_json = ?, metadata_json = ?, synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(whois, sort_keys=True), json.dumps(nameservers), json.dumps(metadata, sort_keys=True), record["id"]))
+                    except (RegistrarError, NotImplementedError) as exc:
+                        refresh_error = str(exc)
+                    return self.json_response({
+                        "domain": domain_name,
+                        "whois": whois,
+                        "metadata": metadata,
+                        "nameservers": nameservers,
+                        "default_nameservers": default_registrar_nameservers(conn),
+                        "refreshed": not bool(refresh_error),
+                        "refresh_error": refresh_error,
+                    })
+                if method != "POST":
+                    raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+                body = self.read_json()
+                if action == "whois-update":
+                    whois = body.get("whois") if isinstance(body.get("whois"), dict) else {}
+                    conn.execute("UPDATE registrar_domain_records SET whois_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(whois, sort_keys=True), record["id"]))
+                    return self.json_response({"updated": True, "domain": domain_name, "whois": whois})
+                if action == "nameservers":
+                    mode = str(body.get("mode") or "default").lower()
+                    nameservers = default_registrar_nameservers(conn) if mode == "default" else [str(value).strip().rstrip(".").lower() for value in (body.get("nameservers") or []) if str(value).strip()]
+                    if len(nameservers) < 2 or len(nameservers) > 4:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "two_to_four_nameservers_required")
+                    account = conn.execute("SELECT ra.*, rp.key AS provider_key FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id WHERE ra.id = ?", (record["registrar_account_id"],)).fetchone()
+                    try:
+                        result = registrar_for(account["provider_key"], registrar_account_settings(conn, account)).update_nameservers(domain_name, nameservers, record["registrar_domain_id"])
+                    except NotImplementedError:
+                        result = {"local_only": True, "reason": "provider_nameserver_update_not_supported"}
+                    except RegistrarError as exc:
+                        raise ApiError(HTTPStatus.BAD_GATEWAY, "nameserver_update_failed: " + str(exc)[:180])
+                    conn.execute("UPDATE registrar_domain_records SET nameservers_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(nameservers), record["id"]))
+                    return self.json_response({"updated": True, "domain": domain_name, "mode": mode, "nameservers": nameservers, "result": result})
+                try:
+                    years = max(1, min(10, int(body.get("years", 1))))
+                except (TypeError, ValueError):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_renewal_years")
+                account = conn.execute("SELECT ra.*, rp.key AS provider_key FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id WHERE ra.id = ?", (record["registrar_account_id"],)).fetchone()
+                try:
+                    result = registrar_for(account["provider_key"], registrar_account_settings(conn, account)).renew(domain_name, years)
+                except RegistrarError as exc:
+                    raise ApiError(HTTPStatus.BAD_GATEWAY, "domain_renewal_failed: " + str(exc)[:180])
+                conn.execute("UPDATE registrar_domain_records SET updated_at = CURRENT_TIMESTAMP, synced_at = CURRENT_TIMESTAMP WHERE id = ?", (record["id"],))
+                return self.json_response({"renewed": True, "domain": domain_name, "years": years, "result": result})
+            if path == "/api/client/dns/provider-options" and method == "GET":
+                require_account(account)
+                plan = conn.execute("SELECT p.* FROM hosting_accounts ha JOIN plans p ON p.id = ha.plan_id WHERE ha.id = ?", (account["id"],)).fetchone()
+                return self.json_response({"dns_provider_options": dns_provider_options_for_plan(conn, plan)})
+            if (match := re.match(r"^/api/client/domains/(\d+)/dns/pull-provider-records/?$", path)) and method == "POST":
+                require_active_account(account)
+                domain_id = int(match.group(1))
+                domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                if domain["dns_provider"] != DNS_PROVIDER_CLOUDFLARE:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "provider_pull_not_supported")
+                ensure_no_active_dns_sync(conn, domain_id)
+                try:
+                    zone, remote_records, imported_count = pull_cloudflare_domain_records(conn, domain)
+                except DNSProviderError as exc:
+                    raise ApiError(HTTPStatus.BAD_GATEWAY, str(exc)) from exc
+                job_id = enqueue_dns_zone_sync(conn, domain_id, {"reason": "provider_records_pulled"})
+                conn.commit()
+                all_records = conn.execute("SELECT * FROM dns_records WHERE domain_id = ? ORDER BY type, name, id", (domain_id,)).fetchall()
+                return self.json_response({"imported_count": imported_count, "remote_record_count": len(remote_records), "job_id": job_id, "zone_id": zone.get("id"), "dns_records": decorated_dns_records(all_records)})
+            if path.startswith("/api/client/domains/") and path.endswith("/nameservers") and method == "POST":
+                require_account(account)
+                domain_id = int(path.split("/")[-2])
+                domain = conn.execute("SELECT d.* FROM domains d JOIN hosting_accounts ha ON ha.id = d.account_id WHERE d.id = ? AND ha.user_id = ?", (domain_id, actor["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                body = self.read_json()
+                source = str(body.get("source") or "custom").lower()
+                if source not in {"default", "custom"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_nameserver_source")
+                nameservers = [str(v).strip().rstrip(".").lower() for v in (body.get("nameservers") or []) if str(v).strip()]
+                if source == "default":
+                    nameservers = default_registrar_nameservers(conn)
+                if len(nameservers) < 2 or len(nameservers) > 4:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "two_to_four_nameservers_required")
+                result = update_domain_registrar_nameservers(conn, domain, nameservers, source=source)
+                log_activity(conn, actor["id"], "registrar_nameservers_updated", {"domain_id": domain_id, "source": source})
+                return self.json_response({"domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()), "result": result})
+            if path.startswith("/api/client/domains/") and path.endswith("/dns/rebuild") and method == "POST":
+                require_active_account(account)
+                domain_id = int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                ensure_no_active_dns_sync(conn, domain_id)
+                job_id = enqueue_agent_job(conn, "sync_dns_zone", "domain", domain_id, {"reason": "client_rebuild"})
+                log_activity(conn, actor["id"], "dns_zone_rebuild_requested", {"domain_id": domain_id})
+                return self.json_response({"job_id": job_id, "domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone())})
+            if path.startswith("/api/client/domains/") and path.endswith("/dns/verify-nameservers") and method == "POST":
+                require_account(account)
+                domain_id = int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                verification = verify_domain_nameservers(conn, domain)
+                log_activity(conn, actor["id"], "dns_nameservers_verified", {"domain_id": domain_id, "status": verification["status"]})
+                return self.json_response({"verification": verification, "domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone())})
+            if path.startswith("/api/client/domains/") and path.endswith("/dns/export") and method == "GET":
+                require_account(account)
+                domain_id = int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                export = create_dns_zone_export(conn, domain, "client:{}".format(actor["id"]))
+                log_activity(conn, actor["id"], "dns_zone_exported", {"domain_id": domain_id})
+                return self.json_response({"dns_zone_export": export})
+            if (path.startswith("/api/client/domains/") and path.endswith("/dns/migrate-provider") or (match := re.match(r"^/api/client/domains/(\d+)/dns/migrate-provider/?$", path))) and method == "POST":
+                require_account(account)
+                domain_id = int(match.group(1)) if (match := re.match(r"^/api/client/domains/(\d+)/dns/migrate-provider/?$", path)) else int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                plan = conn.execute("SELECT p.* FROM hosting_accounts ha JOIN plans p ON p.id = ha.plan_id WHERE ha.id = ?", (account["id"],)).fetchone()
+                policy = plan_dns_policy(plan) if plan else {}
+                if not policy.get("customer_editable", True):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "dns_provider_migration_not_allowed_by_plan")
+                body = self.read_json()
+                provider_key = clean_text(body.get("provider_key") or body.get("dns_provider") or "", "")
+                if provider_key not in policy.get("allowed_providers", []):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "dns_provider_not_allowed_by_plan")
+                provider_account_id = body.get("provider_account_id") or body.get("dns_provider_account_id") or policy.get("default_provider_account_id")
+                if provider_account_id in ("", None):
+                    provider_account_id = None
+                else:
+                    provider_account_id = positive_int(provider_account_id, "invalid_dns_provider_account_id")
+                allowed_account_ids = {int(value) for value in policy.get("allowed_provider_account_ids", []) if str(value).isdigit()}
+                if provider_key == DNS_PROVIDER_CLOUDFLARE:
+                    if allowed_account_ids and provider_account_id not in allowed_account_ids:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "dns_provider_account_not_allowed_by_plan")
+                    if not provider_account_id:
+                        fallback_sql = """
+                            SELECT a.id
+                            FROM dns_provider_accounts a
+                            JOIN dns_providers p ON p.id = a.provider_id
+                            WHERE p.key = ? AND a.status = 'active'
+                        """
+                        fallback_params = [DNS_PROVIDER_CLOUDFLARE]
+                        if allowed_account_ids:
+                            fallback_sql += " AND a.id IN ({})".format(sql_placeholders(sorted(allowed_account_ids)))
+                            fallback_params.extend(sorted(allowed_account_ids))
+                        fallback_sql += " ORDER BY a.id ASC LIMIT 1"
+                        fallback = conn.execute(fallback_sql, fallback_params).fetchone()
+                        if fallback:
+                            provider_account_id = fallback["id"]
+                        else:
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_account_required")
+                elif provider_account_id:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "provider_account_not_supported")
+                job_id = migrate_domain_dns_provider(conn, domain, provider_key, provider_account_id, "user:{}".format(actor["id"]))
+                log_activity(conn, actor["id"], "dns_provider_migrated", {"domain_id": domain_id, "provider_key": provider_key})
+                return self.json_response({"job_id": job_id, "domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone())})
+            if (path.startswith("/api/client/domains/") and path.endswith("/dns/set-default-records") or (match := re.match(r"^/api/client/domains/(\d+)/dns/set-default-records/?$", path))) and method == "POST":
+                require_account(account)
+                domain_id = int(match.group(1)) if (match := re.match(r"^/api/client/domains/(\d+)/dns/set-default-records/?$", path)) else int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                public_ip = get_host_public_ip(conn)
+                mail_host = mail_dns_target_for_account(account["username"])
+
+                conn.execute(
+                    "DELETE FROM dns_records WHERE domain_id = ? AND ((type = 'A' AND name = '@') OR (type = 'CNAME' AND name = 'www') OR (type = 'MX' AND name = '@') OR (type = 'TXT' AND name = '@'))",
+                    (domain["id"],),
+                )
+                conn.execute(
+                    "INSERT INTO dns_records(domain_id, type, name, value, ttl, proxied) VALUES (?, ?, ?, ?, ?, ?)",
+                    (domain["id"], "A", "@", public_ip, 300, 1),
+                )
+                conn.execute(
+                    "INSERT INTO dns_records(domain_id, type, name, value, ttl, proxied) VALUES (?, ?, ?, ?, ?, ?)",
+                    (domain["id"], "CNAME", "www", "@", 300, 1),
+                )
+                conn.execute(
+                    "INSERT INTO dns_records(domain_id, type, name, value, ttl, proxied) VALUES (?, ?, ?, ?, ?, ?)",
+                    (domain["id"], "MX", "@", mail_host, 300, 0),
+                )
+                conn.execute(
+                    "INSERT INTO dns_records(domain_id, type, name, value, ttl, proxied) VALUES (?, ?, ?, ?, ?, ?)",
+                    (domain["id"], "TXT", "@", "v=spf1 mx a ~all", 300, 0),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO dns_records(domain_id, type, name, value, ttl) VALUES (?, ?, ?, ?, ?)",
+                    (domain["id"], "TXT", "_dmarc", recommended_dmarc_record(domain["name"]), 300),
+                )
+                job_id = enqueue_agent_job(conn, "sync_dns_zone", "domain", domain["id"], {"reason": "set_default_records"})
+                log_activity(conn, actor["id"], "dns_default_records_set", {"domain_id": domain_id})
+                return self.json_response({
+                    "job_id": job_id,
+                    "domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()),
+                    "public_ip": public_ip,
+                })
+            if path == "/api/client/dns-records" and method == "GET":
+                require_account(account)
+                scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                if scope and scope.get("is_collaborator"):
+                    if not scope.get("allowed_menus") or "dns" not in scope["allowed_menus"]:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_dns")
+                domain_id = optional_positive_int(query.get("domain_id", [""])[0])
+                if domain_id:
+                    domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                    if not domain:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                    rows = conn.execute("SELECT * FROM dns_records WHERE domain_id = ? ORDER BY type, name", (domain_id,)).fetchall()
+                    zone_rows = conn.execute("SELECT * FROM dns_zones WHERE domain_id = ? ORDER BY zone_name", (domain_id,)).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT dr.* FROM dns_records dr
+                        JOIN domains d ON d.id = dr.domain_id
+                        WHERE d.account_id = ?
+                        ORDER BY dr.type, dr.name
+                        """,
+                        (account["id"],),
+                    ).fetchall()
+                    zone_rows = conn.execute("SELECT * FROM dns_zones WHERE account_id = ? ORDER BY zone_name", (account["id"],)).fetchall()
+                dns_zones = [decorate_dns_zone(row) for row in zone_rows]
+                return self.json_response({"dns_records": decorated_dns_records(rows), "dns_zones": dns_zones})
+            if path == "/api/client/dns-records" and method == "POST":
+                require_active_account(account)
+                scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                if scope and scope.get("is_collaborator"):
+                    if not scope.get("allowed_menus") or "dns" not in scope["allowed_menus"]:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_dns")
+                body = self.read_json()
+                record_payload = validate_dns_record_payload(body)
+                domain_id = record_payload["domain_id"]
+                domain = conn.execute("SELECT * FROM domains WHERE id = ? AND account_id = ?", (domain_id, account["id"])).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                ensure_no_active_dns_sync(conn, domain_id)
+                enforce_dns_record_policy(conn, account["id"], record_payload, domain_id, creating=True)
+                ensure_dns_record_conflicts(conn, domain_id, record_payload)
+                cur = conn.execute(
+                    "INSERT INTO dns_records(domain_id, type, name, value, ttl, priority, proxied, provider_metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        domain_id,
+                        record_payload["type"],
+                        record_payload["name"],
+                        record_payload["value"],
+                        record_payload["ttl"],
+                        record_payload["priority"],
+                        1 if record_payload.get("proxied") else 0,
+                        json.dumps(record_payload.get("provider_metadata") or {}, sort_keys=True),
+                    ),
+                )
+                job_id = enqueue_agent_job(conn, "sync_dns_record", "dns_record", cur.lastrowid, {})
+                log_activity(conn, actor["id"], "dns_record_created", {"domain_id": domain_id, "type": record_payload["type"]})
+                conn.commit()
+                all_records = conn.execute("SELECT * FROM dns_records WHERE domain_id = ? ORDER BY type, name", (domain_id,)).fetchall()
+                zone_rows = conn.execute("SELECT * FROM dns_zones WHERE domain_id = ? ORDER BY zone_name", (domain_id,)).fetchall()
+                dns_zones = [decorate_dns_zone(row) for row in zone_rows]
+                return self.json_response({"dns_record_id": cur.lastrowid, "job_id": job_id, "dns_records": decorated_dns_records(all_records), "dns_zones": dns_zones}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/dns-records/") and method == "PATCH":
+                require_active_account(account)
+                scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                if scope and scope.get("is_collaborator"):
+                    if not scope.get("allowed_menus") or "dns" not in scope["allowed_menus"]:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_dns")
+                record_id = path_int_id(path, "/api/client/dns-records/")
+                record = conn.execute(
+                    """
+                    SELECT dr.* FROM dns_records dr
+                    JOIN domains d ON d.id = dr.domain_id
+                    WHERE dr.id = ? AND d.account_id = ?
+                    """,
+                    (record_id, account["id"]),
+                ).fetchone()
+                if not record:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "dns_record_not_found")
+                ensure_no_active_dns_sync(conn, record["domain_id"])
+                ensure_dns_record_mutable(record)
+                body = self.read_json()
+                merged = row_to_dict(record)
+                for key in ("type", "name", "value", "ttl", "priority", "proxied"):
+                    if key in body:
+                        merged[key] = body[key]
+                merged["domain_id"] = record["domain_id"]
+                record_payload = validate_dns_record_payload(merged)
+                enforce_dns_record_policy(conn, account["id"], record_payload, record["domain_id"], creating=False)
+                ensure_dns_record_conflicts(conn, record["domain_id"], record_payload, exclude_record_id=record_id)
+                conn.execute(
+                    """
+                    UPDATE dns_records
+                    SET type = ?, name = ?, value = ?, ttl = ?, priority = ?, proxied = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        record_payload["type"],
+                        record_payload["name"],
+                        record_payload["value"],
+                        record_payload["ttl"],
+                        record_payload["priority"],
+                        1 if record_payload.get("proxied") else 0,
+                        record_id,
+                    ),
+                )
+                job_id = enqueue_agent_job(conn, "sync_dns_record", "dns_record", record_id, {})
+                log_activity(conn, actor["id"], "dns_record_updated", {"record_id": record_id, "type": record_payload["type"]})
+                conn.commit()
+                all_records = conn.execute("SELECT * FROM dns_records WHERE domain_id = ? ORDER BY type, name", (record["domain_id"],)).fetchall()
+                zone_rows = conn.execute("SELECT * FROM dns_zones WHERE domain_id = ? ORDER BY zone_name", (record["domain_id"],)).fetchall()
+                dns_zones = [decorate_dns_zone(row) for row in zone_rows]
+                return self.json_response({"dns_record_id": record_id, "job_id": job_id, "dns_records": decorated_dns_records(all_records), "dns_zones": dns_zones})
+            if path.startswith("/api/client/dns-records/") and method == "DELETE":
+                require_active_account(account)
+                scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                if scope and scope.get("is_collaborator"):
+                    if not scope.get("allowed_menus") or "dns" not in scope["allowed_menus"]:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_dns")
+                record_id = path_int_id(path, "/api/client/dns-records/")
+                record = conn.execute(
+                    """
+                    SELECT dr.* FROM dns_records dr
+                    JOIN domains d ON d.id = dr.domain_id
+                    WHERE dr.id = ? AND d.account_id = ?
+                    """,
+                    (record_id, account["id"]),
+                ).fetchone()
+                if not record:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "dns_record_not_found")
+                ensure_dns_record_mutable(record)
+                conn.execute("DELETE FROM dns_records WHERE id = ?", (record_id,))
+                # The database is the source of truth immediately. Queue the
+                # resulting sync behind an active sync instead of rejecting a
+                # valid rapid deletion and leaving the UI out of step.
+                job_id = enqueue_dns_zone_sync(conn, record["domain_id"], {"reason": "record_deleted"})
+                log_activity(conn, actor["id"], "dns_record_deleted", {"record_id": record_id})
+                conn.commit()
+                all_records = conn.execute("SELECT * FROM dns_records WHERE domain_id = ? ORDER BY type, name", (record["domain_id"],)).fetchall()
+                zone_rows = conn.execute("SELECT * FROM dns_zones WHERE domain_id = ? ORDER BY zone_name", (record["domain_id"],)).fetchall()
+                dns_zones = [decorate_dns_zone(row) for row in zone_rows]
+                return self.json_response({"deleted": True, "job_id": job_id, "dns_records": decorated_dns_records(all_records), "dns_zones": dns_zones})
+            if path == "/api/client/ssh" and method == "GET":
+                require_active_account(account)
+                acc_dict = dict(account)
+                ssh_status = acc_dict.get("ssh_access") or "disabled"
+                runtime = build_account_runtime(acc_dict, CONFIG.public_host, CONFIG.account_port_base)
+                host_hdr = (self.headers.get("Host") or self.headers.get("host") or "") if hasattr(self, "headers") and self.headers else ""
+                host = host_hdr.split(":")[0] if host_hdr else ""
+                if not host or host in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                    if CONFIG.public_host and CONFIG.public_host not in {"127.0.0.1", "0.0.0.0", "localhost"}:
+                        host = CONFIG.public_host
+                    else:
+                        host = "seeds.servermango.com"
+                return self.json_response({
+                    "enabled": (ssh_status == "enabled"),
+                    "ssh_access": ssh_status,
+                    "host": host,
+                    "port": runtime["sftp_port"],
+                    "user": account["username"],
+                    "path": account["base_path"],
+                    "has_password": bool(acc_dict.get("ssh_password")),
+                })
+            if path == "/api/client/ftp-access" and method == "GET":
+                require_active_account(account)
+                enabled = (dict(account).get("ftp_access") or "enabled") == "enabled"
+                runtime = build_account_runtime(dict(account), CONFIG.public_host, CONFIG.account_port_base)
+                return self.json_response({"enabled": enabled, "ftp_access": "enabled" if enabled else "disabled", "host": runtime.get("public_host") or CONFIG.public_host, "port": runtime["ftp_port"], "passive_min": runtime["ftp_passive_min"], "passive_max": runtime["ftp_passive_max"]})
+            if path == "/api/client/ftp-access/toggle" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                enabled = bool(body.get("enabled", False))
+                new_status = "enabled" if enabled else "disabled"
+                res = Agent(CONFIG).set_ftp_access(conn, account["id"], new_status)
+                log_activity(conn, actor["id"], f"ftp_access_{new_status}", {"account_id": account["id"]})
+                return self.json_response(res)
+            if path == "/api/client/ssh/toggle" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                enabled = bool(body.get("enabled", False))
+                new_status = "enabled" if enabled else "disabled"
+                res = Agent(CONFIG).set_ssh_access(conn, account["id"], new_status)
+                log_activity(conn, actor["id"], f"ssh_access_{new_status}", {"account_id": account["id"]})
+                host_hdr = (self.headers.get("Host") or self.headers.get("host") or "") if hasattr(self, "headers") and self.headers else ""
+                host = host_hdr.split(":")[0] if host_hdr else ""
+                if not host or host in {"127.0.0.1", "localhost", "0.0.0.0"}:
+                    if CONFIG.public_host and CONFIG.public_host not in {"127.0.0.1", "0.0.0.0", "localhost"}:
+                        host = CONFIG.public_host
+                    else:
+                        host = "seeds.servermango.com"
+                return self.json_response({
+                    "enabled": (new_status == "enabled"),
+                    "ssh_access": new_status,
+                    "host": host,
+                    "port": res["port"],
+                    "user": res["user"],
+                    "path": account["base_path"],
+                })
+            if path == "/api/client/ssh/password" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                new_pw = str(body.get("password") or "").strip()
+                if not new_pw:
+                    # Auto-generate a secure password
+                    import secrets as _secrets
+                    new_pw = _secrets.token_urlsafe(16)
+                if len(new_pw) < 8 or len(new_pw) > 64:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_ssh_password_length")
+                Agent(CONFIG).set_ssh_password(conn, account["id"], new_pw)
+                log_activity(conn, actor["id"], "ssh_password_changed", {"account_id": account["id"]})
+                return self.json_response({"success": True, "password": new_pw})
+
+            if path == "/api/client/ssl/issue" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = positive_int(body.get("website_id"), "invalid_website_id")
+                website = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                if int(website["is_subdomain"] or 0):
+                    require_collaborator_permission(conn, actor["id"], account["id"], "can_edit_subdomains", resource_type="subdomain", resource_id=website_id)
+                # Do not create a second issuance job while one is already
+                # queued or running. Repeated clicks used to restart the
+                # shared Caddy proxy and multiply ACME attempts.
+                existing = conn.execute(
+                    """SELECT id FROM jobs
+                       WHERE type = 'issue_ssl' AND target_type = 'website'
+                         AND target_id = ? AND status IN ('queued', 'running')
+                       ORDER BY id DESC LIMIT 1""",
+                    (website_id,),
+                ).fetchone()
+                job_id = existing["id"] if existing else enqueue_agent_job(conn, "issue_ssl", "website", website_id, {"mode": "auto"})
+                refreshed = conn.execute("SELECT ssl_status FROM websites WHERE id = ?", (website_id,)).fetchone()
+                order = conn.execute(
+                    "SELECT * FROM acme_certificate_orders WHERE account_id = ? AND domain = ? ORDER BY id DESC LIMIT 1",
+                    (account["id"], website["domain"]),
+                ).fetchone()
+                acme_order = row_to_dict(order) if order else None
+                if acme_order:
+                    acme_order["provider_state"] = parse_json_field(acme_order.get("provider_state_json"), {})
+                return self.json_response({"ssl_status": refreshed["ssl_status"], "job_id": job_id, "acme_order": acme_order})
+            if path.startswith("/api/client/websites/") and path.endswith("/connection-check") and method == "POST":
+                require_active_account(account)
+                website_id = int(path.split("/")[-2])
+                website = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                domain_name = website["domain"]
+                body = self.read_json()
+                auto_update_dns = bool(body.get("auto_update_dns"))
+                nameserver_update = None
+                if auto_update_dns:
+                    domain_row = conn.execute("SELECT * FROM domains WHERE linked_website_id = ?", (website_id,)).fetchone()
+                    registrar_record = conn.execute(
+                        """SELECT r.*, ra.*, rp.key AS provider_key
+                           FROM registrar_domain_records r
+                           JOIN registrar_accounts ra ON ra.id = r.registrar_account_id
+                           JOIN registrar_providers rp ON rp.id = ra.provider_id
+                           WHERE lower(r.domain_name) = lower(?) AND r.client_user_id = ? AND ra.status != 'deleted'
+                           LIMIT 1""",
+                        (domain_name, actor["id"]),
+                    ).fetchone()
+                    if not registrar_record:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "domain_not_assigned_to_client_for_dns_update")
+                    nameservers = parse_json_field(domain_row["nameservers_json"], []) if domain_row else []
+                    if not nameservers:
+                        nameservers = preview_domain_dns(conn, account, domain_name).get("nameservers") or default_registrar_nameservers(conn)
+                    if len(nameservers) < 2:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "dns_nameservers_not_ready")
+                    try:
+                        nameserver_update = registrar_for(registrar_record["provider_key"], registrar_account_settings(conn, registrar_record)).update_nameservers(domain_name, nameservers, registrar_record["registrar_domain_id"])
+                    except NotImplementedError:
+                        raise ApiError(HTTPStatus.BAD_GATEWAY, "domain_provider_nameserver_update_not_supported")
+                    except RegistrarError as exc:
+                        raise ApiError(HTTPStatus.BAD_GATEWAY, "domain_provider_nameserver_update_failed: " + str(exc)[:180])
+                    conn.execute("UPDATE registrar_domain_records SET nameservers_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(nameservers), registrar_record["id"]))
+                    if domain_row:
+                        conn.execute("UPDATE domains SET nameservers_json = ?, nameserver_source = 'custom', last_registrar_sync_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(nameservers), domain_row["id"]))
+                observed_a = []
+                observed_ipv4 = []
+                observed_ipv6 = []
+                observed_ns = []
+                dns_sync_job_id = None
+                if auto_update_dns and domain_row:
+                    dns_sync_job_id = enqueue_dns_zone_sync(domain_row["id"], {"reason": "connect_auto_update_dns"})
+                dig = shutil.which("dig")
+                if dig:
+                    for record_type, target in (("A", observed_ipv4), ("AAAA", observed_ipv6), ("NS", observed_ns)):
+                        try:
+                            result = subprocess.run([dig, "+short", record_type, domain_name], check=False, capture_output=True, text=True, timeout=8)
+                            target.extend(sorted({line.strip().rstrip(".") for line in result.stdout.splitlines() if line.strip()}))
+                        except (OSError, subprocess.TimeoutExpired):
+                            pass
+                else:
+                    try:
+                        observed_ipv4.extend(socket.gethostbyname_ex(domain_name)[2])
+                    except OSError:
+                        pass
+                domain_row = conn.execute("SELECT * FROM domains WHERE linked_website_id = ?", (website_id,)).fetchone()
+                expected_ns = parse_json_field(domain_row["nameservers_json"], []) if domain_row else []
+                if domain_row and not expected_ns and observed_ns:
+                    conn.execute("UPDATE domains SET nameservers_json = ? WHERE id = ?", (json.dumps(observed_ns), domain_row["id"]))
+                    expected_ns = observed_ns
+                observed_a = sorted(set(observed_ipv4 + observed_ipv6))
+                ns_ok = bool(observed_ns and (not expected_ns or set(ns.lower() for ns in expected_ns).issubset({ns.lower() for ns in observed_ns})))
+                # Merely finding an A/AAAA record is not enough for AutoSSL:
+                # Let's Encrypt must reach this server. A stale AAAA record
+                # is especially harmful because ACME may prefer IPv6 even
+                # when the IPv4 record is correct.
+                ip_ok = bool(observed_ipv4 or observed_ipv6)
+                if domain_row and domain_row["dns_provider"] != DNS_PROVIDER_CLOUDFLARE:
+                    expected_ipv4 = get_host_public_ip(conn)
+                    expected_ipv6 = ""
+                    try:
+                        local_provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+                        local_config = parse_json_field(local_provider["config_json"], {}) if local_provider else {}
+                        expected_ipv6 = str(local_config.get("public_ipv6") or "").strip()
+                    except Exception:
+                        expected_ipv6 = ""
+                    matching_ipv4 = expected_ipv4 in observed_ipv4 if expected_ipv4 else False
+                    matching_ipv6 = expected_ipv6 in observed_ipv6 if expected_ipv6 else False
+                    ip_ok = matching_ipv4 or matching_ipv6
+                    if observed_ipv6 and not matching_ipv6:
+                        ip_ok = False
+                verified = ns_ok or ip_ok
+                job_id = None
+                if verified:
+                    try:
+                        sync_cloudflare_acme_rules(conn, CONFIG, website_id=website_id)
+                    except Exception as exc:
+                        logging.warning("Failed to sync Cloudflare ACME rules on connection-check: %s", exc)
+                    job_id = enqueue_agent_job(conn, "issue_ssl", "website", website_id, {"mode": "auto", "connection_check": True})
+                    if not (CONFIG.agent_mode == "docker" and CONFIG.env != "development"):
+                        conn.execute("UPDATE websites SET ssl_status = 'active' WHERE id = ?", (website_id,))
+                return self.json_response({"verified": verified, "nameservers_verified": ns_ok, "ip_verified": ip_ok, "observed_nameservers": observed_ns, "observed_ips": observed_a, "expected_nameservers": expected_ns, "dns_sync_job_id": dns_sync_job_id, "auto_ssl_job_id": job_id, "nameserver_update": nameserver_update, "message": "DNS is reachable. DNS records and AutoSSL have been queued." if verified else ("Nameservers updated. DNS record sync is queued; SSL will be issued after propagation." if auto_update_dns else "DNS is not pointing to this hosting account yet.")})
+            if path == "/api/client/ssl/custom" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = int(body.get("website_id", 0))
+                crt = str(body.get("crt", "")).strip()
+                key = str(body.get("key", "")).strip()
+                if not crt or not key:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "certificate_and_key_required")
+                website = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                conn.execute(
+                    """
+                    INSERT INTO ssl_certificates(account_id, website_id, domain, status, issued_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (account["id"], website_id, website["domain"], "custom"),
+                )
+                conn.execute("UPDATE websites SET ssl_status = 'custom' WHERE id = ?", (website_id,))
+                job_id = enqueue_agent_job(conn, "install_custom_ssl", "website", website_id, {"crt": crt, "key": key})
+                log_activity(conn, actor["id"], "custom_ssl_installed", {"website_id": website_id, "domain": website["domain"]})
+                return self.json_response({"success": True, "ssl_status": "custom", "job_id": job_id})
+            if path == "/api/client/collaborators/check-email" and method == "POST":
+                require_account(account)
+                if account["user_id"] != actor["id"]:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "only_owner_can_manage_collaborators")
+                body = self.read_json()
+                email = str(body.get("email", "")).strip().lower()
+                if not email:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "email_required")
+                u_row = conn.execute("SELECT id, email, full_name FROM users WHERE LOWER(email) = LOWER(?)", (email,)).fetchone()
+                if u_row:
+                    u = dict(u_row)
+                    return self.json_response({"exists": True, "user": {"id": u["id"], "email": u["email"], "full_name": u["full_name"]}})
+                return self.json_response({"exists": False, "user": None})
+
+            if path == "/api/client/collaborators/create-user" and method == "POST":
+                require_account(account)
+                if account["user_id"] != actor["id"]:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "only_owner_can_manage_collaborators")
+                body = self.read_json()
+                email = str(body.get("email", "")).strip().lower()
+                full_name = str(body.get("full_name", "")).strip()
+                password = str(body.get("password", ""))
+                enable_totp = bool(body.get("enable_totp", False))
+
+                if not email or "@" not in email:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "valid_email_required")
+                if not full_name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "name_required")
+                if len(password) < 6:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "password_min_6_chars")
+
+                existing = conn.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,)).fetchone()
+                if existing:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "user_already_exists")
+
+                pwd_hash = hash_password(password)
+                cur = conn.execute(
+                    "INSERT INTO users (role, email, password_hash, full_name, status, totp_secret, created_at) VALUES ('client', ?, ?, ?, 'active', '', CURRENT_TIMESTAMP)",
+                    (email, pwd_hash, full_name),
+                )
+                new_user_id = cur.lastrowid
+
+                totp_data = None
+                if enable_totp:
+                    totp_secret = generate_totp_secret()
+                    conn.execute("UPDATE users SET totp_secret = ? WHERE id = ?", (totp_secret, new_user_id))
+                    totp_data = {"secret": totp_secret, "uri": otpauth_uri("ZeroPanel", email, totp_secret)}
+
+                return self.json_response({"status": "created", "user": {"id": new_user_id, "email": email, "full_name": full_name}, "totp": totp_data})
+
+            if path == "/api/client/collaborators" and method == "GET":
+                require_account(account)
+                rows = conn.execute(
+                    """
+                    SELECT c.*, u.full_name AS target_full_name, u.email AS target_email
+                    FROM collaborators c
+                    LEFT JOIN users u ON u.id = c.target_user_id
+                    WHERE c.hosting_account_id = ?
+                    ORDER BY c.id DESC
+                    """,
+                    (account["id"],),
+                ).fetchall()
+                collabs = []
+                for r in rows:
+                    d = dict(r)
+                    d["permissions"] = parse_json_field(d.get("permissions_json"), {})
+                    collabs.append(d)
+
+                shared_rows = conn.execute(
+                    """
+                    SELECT c.id AS collaborator_id, c.permissions_json, ha.id AS hosting_account_id, ha.username AS account_number, ha.user_id AS owner_id, ou.full_name AS owner_name, ou.email AS owner_email, p.name AS plan_name
+                    FROM collaborators c
+                    JOIN hosting_accounts ha ON ha.id = c.hosting_account_id
+                    JOIN users ou ON ou.id = ha.user_id
+                    JOIN plans p ON p.id = ha.plan_id
+                    WHERE (c.target_user_id = ? OR LOWER(c.invited_email) = LOWER(?)) AND c.status = 'active'
+                    """,
+                    (actor["id"], actor.get("email", "")),
+                ).fetchall()
+                shared = []
+                for r in shared_rows:
+                    d = dict(r)
+                    d["permissions"] = parse_json_field(d.get("permissions_json"), {})
+                    shared.append(d)
+
+                return self.json_response({"collaborators": collabs, "shared_accounts": shared})
+
+            if path == "/api/client/collaborators" and method == "POST":
+                require_account(account)
+                if account["user_id"] != actor["id"]:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "only_owner_can_manage_collaborators")
+
+                body = self.read_json()
+                email = str(body.get("invited_email", "")).strip().lower()
+                name = str(body.get("invited_name", "")).strip()
+                perms = body.get("permissions", {})
+                if not email:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "email_required")
+
+                u_row = conn.execute("SELECT id, full_name FROM users WHERE LOWER(email) = LOWER(?)", (email,)).fetchone()
+                target_user_id = u_row["id"] if u_row else None
+                if not name and u_row and u_row["full_name"]:
+                    name = u_row["full_name"]
+
+                collab_id = optional_positive_int(body.get("id"))
+                perms_json = json.dumps(perms)
+
+                if collab_id:
+                    conn.execute(
+                        """
+                        UPDATE collaborators
+                        SET invited_email = ?, invited_name = ?, target_user_id = ?, permissions_json = ?, status = 'active'
+                        WHERE id = ? AND hosting_account_id = ?
+                        """,
+                        (email, name, target_user_id, perms_json, collab_id, account["id"]),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO collaborators (owner_user_id, invited_email, invited_name, target_user_id, hosting_account_id, permissions_json, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+                        """,
+                        (actor["id"], email, name, target_user_id, account["id"], perms_json),
+                    )
+
+                return self.json_response({"status": "saved"})
+
+            if path.startswith("/api/client/collaborators/") and method == "DELETE":
+                collab_id = path_int_id(path, "/api/client/collaborators/")
+                c_row = conn.execute("SELECT * FROM collaborators WHERE id = ?", (collab_id,)).fetchone()
+                if not c_row:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "collaborator_not_found")
+                collab = dict(c_row)
+                acc = conn.execute("SELECT user_id FROM hosting_accounts WHERE id = ?", (collab["hosting_account_id"],)).fetchone()
+                is_owner = acc and acc["user_id"] == actor["id"]
+                is_target = (collab.get("target_user_id") == actor["id"]) or (collab.get("invited_email", "").strip().lower() == actor.get("email", "").strip().lower())
+
+                if not is_owner and not is_target:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "access_denied")
+
+                conn.execute("DELETE FROM collaborators WHERE id = ?", (collab_id,))
+                return self.json_response({"status": "deleted"})
+
+            if path == "/api/client/collaborators/switch-account" and method == "POST":
+                body = self.read_json()
+                target_acc_id = optional_positive_int(body.get("account_id"))
+                if not target_acc_id:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "account_id_required")
+                acc = conn.execute("SELECT * FROM hosting_accounts WHERE id = ? AND status != 'deleted'", (target_acc_id,)).fetchone()
+                if not acc:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "account_not_found")
+                acc_d = dict(acc)
+                if acc_d["user_id"] != actor["id"]:
+                    collab = conn.execute(
+                        "SELECT id FROM collaborators WHERE hosting_account_id = ? AND (target_user_id = ? OR LOWER(invited_email) = LOWER(?)) AND status = 'active'",
+                        (target_acc_id, actor["id"], actor.get("email", "")),
+                    ).fetchone()
+                    if not collab:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_account")
+
+                # Account context is carried by X-Hosting-Account-ID on the
+                # subsequent client requests. The sessions table is
+                # deliberately stateless with respect to account selection.
+                return self.json_response({"status": "switched", "active_account_id": target_acc_id})
+            if path == "/api/client/files/launch" and method == "GET":
+                require_account(account)
+                runtime = account_runtime(conn, account["id"])
+                forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+                base_url = resolve_tool_launch_url("filebrowser", runtime.get("filebrowser_url", ""), account, forwarded_host)
+                requested_path = query.get("path", [""])[0].strip()
+                scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                if scope and scope.get("is_collaborator") and scope.get("allowed_website_ids") is not None:
+                    allowed_ws = scope["allowed_website_ids"]
+                    allowed_domains = []
+                    if allowed_ws:
+                        placeholders = ",".join("?" for _ in allowed_ws)
+                        allowed_domains = [r["domain"] for r in conn.execute(f"SELECT domain FROM websites WHERE account_id = ? AND id IN ({placeholders})", [account["id"], *allowed_ws]).fetchall()]
+                    
+                    is_valid = False
+                    for dom in allowed_domains:
+                        target_prefix = f"/domains/{dom}"
+                        if requested_path == target_prefix or requested_path.startswith(f"{target_prefix}/"):
+                            is_valid = True
+                            break
+                    if not is_valid and allowed_domains:
+                        requested_path = f"/domains/{allowed_domains[0]}"
+                launch_token = create_jwt(
+                    {
+                        "sub": actor["id"],
+                        "actor_type": "user",
+                        "purpose": "tool_launch",
+                        "tool": "filebrowser",
+                        "account_id": account["id"],
+                        "username": account["username"],
+                    },
+                    CONFIG.jwt_secret,
+                    600,
+                )
+                launch_url = f"{base_url}/auth/{launch_token}"
+                if requested_path:
+                    clean_req = requested_path.strip()
+                    if clean_req.rstrip("/") in {"/files", "files", "/", ""}:
+                        rel_path = ""
+                    else:
+                        if clean_req.startswith("/files/"):
+                            clean_req = clean_req[len("/files/"):]
+                        _, rel_path = normalize_account_relative_path(account, clean_req, allow_empty=True)
+                    launch_url += "/files"
+                    if rel_path:
+                        launch_url += f"/{rel_path.lstrip('/')}"
+                usage = conn.execute(
+                    "SELECT storage_mb, storage_limit_mb FROM resource_usage_samples WHERE account_id = ? ORDER BY sampled_at DESC LIMIT 1",
+                    (account["id"],)
+                ).fetchone()
+
+                used_mb = usage["storage_mb"] if usage else 0
+                limit_mb = usage["storage_limit_mb"] if usage else 0
+                if limit_mb == 0:
+                    plan = conn.execute("SELECT storage_mb FROM plans WHERE id = ?", (account["plan_id"],)).fetchone()
+                    limit_mb = plan["storage_mb"] if plan else 1000
+
+                u_str = f"{round(used_mb / 1024, 1)} GB" if used_mb >= 1024 else f"{round(used_mb)} MB"
+                l_str = f"{round(limit_mb / 1024, 1)} GB" if limit_mb >= 1024 else f"{round(limit_mb)} MB"
+
+                pct = min(100, round((used_mb / limit_mb) * 100)) if limit_mb > 0 else 0
+                bar_color = "#ef4444" if pct > 90 else ("#f59e0b" if pct > 75 else "#10b981")
+
+                css_text = f"""
+                .credits .progress div,
+                .credits div div,
+                div[class*="progress"] div {{
+                    background-color: {bar_color} !important;
+                    background: {bar_color} !important;
+                }}
+                """
+
+                custom_js_code = f"window.MP_STORAGE_DATA = {{ used: {round(used_mb)}, limit: {round(limit_mb)} }};\n" + FILEBROWSER_CUSTOM_JS
+                import os
+                config_dir = os.path.join(account["base_path"], ".runtime", "stack", "filebrowser-config")
+                os.makedirs(config_dir, exist_ok=True)
+                settings_file = os.path.join(config_dir, "settings.json")
+                if os.path.exists(settings_file):
+                    try:
+                        with open(settings_file, "r") as f:
+                            st = json.load(f)
+                        if st.get("branding", {}).get("disableUsedPercentage") is not False:
+                            st.setdefault("branding", {})["disableUsedPercentage"] = False
+                            with open(settings_file, "w") as f:
+                                json.dump(st, f, indent=2)
+                    except Exception:
+                        pass
+
+                branding_dir = os.path.join(account["base_path"], ".runtime", "stack", "filebrowser-branding")
+                os.makedirs(branding_dir, exist_ok=True)
+                with open(os.path.join(branding_dir, "custom.css"), "w") as f:
+                    f.write(css_text)
+                with open(os.path.join(branding_dir, "custom.js"), "w") as f:
+                    f.write(custom_js_code)
+
+                return self.json_response({"launch_url": launch_url, "expires_in": 600})
+            if path == "/api/client/files/extract" and method == "POST":
+                require_account(account)
+                return self.extract_file_archive(account, actor)
+            if path == "/api/client/phppgadmin/launch" and method == "GET":
+                require_account(account)
+                runtime = account_runtime(conn, account["id"])
+                forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+                base_url = resolve_tool_launch_url("adminer", runtime.get("adminer_url", ""), account, forwarded_host)
+                return self.json_response({"launch_url": base_url, "expires_in": 300})
+            if path == "/api/client/phpmyadmin/launch" and method == "GET":
+                require_account(account)
+                runtime = account_runtime(conn, account["id"])
+                forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+                base_url = resolve_tool_launch_url("phpmyadmin", runtime.get("phpmyadmin_url", ""), account, forwarded_host)
+                launch_token = create_jwt(
+                    {
+                        "sub": actor["id"],
+                        "actor_type": "user",
+                        "purpose": "tool_launch",
+                        "tool": "phpmyadmin",
+                        "account_id": account["id"],
+                        "username": account["username"],
+                    },
+                    CONFIG.jwt_secret,
+                    600,
+                )
+                launch_url = f"{base_url}/auth/{launch_token}"
+                return self.json_response({"launch_url": launch_url, "expires_in": 600})
+            if path == "/api/client/webmail/launch" and method == "GET":
+                require_account(account)
+                runtime = account_runtime(conn, account["id"])
+                forwarded_host = self.headers.get("X-Forwarded-Host", "") or self.headers.get("Host", "")
+                raw_url = runtime.get("mail_webmail_url", "")
+                launch_url = resolve_tool_launch_url("webmail", raw_url, account, forwarded_host)
+                return self.json_response({"launch_url": launch_url, "expires_in": 3600})
+            if path.startswith("/api/client/mailboxes/") and path.endswith("/webmail/launch") and method == "GET":
+                require_active_account(account)
+                mailbox_id = path_int_id(path.replace("/webmail/launch", ""), "/api/client/mailboxes/")
+                mailbox = require_owned_mailbox(conn, account["id"], mailbox_id)
+                runtime = account_runtime(conn, account["id"])
+                launch_token = create_jwt(
+                    {
+                        "sub": account["user_id"],
+                        "actor_type": "user",
+                        "purpose": "tool_launch",
+                        "tool": "webmail",
+                        "account_id": account["id"],
+                        "mailbox_id": mailbox["id"],
+                        "jti": secrets.token_urlsafe(16),
+                    },
+                    CONFIG.jwt_secret,
+                    3600,
+                )
+                launch_path = f"/webmail?launch={launch_token}"
+                # Start the handoff on the account mail host.  The panel
+                # returns SnappyMail session cookies, and a browser will only
+                # accept those cookies for the account host that is serving
+                # the webmail route.  Starting on the panel origin silently
+                # strands them on the panel domain.
+                mail_webmail_url = runtime.get("mail_webmail_url", "").rstrip("/")
+                if mail_webmail_url.endswith("/webmail"):
+                    launch_url = f"{mail_webmail_url}?launch={launch_token}"
+                else:
+                    launch_url = f"{mail_webmail_url}{launch_path}" if mail_webmail_url else launch_path
+                return self.json_response({"launch_url": launch_url, "expires_in": 3600, "mailbox": mailbox_row_payload(conn, mailbox)})
+            if path == "/api/client/databases" and method == "GET":
+                require_account(account)
+                return self.json_response(client_databases_payload(conn, account["id"], actor["id"]))
+            if path == "/api/client/pg-databases" and method == "GET":
+                require_account(account)
+                return self.json_response(client_pg_databases_payload(conn, account["id"]))
+            if path == "/api/client/pg-databases" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                name = validate_db_identifier(body.get("name"), "invalid_database_name")
+                try:
+                    cur = conn.execute("INSERT INTO pg_databases(account_id, name) VALUES (?, ?)", (account["id"], name))
+                except sqlite3.IntegrityError as exc:
+                    raise ApiError(HTTPStatus.CONFLICT, "database_name_already_exists") from exc
+                job_id = enqueue_agent_job(conn, "sync_pg_databases", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "pg_database_created", {"name": name})
+                return self.json_response({"pg_database_id": cur.lastrowid, "job_id": job_id, **client_pg_databases_payload(conn, account["id"])}, HTTPStatus.CREATED)
+            if match := re.match(r"^/api/client/pg-databases/(\d+)$", path):
+                require_active_account(account)
+                database_id = int(match.group(1))
+                database = require_owned_pg_database(conn, account["id"], database_id)
+                if method == "DELETE":
+                    conn.execute("DELETE FROM pg_grants WHERE database_id = ?", (database_id,))
+                    conn.execute("DELETE FROM pg_databases WHERE id = ?", (database_id,))
+                    job_id = enqueue_agent_job(conn, "sync_pg_databases", "hosting_account", account["id"], {})
+                    log_activity(conn, actor["id"], "pg_database_deleted", {"name": database["name"]})
+                    return self.json_response({"deleted": True, "job_id": job_id, **client_pg_databases_payload(conn, account["id"])})
+                raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+            if path == "/api/client/pg-databases/users" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                username = validate_db_identifier(body.get("username"), "invalid_database_username")
+                password = validate_db_password(body.get("password"))
+                try:
+                    cur = conn.execute("INSERT INTO pg_users(account_id, username, password) VALUES (?, ?, ?)", (account["id"], username, password))
+                except sqlite3.IntegrityError as exc:
+                    raise ApiError(HTTPStatus.CONFLICT, "database_user_already_exists") from exc
+                job_id = enqueue_agent_job(conn, "sync_pg_databases", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "pg_user_created", {"username": username})
+                return self.json_response({"pg_user_id": cur.lastrowid, "job_id": job_id, **client_pg_databases_payload(conn, account["id"])}, HTTPStatus.CREATED)
+            if path == "/api/client/pg-databases/users/password" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                user_id = int(body.get("user_id", 0))
+                password = validate_db_password(body.get("password"))
+                db_user = require_owned_pg_user(conn, account["id"], user_id)
+                conn.execute("UPDATE pg_users SET password = ? WHERE id = ?", (password, user_id))
+                job_id = enqueue_agent_job(conn, "sync_pg_databases", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "pg_user_password_changed", {"username": db_user["username"]})
+                return self.json_response({"success": True, "job_id": job_id, **client_pg_databases_payload(conn, account["id"])})
+            if match := re.match(r"^/api/client/pg-databases/users/(\d+)$", path):
+                require_active_account(account)
+                user_id = int(match.group(1))
+                db_user = require_owned_pg_user(conn, account["id"], user_id)
+                if method == "DELETE":
+                    conn.execute("DELETE FROM pg_grants WHERE user_id = ?", (user_id,))
+                    conn.execute("DELETE FROM pg_users WHERE id = ?", (user_id,))
+                    job_id = enqueue_agent_job(conn, "sync_pg_databases", "hosting_account", account["id"], {})
+                    log_activity(conn, actor["id"], "pg_user_deleted", {"username": db_user["username"]})
+                    return self.json_response({"deleted": True, "job_id": job_id, **client_pg_databases_payload(conn, account["id"])})
+                raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+            if path == "/api/client/pg-databases/users/grants" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                privileges = validate_db_privileges(body.get("privileges", "ALL"))
+                database_id = int(body.get("database_id", 0))
+                user_id = int(body.get("user_id", 0))
+                require_owned_pg_database(conn, account["id"], database_id)
+                require_owned_pg_user(conn, account["id"], user_id)
+                try:
+                    cur = conn.execute("INSERT INTO pg_grants(database_id, user_id, privileges) VALUES (?, ?, ?)", (database_id, user_id, privileges))
+                except sqlite3.IntegrityError as exc:
+                    raise ApiError(HTTPStatus.CONFLICT, "database_grant_already_exists") from exc
+                job_id = enqueue_agent_job(conn, "sync_pg_databases", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "pg_grant_created", {"database_id": database_id, "user_id": user_id})
+                return self.json_response({"pg_grant_id": cur.lastrowid, "job_id": job_id, **client_pg_databases_payload(conn, account["id"])}, HTTPStatus.CREATED)
+            if match := re.match(r"^/api/client/pg-databases/users/grants/(\d+)$", path):
+                require_active_account(account)
+                grant_id = int(match.group(1))
+                grant = require_owned_pg_grant(conn, account["id"], grant_id)
+                if method == "DELETE":
+                    conn.execute("DELETE FROM pg_grants WHERE id = ?", (grant_id,))
+                    job_id = enqueue_agent_job(conn, "sync_pg_databases", "hosting_account", account["id"], {})
+                    log_activity(conn, actor["id"], "pg_grant_deleted", {"grant_id": grant["id"]})
+                    return self.json_response({"deleted": True, "job_id": job_id, **client_pg_databases_payload(conn, account["id"])})
+                raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+
+            if path == "/api/client/websites" and method == "POST":
+                require_active_account(account)
+                require_plan_capacity(conn, account["id"], "websites", "max_websites", "website_limit_reached")
+                require_inode_capacity(conn, account["id"])
+            if path == "/api/client/database-wizard" and method == "POST":
+                require_active_account(account)
+                require_collaborator_permission(conn, actor["id"], account["id"], "can_create_databases")
+                require_plan_capacity(conn, account["id"], "databases", "max_databases", "database_limit_reached")
+                require_inode_capacity(conn, account["id"])
+                body = self.read_json()
+                name = validate_db_identifier(body.get("name"), "invalid_database_name")
+                username = validate_db_identifier(body.get("username"), "invalid_database_username")
+                password = validate_db_password(body.get("password"))
+                privileges = validate_db_privileges(body.get("privileges", "ALL"))
+                website_id = optional_positive_int(body.get("website_id"))
+                if website_id:
+                    require_owned_website(conn, account["id"], website_id, actor["id"])
+                if conn.execute("SELECT id FROM databases WHERE name = ?", (name,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "database_name_already_exists")
+                existing_user = conn.execute(
+                    "SELECT id, account_id FROM database_users WHERE username = ?",
+                    (username,),
+                ).fetchone()
+                if existing_user and int(existing_user["account_id"]) != int(account["id"]):
+                    raise ApiError(HTTPStatus.CONFLICT, "database_user_already_exists")
+                db_cur = conn.execute(
+                    "INSERT INTO databases(account_id, name, username, website_id, status, created_by_user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (account["id"], name, username, website_id, "active", actor["id"]),
+                )
+                if existing_user:
+                    user_id = int(existing_user["id"])
+                    conn.execute(
+                        "UPDATE database_users SET password_hash = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (hash_password(password), user_id),
+                    )
+                    user_action = "update_database_user"
+                else:
+                    user_cur = conn.execute(
+                        "INSERT INTO database_users(account_id, username, password_hash, status) VALUES (?, ?, ?, ?)",
+                        (account["id"], username, hash_password(password), "active"),
+                    )
+                    user_id = int(user_cur.lastrowid)
+                    user_action = "create_database_user"
+                grant_cur = conn.execute(
+                    "INSERT INTO database_grants(database_id, user_id, privileges, status) VALUES (?, ?, ?, ?)",
+                    (db_cur.lastrowid, user_id, privileges, "active"),
+                )
+                job_id = enqueue_agent_job(conn, "create_database", "database", db_cur.lastrowid, {"name": name, "account_id": account["id"]})
+                # Create the database/container first; the user and grant
+                # jobs must never race a database service that is still
+                # being provisioned.
+                enqueue_agent_job(conn, user_action, "database_user", user_id, {"username": username, "password": password, "account_id": account["id"]})
+                enqueue_agent_job(conn, "grant_database_user", "database_grant", grant_cur.lastrowid, {"database_id": db_cur.lastrowid, "user_id": user_id, "privileges": privileges, "account_id": account["id"]})
+                log_activity(conn, actor["id"], "database_wizard_completed", {"name": name, "username": username})
+                return self.json_response({"database_id": db_cur.lastrowid, "database_user_id": user_id, "database_grant_id": grant_cur.lastrowid, "job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])}, HTTPStatus.CREATED)
+            if path == "/api/client/databases" and method == "POST":
+                require_active_account(account)
+                require_collaborator_permission(conn, actor["id"], account["id"], "can_create_databases")
+                require_plan_capacity(conn, account["id"], "databases", "max_databases", "database_limit_reached")
+                require_inode_capacity(conn, account["id"])
+                body = self.read_json()
+                name = validate_db_identifier(body.get("name") or f"{account['username']}_app", "invalid_database_name")
+                raw_username = (body.get("username") or "").strip()
+                username = validate_db_identifier(raw_username, "invalid_database_username") if raw_username else ""
+                password = body.get("password")
+                website_id = optional_positive_int(body.get("website_id"))
+                if website_id:
+                    require_owned_website(conn, account["id"], website_id, actor["id"])
+                if conn.execute("SELECT id FROM databases WHERE name = ?", (name,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "database_name_already_exists")
+                cur = conn.execute(
+                    "INSERT INTO databases(account_id, name, username, website_id, status, created_by_user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (account["id"], name, username, website_id, "active", actor["id"]),
+                )
+                db_id = cur.lastrowid
+                user_id = None
+                grant_id = None
+                if password:
+                    password = validate_db_password(password)
+                    db_user = conn.execute("SELECT id FROM database_users WHERE username = ?", (username,)).fetchone()
+                    if db_user:
+                        user_id = db_user["id"]
+                    else:
+                        user_cur = conn.execute(
+                            "INSERT INTO database_users(account_id, username, password_hash, status) VALUES (?, ?, ?, ?)",
+                            (account["id"], username, hash_password(password), "active"),
+                        )
+                        user_id = user_cur.lastrowid
+                    grant = conn.execute("SELECT id FROM database_grants WHERE database_id = ? AND user_id = ?", (db_id, user_id)).fetchone()
+                    if not grant:
+                        grant_cur = conn.execute(
+                            "INSERT INTO database_grants(database_id, user_id, privileges, status) VALUES (?, ?, 'ALL', 'active')",
+                            (db_id, user_id),
+                        )
+                        grant_id = grant_cur.lastrowid
+                job_id = enqueue_agent_job(conn, "create_database", "database", db_id, {"name": name, "account_id": account["id"]})
+                if password and user_id:
+                    enqueue_agent_job(conn, "create_database_user", "database_user", user_id, {"username": username, "password": password, "account_id": account["id"]})
+                if grant_id:
+                    enqueue_agent_job(conn, "grant_database_user", "database_grant", grant_id, {})
+                log_activity(conn, actor["id"], "database_created", {"name": name})
+                return self.json_response({"database_id": db_id, "job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/databases/"):
+                require_active_account(account)
+                database_id = path_int_id(path, "/api/client/databases/")
+                database = require_owned_database(conn, account["id"], database_id, actor["id"])
+                if method == "PATCH":
+                    require_collaborator_permission(
+                        conn, actor["id"], account["id"], "can_edit_databases",
+                        resource_type="database", resource_id=database_id,
+                    )
+                    body = self.read_json()
+                    name = validate_db_identifier(body.get("name") or database["name"], "invalid_database_name")
+                    status = body.get("status", database["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_database_status")
+                    website_id = database["website_id"]
+                    if "website_id" in body:
+                        website_id = optional_positive_int(body.get("website_id"))
+                        if website_id:
+                            require_owned_website(conn, account["id"], website_id, actor["id"])
+                    duplicate = conn.execute("SELECT id FROM databases WHERE name = ? AND id != ?", (name, database_id)).fetchone()
+                    if duplicate:
+                        raise ApiError(HTTPStatus.CONFLICT, "database_name_already_exists")
+                    conn.execute(
+                        "UPDATE databases SET name = ?, status = ?, website_id = ? WHERE id = ?",
+                        (name, status, website_id, database_id),
+                    )
+                    job_id = enqueue_agent_job(conn, "update_database", "database", database_id, {"name": name, "status": status})
+                    log_activity(conn, actor["id"], "database_updated", {"name": name})
+                    return self.json_response({"job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])})
+                if method == "DELETE":
+                    require_collaborator_permission(
+                        conn, actor["id"], account["id"], "can_delete_databases",
+                        resource_type="database", resource_id=database_id,
+                    )
+                    conn.execute("DELETE FROM database_grants WHERE database_id = ?", (database_id,))
+                    conn.execute("UPDATE wordpress_installs SET database_id = NULL WHERE database_id = ?", (database_id,))
+                    conn.execute("UPDATE script_installs SET database_id = NULL WHERE database_id = ?", (database_id,))
+                    conn.execute("DELETE FROM databases WHERE id = ?", (database_id,))
+                    job_id = enqueue_agent_job(conn, "delete_database", "database", database_id, {"name": database["name"], "account_id": account["id"]})
+                    log_activity(conn, actor["id"], "database_deleted", {"name": database["name"]})
+                    return self.json_response({"deleted": True, "job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_database_route")
+            if path == "/api/client/database-users" and method == "GET":
+                require_account(account)
+                return self.json_response(client_databases_payload(conn, account["id"], actor["id"]))
+            if path == "/api/client/database-users" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                username = validate_db_identifier(body.get("username"), "invalid_database_username")
+                password = validate_db_password(body.get("password"))
+                if conn.execute("SELECT id FROM database_users WHERE username = ?", (username,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "database_user_already_exists")
+                cur = conn.execute(
+                    """
+                    INSERT INTO database_users(account_id, username, password_hash, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (account["id"], username, hash_password(password), "active"),
+                )
+                job_id = enqueue_agent_job(conn, "create_database_user", "database_user", cur.lastrowid, {"username": username, "password": password, "account_id": account["id"]})
+                log_activity(conn, actor["id"], "database_user_created", {"username": username})
+                return self.json_response({"database_user_id": cur.lastrowid, "job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/database-users/"):
+                require_active_account(account)
+                user_id = path_int_id(path, "/api/client/database-users/")
+                db_user = require_owned_database_user(conn, account["id"], user_id)
+                if method == "PATCH":
+                    body = self.read_json()
+                    username = validate_db_identifier(body.get("username") or db_user["username"], "invalid_database_username")
+                    status = body.get("status", db_user["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_database_user_status")
+                    duplicate = conn.execute("SELECT id FROM database_users WHERE username = ? AND id != ?", (username, user_id)).fetchone()
+                    if duplicate:
+                        raise ApiError(HTTPStatus.CONFLICT, "database_user_already_exists")
+                    params = [username, status]
+                    password_sql = ""
+                    if body.get("password"):
+                        password = validate_db_password(body.get("password"))
+                        password_sql = ", password_hash = ?"
+                        params.append(hash_password(password))
+                    params.append(user_id)
+                    conn.execute(
+                        f"UPDATE database_users SET username = ?, status = ?, updated_at = CURRENT_TIMESTAMP{password_sql} WHERE id = ?",
+                        tuple(params),
+                    )
+                    job_id = enqueue_agent_job(conn, "update_database_user", "database_user", user_id, {"username": username, "status": status, "password": body.get("password"), "account_id": account["id"]})
+                    log_activity(conn, actor["id"], "database_user_updated", {"username": username})
+                    return self.json_response({"job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM database_grants WHERE user_id = ?", (user_id,))
+                    conn.execute("DELETE FROM database_users WHERE id = ?", (user_id,))
+                    job_id = enqueue_agent_job(conn, "delete_database_user", "database_user", user_id, {"username": db_user["username"], "account_id": account["id"]})
+                    log_activity(conn, actor["id"], "database_user_deleted", {"username": db_user["username"]})
+                    return self.json_response({"deleted": True, "job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_database_user_route")
+            if path == "/api/client/database-grants" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                database_id = int(body.get("database_id"))
+                user_id = int(body.get("user_id"))
+                require_owned_database(conn, account["id"], database_id)
+                require_owned_database_user(conn, account["id"], user_id)
+                privileges = validate_db_privileges(body.get("privileges", "ALL"))
+                try:
+                    cur = conn.execute(
+                        """
+                        INSERT INTO database_grants(database_id, user_id, privileges, status)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (database_id, user_id, privileges, "active"),
+                    )
+                except Exception as exc:
+                    if "UNIQUE" in str(exc).upper():
+                        raise ApiError(HTTPStatus.CONFLICT, "database_grant_already_exists") from exc
+                    raise
+                job_id = enqueue_agent_job(conn, "grant_database_user", "database_grant", cur.lastrowid, {"database_id": database_id, "user_id": user_id, "privileges": privileges, "account_id": account["id"]})
+                log_activity(conn, actor["id"], "database_user_added_to_database", {"database_id": database_id, "user_id": user_id})
+                return self.json_response({"database_grant_id": cur.lastrowid, "job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/database-grants/"):
+                require_active_account(account)
+                grant_id = path_int_id(path, "/api/client/database-grants/")
+                grant = require_owned_database_grant(conn, account["id"], grant_id)
+                if method == "PATCH":
+                    body = self.read_json()
+                    privileges = validate_db_privileges(body.get("privileges", grant["privileges"]))
+                    status = body.get("status", grant["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_database_grant_status")
+                    conn.execute(
+                        "UPDATE database_grants SET privileges = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (privileges, status, grant_id),
+                    )
+                    job_id = enqueue_agent_job(conn, "update_database_grant", "database_grant", grant_id, {"privileges": privileges, "status": status})
+                    log_activity(conn, actor["id"], "database_grant_updated", {"grant_id": grant_id})
+                    return self.json_response({"job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM database_grants WHERE id = ?", (grant_id,))
+                    job_id = enqueue_agent_job(conn, "revoke_database_user", "database_grant", grant_id, {"database_id": grant["database_id"], "user_id": grant["user_id"], "account_id": account["id"]})
+                    log_activity(conn, actor["id"], "database_user_removed_from_database", {"grant_id": grant_id})
+                    return self.json_response({"deleted": True, "job_id": job_id, **client_databases_payload(conn, account["id"], actor["id"])})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_database_grant_route")
+            if path == "/api/client/mailboxes" and method == "POST":
+                require_active_account(account)
+                require_collaborator_permission(conn, actor["id"], account["id"], "can_create_mail")
+                require_plan_capacity(conn, account["id"], "mailboxes", "max_mailboxes", "mailbox_limit_reached")
+                body = self.read_json()
+                email = normalize_email(body.get("email"))
+                local_part, domain = split_mailbox_address(email)
+                if not local_part or not domain:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mailbox_address")
+                mail_domain = require_owned_mail_domain(conn, account["id"], domain)
+                # Only an explicit JSON boolean grants permission; do not treat
+                # strings such as "false" as consent.
+                configure_dns = body.get("configure_dns") is True
+                password = validate_password(body.get("password", ""))
+                confirm_password = str(body.get("confirm_password") or "").strip()
+                if confirm_password and confirm_password != password:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "mailbox_password_mismatch")
+                quota_mb = positive_int(body.get("quota_mb", 1024), "invalid_mailbox_quota", minimum=100, maximum=100000)
+                storage_path = str(mailbox_storage_path(account["base_path"], email))
+                ensure_mailbox_storage(storage_path)
+                password_secret = encrypt_secret(password, CONFIG.jwt_secret)
+                cur = conn.execute(
+                    """
+                    INSERT INTO mailboxes(
+                      account_id, email, local_part, domain, storage_path, mail_domain_id, quota_mb, status, password_hash, password_secret
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account["id"],
+                        email,
+                        local_part,
+                        domain,
+                        storage_path,
+                        mail_domain["mail_domain_id"],
+                        quota_mb,
+                        "active",
+                        hash_password(password),
+                        password_secret,
+                    ),
+                )
+                job_id = enqueue_agent_job(conn, "sync_mailboxes", "hosting_account", account["id"], {"mailbox_id": cur.lastrowid, "email": email})
+                dns_job_id = None
+                if configure_dns:
+                    domain_row = conn.execute(
+                        "SELECT * FROM domains WHERE id = ? AND account_id = ?",
+                        (mail_domain["domain_id"], account["id"]),
+                    ).fetchone()
+                    runtime = account_runtime(conn, account["id"])
+                    mail_host = (runtime or {}).get("mail_host") or mail_dns_target_for_account(account["username"])
+                    ensure_mail_dns_records(conn, domain_row, mail_domain, mail_host)
+                    dns_job_id = enqueue_dns_zone_sync(conn, domain_row["id"], {"reason": "mailbox_created_with_dns_permission"})
+                log_activity(conn, actor["id"], "mailbox_created", {"mailbox_id": cur.lastrowid, "email": email})
+                created = conn.execute("SELECT * FROM mailboxes WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"mailbox_id": cur.lastrowid, "job_id": job_id, "dns_job_id": dns_job_id, "dns_configured": configure_dns, "mailbox": mailbox_row_payload(conn, created)}, HTTPStatus.CREATED)
+            if path == "/api/client/backups" and method == "POST":
+                require_active_account(account)
+                body = self.read_json() if self.headers.get("Content-Length", "0") != "0" else {}
+                website_id = body.get("website_id")
+                if website_id not in (None, "", "all"):
+                    website_id = optional_positive_int(website_id)
+                    if not conn.execute("SELECT id FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone():
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                else:
+                    website_id = None
+                cur = conn.execute(
+                    "INSERT INTO backups(account_id, website_id, kind, includes_database, status) VALUES (?, ?, ?, ?, ?)",
+                    (account["id"], website_id, "manual", 1, "queued"),
+                )
+                job_id = enqueue_agent_job(conn, "manual_backup", "backup", cur.lastrowid, {})
+                backup = conn.execute("SELECT * FROM backups WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"backup_id": cur.lastrowid, "status": backup["status"], "job_id": job_id}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/backups/") and path.endswith("/restore") and method == "POST":
+                require_active_account(account)
+                backup_id = path_int_id(path, "/api/client/backups/")
+                backup = conn.execute("SELECT * FROM backups WHERE id = ? AND account_id = ?", (backup_id, account["id"])).fetchone()
+                if not backup:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "backup_not_found")
+                if backup["status"] != "completed":
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "backup_not_completed")
+                body = self.read_json() if self.headers.get("Content-Length", "0") != "0" else {}
+                include_database = bool(body.get("include_database", True))
+                job_id = enqueue_agent_job(conn, "restore_backup", "backup", backup_id, {"include_database": include_database})
+                conn.execute(
+                    "INSERT INTO restore_history(account_id, backup_id, job_id, website_id, include_database, status) VALUES (?, ?, ?, ?, ?, 'queued')",
+                    (account["id"], backup_id, job_id, backup["website_id"], int(include_database)),
+                )
+                return self.json_response({"restoring": True, "backup_id": backup_id, "job_id": job_id})
+            if path.startswith("/api/client/backups/") and path.endswith("/download") and method == "GET":
+                require_account(account)
+                backup_id = path_int_id(path, "/api/client/backups/")
+                backup = conn.execute("SELECT * FROM backups WHERE id = ? AND account_id = ?", (backup_id, account["id"])).fetchone()
+                if not backup:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "backup_not_found")
+                artifact_path = Path(backup["artifact_path"] or "")
+                if not artifact_path.exists() or not artifact_path.is_file():
+                    raise ApiError(HTTPStatus.NOT_FOUND, "backup_artifact_missing")
+                data = artifact_path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/gzip")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition", f'attachment; filename="{artifact_path.name}"')
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                self.record_access_log(HTTPStatus.OK, len(data))
+                return
+            if path == "/api/client/restores" and method == "GET":
+                require_account(account)
+                rows = conn.execute(
+                    """
+                    SELECT rh.*, b.kind AS backup_kind, b.created_at AS backup_created_at,
+                           w.domain AS website_domain
+                    FROM restore_history rh
+                    JOIN backups b ON b.id = rh.backup_id
+                    LEFT JOIN websites w ON w.id = rh.website_id
+                    WHERE rh.account_id = ?
+                    ORDER BY rh.id DESC LIMIT 100
+                    """,
+                    (account["id"],),
+                ).fetchall()
+                return self.json_response({"restores": rows_to_dicts(rows)})
+            if path == "/api/client/restores" and method == "POST":
+                require_active_account(account)
+                job_id = enqueue_agent_job(conn, "restore_backup", "hosting_account", account["id"], self.read_json())
+                job = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                return self.json_response({"status": job["status"], "job_id": job_id})
+            if path == "/api/client/cron-jobs" and method == "POST":
+                require_active_account(account)
+                require_plan_capacity(conn, account["id"], "cron_jobs", "max_cron_jobs", "cron_job_limit_reached")
+                body = self.read_json()
+                try:
+                    schedule = validate_cron_schedule(body.get("schedule", "*/15 * * * *"))
+                except AgentError as exc:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+                command = str(body.get("command", "php cron.php")).replace("\n", " ").strip()
+                if not command:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cron_command")
+                cur = conn.execute(
+                    "INSERT INTO cron_jobs(account_id, schedule, command, status, next_run_at, last_exit_code, last_output) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account["id"], schedule, command, "enabled", cron_next_run_at(schedule), None, None),
+                )
+                job_id = enqueue_agent_job(conn, "create_cron_job", "cron_job", cur.lastrowid, {})
+                return self.json_response({"cron_job_id": cur.lastrowid, "job_id": job_id}, HTTPStatus.CREATED)
+            if path == "/api/client/git-deployments" and method == "GET":
+                require_account(account)
+                rows = conn.execute(
+                    """SELECT gd.*, w.domain AS website_domain
+                       FROM git_deployments gd
+                       LEFT JOIN websites w ON w.id = gd.website_id
+                       WHERE gd.account_id = ? ORDER BY gd.id""",
+                    (account["id"],),
+                ).fetchall()
+                deployments = rows_to_dicts(rows)
+                for deployment in deployments:
+                    deployment["has_access_key"] = bool(deployment.get("access_key_encrypted"))
+                    deployment.pop("access_key_encrypted", None)
+                return self.json_response({"git_deployments": deployments})
+            if path == "/api/client/git-deployments" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                repository_url = str(body.get("repository_url", "")).strip()
+                if not repository_url:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "repository_url_required")
+                if not validate_git_repository_url(repository_url, is_development=CONFIG.dev_auth_test_mode or CONFIG.env == "development" or CONFIG.agent_mode == "simulate"):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_repository_url")
+                branch = clean_text(body.get("branch", "main"), "main")
+                if not validate_git_branch(branch):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_branch")
+                website_id = body.get("website_id")
+                if website_id in (None, ""):
+                    first_website = conn.execute(
+                        "SELECT id FROM websites WHERE account_id = ? ORDER BY id LIMIT 1", (account["id"],)
+                    ).fetchone()
+                    website_id = first_website["id"] if first_website else None
+                else:
+                    try:
+                        website_id = int(website_id)
+                    except (TypeError, ValueError) as exc:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website") from exc
+                    website = conn.execute(
+                        "SELECT id FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])
+                    ).fetchone()
+                    if not website:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website")
+                deploy_text = str(body.get("deploy_path") or "").strip()
+                if not deploy_text:
+                    if website_id:
+                        target_website = conn.execute("SELECT document_root FROM websites WHERE id = ?", (website_id,)).fetchone()
+                        target_root = Path(target_website["document_root"]).resolve()
+                        account_root = Path(account["base_path"]).resolve()
+                        try:
+                            deploy_text = target_root.relative_to(account_root).as_posix()
+                        except ValueError as exc:
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website_root") from exc
+                    else:
+                        repo_slug = re.sub(r"\.git$", "", repository_url.rstrip("/").split("/")[-1])
+                        deploy_text = f"git/{repo_slug or 'deployment'}"
+
+                deploy_path, _ = normalize_account_relative_path(account, deploy_text, label="deploy_path")
+                access_key = str(body.get("access_key") or "").strip()
+                cur = conn.execute(
+                    """INSERT INTO git_deployments
+                       (account_id, website_id, repository_url, branch, deploy_path, access_key_encrypted, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (account["id"], website_id, repository_url, branch, str(deploy_path), encrypt_secret(access_key, CONFIG.jwt_secret), "configured"),
+                )
+                job_id = enqueue_agent_job(conn, "git_deploy", "git_deployment", cur.lastrowid, {})
+                return self.json_response({"git_deployment_id": cur.lastrowid, "job_id": job_id}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/git-deployments/") and path.endswith("/update") and method == "POST":
+                require_active_account(account)
+                deployment_id = path_int_id(path.replace("/update", ""), "/api/client/git-deployments/")
+                deployment = conn.execute(
+                    "SELECT id FROM git_deployments WHERE id = ? AND account_id = ?", (deployment_id, account["id"])
+                ).fetchone()
+                if not deployment:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "git_deployment_not_found")
+                conn.execute("UPDATE git_deployments SET status = 'updating', last_error = NULL WHERE id = ?", (deployment_id,))
+                job_id = enqueue_agent_job(conn, "git_deploy", "git_deployment", deployment_id, {})
+                log_activity(conn, actor["id"], "git_deployment_updated", {"deployment_id": deployment_id})
+                return self.json_response({"job_id": job_id, "status": "queued"})
+            if path.startswith("/api/client/git-deployments/") and path.endswith("/rollback") and method == "POST":
+                require_active_account(account)
+                deployment_id = path_int_id(path.replace("/rollback", ""), "/api/client/git-deployments/")
+                deployment = conn.execute(
+                    "SELECT * FROM git_deployments WHERE id = ? AND account_id = ?",
+                    (deployment_id, account["id"]),
+                ).fetchone()
+                if not deployment:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "git_deployment_not_found")
+                job_id = enqueue_agent_job(conn, "git_rollback", "git_deployment", deployment_id, {})
+                log_activity(conn, actor["id"], "git_deployment_rolled_back", {"deployment_id": deployment_id})
+                return self.json_response({"job_id": job_id, "status": "queued"})
+            if path.startswith("/api/client/git-deployments/"):
+                require_active_account(account)
+                deployment_id = path_int_id(path, "/api/client/git-deployments/")
+                deployment = conn.execute(
+                    "SELECT * FROM git_deployments WHERE id = ? AND account_id = ?",
+                    (deployment_id, account["id"]),
+                ).fetchone()
+                if not deployment:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "git_deployment_not_found")
+                if method == "DELETE":
+                    conn.execute("DELETE FROM git_deployments WHERE id = ?", (deployment_id,))
+                    log_activity(conn, actor["id"], "git_deployment_deleted", {"deployment_id": deployment_id})
+                    return self.json_response({"deleted": True})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_git_deployment_route")
+            if path == "/api/client/mailboxes" and method == "GET":
+                require_account(account)
+                return self.json_response(client_mailboxes_payload(conn, account["id"]))
+
+            if path.startswith("/api/client/mailboxes/"):
+                require_active_account(account)
+                mailbox_id = path_int_id(path, "/api/client/mailboxes/")
+                mailbox = require_owned_mailbox(conn, account["id"], mailbox_id)
+                if method == "PATCH":
+                    body = self.read_json()
+                    raw_email = str(body.get("email") or mailbox["email"]).strip()
+                    email = normalize_email(raw_email)
+                    local_part, domain = split_mailbox_address(email)
+                    if not local_part or not domain:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mailbox_address")
+                    mail_domain = require_owned_mail_domain(conn, account["id"], domain)
+                    quota_mb = positive_int(body.get("quota_mb", mailbox["quota_mb"]), "invalid_mailbox_quota", minimum=100, maximum=100000)
+                    status = body.get("status", mailbox["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mailbox_status")
+                    new_storage_path = str(mailbox_storage_path(account["base_path"], email))
+                    old_storage_path = str(mailbox["storage_path"] or "")
+                    if new_storage_path != old_storage_path:
+                        move_mailbox_storage(old_storage_path, new_storage_path, account["base_path"])
+                    else:
+                        ensure_mailbox_storage(new_storage_path)
+                    params = [email, local_part, domain, new_storage_path, mail_domain["mail_domain_id"], quota_mb, status]
+                    update_sql = """
+                        UPDATE mailboxes
+                        SET email = ?, local_part = ?, domain = ?, storage_path = ?, mail_domain_id = ?, quota_mb = ?, status = ?
+                    """
+                    if body.get("password"):
+                        password = validate_password(body.get("password", ""))
+                        confirm_password = str(body.get("confirm_password") or "").strip()
+                        if confirm_password and confirm_password != password:
+                            raise ApiError(HTTPStatus.BAD_REQUEST, "mailbox_password_mismatch")
+                        update_sql += ", password_hash = ?, password_secret = ?"
+                        params.append(hash_password(password))
+                        params.append(encrypt_secret(password, CONFIG.jwt_secret))
+                    update_sql += " WHERE id = ?"
+                    duplicate = conn.execute("SELECT id FROM mailboxes WHERE email = ? AND id != ?", (email, mailbox_id)).fetchone()
+                    if duplicate:
+                        raise ApiError(HTTPStatus.CONFLICT, "mailbox_already_exists")
+                    conn.execute(update_sql, tuple(params + [mailbox_id]))
+                    job_id = enqueue_agent_job(conn, "sync_mailboxes", "hosting_account", account["id"], {"mailbox_id": mailbox_id, "email": email})
+                    log_activity(conn, actor["id"], "mailbox_updated", {"mailbox_id": mailbox_id, "email": email})
+                    updated = conn.execute(
+                        "SELECT * FROM mailboxes WHERE id = ?",
+                        (mailbox_id,),
+                    ).fetchone()
+                    return self.json_response({"mailbox": mailbox_row_payload(conn, updated), "job_id": job_id})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM mail_messages WHERE mailbox_id = ?", (mailbox_id,))
+                    conn.execute("DELETE FROM mailboxes WHERE id = ?", (mailbox_id,))
+                    remove_mailbox_storage(mailbox["storage_path"], account["base_path"])
+                    job_id = enqueue_agent_job(conn, "sync_mailboxes", "hosting_account", account["id"], {"mailbox_id": mailbox_id, "email": mailbox["email"]})
+                    log_activity(conn, actor["id"], "mailbox_deleted", {"email": mailbox["email"]})
+                    return self.json_response({"deleted": True, "job_id": job_id})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_mailbox_route")
+            if path == "/api/client/mail-routing" and method == "GET":
+                require_account(account)
+                return self.json_response(client_mail_routing_payload(conn, account["id"]))
+            if path == "/api/client/mail-domains" and method == "GET":
+                require_account(account)
+                return self.json_response(client_mail_routing_payload(conn, account["id"]))
+            if path.startswith("/api/client/mail-domains/"):
+                require_active_account(account)
+                mail_domain_id = path_int_id(path, "/api/client/mail-domains/")
+                mail_domain = require_owned_mail_domain_id(conn, account["id"], mail_domain_id)
+                if path.endswith("/dkim/rotate") and method == "POST":
+                    selector = str(mail_domain["dkim_selector"] or "mango").strip().lower()
+                    selector = re.sub(r"[^a-z0-9_-]", "", selector) or "mango"
+                    material = generate_dkim_material(selector)
+                    conn.execute(
+                        """
+                        UPDATE mail_domains
+                        SET dkim_selector = ?, dkim_private_key = ?, dkim_public_key = ?, status = 'active'
+                        WHERE id = ?
+                        """,
+                        (material["selector"], material["private_key"], material["public_key"], mail_domain_id),
+                    )
+                    log_activity(conn, actor["id"], "mail_dkim_rotated", {"mail_domain_id": mail_domain_id, "selector": material["selector"]})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_domain_id": mail_domain_id, "selector": material["selector"], "action": "mail_dkim_rotated"})
+                    updated = require_owned_mail_domain_id(conn, account["id"], mail_domain_id)
+                    return self.json_response({"mail_domain": row_to_dict(updated), "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                if method == "PATCH":
+                    body = self.read_json()
+                    selector_raw = str(body.get("dkim_selector", mail_domain["dkim_selector"]) or "mango").strip().lower()
+                    selector = re.sub(r"[^a-z0-9_-]", "", selector_raw) or "mango"
+                    spf_policy = str(body.get("spf_policy", mail_domain["spf_policy"]) or recommended_spf_record()).strip()
+                    dmarc_policy = str(body.get("dmarc_policy", mail_domain["dmarc_policy"]) or recommended_dmarc_record(mail_domain["name"])).strip()
+                    catch_all_enabled = 1 if body.get("catch_all_enabled") else 0
+                    catch_all_destination = ""
+                    if catch_all_enabled:
+                        catch_all_destination = normalize_email(body.get("catch_all_destination"))
+                    regenerate_dkim = bool(body.get("regenerate_dkim"))
+                    params = [selector, spf_policy, dmarc_policy, catch_all_enabled, catch_all_destination, body.get("status", mail_domain["status"])]
+                    sql = """
+                        UPDATE mail_domains
+                        SET dkim_selector = ?, spf_policy = ?, dmarc_policy = ?, catch_all_enabled = ?, catch_all_destination = ?, status = ?
+                    """
+                    if regenerate_dkim:
+                        material = generate_dkim_material(selector)
+                        sql += ", dkim_private_key = ?, dkim_public_key = ?"
+                        params.extend([material["private_key"], material["public_key"]])
+                    sql += " WHERE id = ?"
+                    params.append(mail_domain_id)
+                    conn.execute(sql, tuple(params))
+                    if catch_all_enabled:
+                        log_mail_delivery(conn, account["id"], "catch_all_updated", destination_email=catch_all_destination, mailbox_id=None, direction="inbound", details={"mail_domain_id": mail_domain_id}, status="configured")
+                    log_activity(conn, actor["id"], "mail_domain_updated", {"mail_domain_id": mail_domain_id, "selector": selector})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_domain_id": mail_domain_id, "selector": selector, "action": "mail_domain_updated"})
+                    updated = require_owned_mail_domain_id(conn, account["id"], mail_domain_id)
+                    return self.json_response({"mail_domain": row_to_dict(updated), "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+            if path == "/api/client/mail-aliases" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                source_email = normalize_email(body.get("source_email"))
+                destination_email = normalize_email(body.get("destination_email"))
+                source_local, source_domain = split_mailbox_address(source_email)
+                if not source_local or not source_domain:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mail_alias_source")
+                require_owned_mail_domain(conn, account["id"], source_domain)
+                require_owned_mail_domain(conn, account["id"], split_mailbox_address(destination_email)[1])
+                cur = conn.execute(
+                    "INSERT INTO mail_aliases(account_id, source_email, destination_email, status) VALUES (?, ?, ?, ?)",
+                    (account["id"], source_email, destination_email, "active"),
+                )
+                log_activity(conn, actor["id"], "mail_alias_created", {"alias_id": cur.lastrowid, "source_email": source_email})
+                log_mail_delivery(conn, account["id"], "alias_created", source_email=source_email, destination_email=destination_email, status="configured")
+                job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_alias_id": cur.lastrowid, "source_email": source_email, "action": "mail_alias_created"})
+                return self.json_response({"mail_alias_id": cur.lastrowid, "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/mail-aliases/"):
+                require_active_account(account)
+                alias_id = path_int_id(path, "/api/client/mail-aliases/")
+                alias = conn.execute("SELECT * FROM mail_aliases WHERE id = ? AND account_id = ?", (alias_id, account["id"])).fetchone()
+                if not alias:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "mail_alias_not_found")
+                if method == "PATCH":
+                    body = self.read_json()
+                    source_email = normalize_email(body.get("source_email", alias["source_email"]))
+                    destination_email = normalize_email(body.get("destination_email", alias["destination_email"]))
+                    if split_mailbox_address(source_email)[0] == "":
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mail_alias_source")
+                    require_owned_mail_domain(conn, account["id"], split_mailbox_address(source_email)[1])
+                    require_owned_mail_domain(conn, account["id"], split_mailbox_address(destination_email)[1])
+                    status = body.get("status", alias["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mail_alias_status")
+                    conn.execute(
+                        "UPDATE mail_aliases SET source_email = ?, destination_email = ?, status = ? WHERE id = ?",
+                        (source_email, destination_email, status, alias_id),
+                    )
+                    log_activity(conn, actor["id"], "mail_alias_updated", {"alias_id": alias_id})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_alias_id": alias_id, "source_email": source_email, "action": "mail_alias_updated"})
+                    return self.json_response({"job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM mail_aliases WHERE id = ?", (alias_id,))
+                    log_activity(conn, actor["id"], "mail_alias_deleted", {"alias_id": alias_id})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_alias_id": alias_id, "action": "mail_alias_deleted"})
+                    return self.json_response({"deleted": True, "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_mail_alias_route")
+            if path == "/api/client/mail-forwarders" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                source_email = normalize_email(body.get("source_email"))
+                destination_email = normalize_email(body.get("destination_email"))
+                if split_mailbox_address(source_email)[0] == "":
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mail_forwarder_source")
+                require_owned_mail_domain(conn, account["id"], split_mailbox_address(source_email)[1])
+                cur = conn.execute(
+                    "INSERT INTO mail_forwarders(account_id, source_email, destination_email, status) VALUES (?, ?, ?, ?)",
+                    (account["id"], source_email, destination_email, "active"),
+                )
+                log_activity(conn, actor["id"], "mail_forwarder_created", {"forwarder_id": cur.lastrowid, "source_email": source_email})
+                log_mail_delivery(conn, account["id"], "forwarder_created", source_email=source_email, destination_email=destination_email, status="configured")
+                job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_forwarder_id": cur.lastrowid, "source_email": source_email, "action": "mail_forwarder_created"})
+                return self.json_response({"mail_forwarder_id": cur.lastrowid, "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/mail-forwarders/"):
+                require_active_account(account)
+                forwarder_id = path_int_id(path, "/api/client/mail-forwarders/")
+                forwarder = conn.execute("SELECT * FROM mail_forwarders WHERE id = ? AND account_id = ?", (forwarder_id, account["id"])).fetchone()
+                if not forwarder:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "mail_forwarder_not_found")
+                if method == "PATCH":
+                    body = self.read_json()
+                    source_email = normalize_email(body.get("source_email", forwarder["source_email"]))
+                    destination_email = normalize_email(body.get("destination_email", forwarder["destination_email"]))
+                    if split_mailbox_address(source_email)[0] == "":
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mail_forwarder_source")
+                    require_owned_mail_domain(conn, account["id"], split_mailbox_address(source_email)[1])
+                    status = body.get("status", forwarder["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_mail_forwarder_status")
+                    conn.execute(
+                        "UPDATE mail_forwarders SET source_email = ?, destination_email = ?, status = ? WHERE id = ?",
+                        (source_email, destination_email, status, forwarder_id),
+                    )
+                    log_activity(conn, actor["id"], "mail_forwarder_updated", {"forwarder_id": forwarder_id})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_forwarder_id": forwarder_id, "source_email": source_email, "action": "mail_forwarder_updated"})
+                    return self.json_response({"job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM mail_forwarders WHERE id = ?", (forwarder_id,))
+                    log_activity(conn, actor["id"], "mail_forwarder_deleted", {"forwarder_id": forwarder_id})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_forwarder_id": forwarder_id, "action": "mail_forwarder_deleted"})
+                    return self.json_response({"deleted": True, "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_mail_forwarder_route")
+            if path == "/api/client/mail-autoresponders" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                mailbox_id = int(body.get("mailbox_id", 0))
+                mailbox = require_owned_mailbox(conn, account["id"], mailbox_id)
+                subject = clean_text(body.get("subject", "Auto-reply"), "Auto-reply")
+                reply_body = str(body.get("body") or "").strip()
+                if not reply_body:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "autoresponder_body_required")
+                enabled = 1 if body.get("enabled", True) else 0
+                cur = conn.execute(
+                    "INSERT INTO mail_autoresponders(account_id, mailbox_id, subject, body, enabled) VALUES (?, ?, ?, ?, ?)",
+                    (account["id"], mailbox_id, subject, reply_body, enabled),
+                )
+                log_activity(conn, actor["id"], "mail_autoresponder_created", {"autoresponder_id": cur.lastrowid, "mailbox_id": mailbox_id, "email": mailbox["email"]})
+                log_mail_delivery(conn, account["id"], "autoresponder_created", source_email=mailbox["email"], destination_email=mailbox["email"], mailbox_id=mailbox_id, direction="inbound", status="configured")
+                job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_autoresponder_id": cur.lastrowid, "mailbox_id": mailbox_id, "action": "mail_autoresponder_created"})
+                return self.json_response({"mail_autoresponder_id": cur.lastrowid, "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/mail-autoresponders/"):
+                require_active_account(account)
+                autoresponder_id = path_int_id(path, "/api/client/mail-autoresponders/")
+                autoresponder = conn.execute("SELECT * FROM mail_autoresponders WHERE id = ? AND account_id = ?", (autoresponder_id, account["id"])).fetchone()
+                if not autoresponder:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "mail_autoresponder_not_found")
+                if method == "PATCH":
+                    body = self.read_json()
+                    subject = clean_text(body.get("subject", autoresponder["subject"]), autoresponder["subject"])
+                    reply_body = str(body.get("body", autoresponder["body"]) or "").strip()
+                    enabled = 1 if body.get("enabled", bool(autoresponder["enabled"])) else 0
+                    if not reply_body:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "autoresponder_body_required")
+                    conn.execute(
+                        "UPDATE mail_autoresponders SET subject = ?, body = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (subject, reply_body, enabled, autoresponder_id),
+                    )
+                    log_activity(conn, actor["id"], "mail_autoresponder_updated", {"autoresponder_id": autoresponder_id})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_autoresponder_id": autoresponder_id, "mailbox_id": autoresponder["mailbox_id"], "action": "mail_autoresponder_updated"})
+                    return self.json_response({"job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM mail_autoresponders WHERE id = ?", (autoresponder_id,))
+                    log_activity(conn, actor["id"], "mail_autoresponder_deleted", {"autoresponder_id": autoresponder_id})
+                    job_id = enqueue_mail_policy_sync(conn, account["id"], {"mail_autoresponder_id": autoresponder_id, "action": "mail_autoresponder_deleted"})
+                    return self.json_response({"deleted": True, "job_id": job_id, "mail": client_mail_routing_payload(conn, account["id"])})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_mail_autoresponder_route")
+            if path == "/api/client/mail-logs" and method == "GET":
+                require_account(account)
+                return self.json_response({"mail": client_mail_routing_payload(conn, account["id"])})
+            if path == "/api/client/cron-jobs" and method == "GET":
+                require_account(account)
+                rows = conn.execute(
+                    "SELECT * FROM cron_jobs WHERE account_id = ? ORDER BY id",
+                    (account["id"],),
+                ).fetchall()
+                cron_payload = decorate_cron_jobs(account, rows_to_dicts(rows))
+                return self.json_response({"cron_jobs": localize_client_rows(cron_payload, account["timezone"] if "timezone" in account.keys() else "UTC")})
+            if path == "/api/client/cron-jobs" and method == "POST":
+                require_active_account(account)
+                require_plan_capacity(conn, account["id"], "cron_jobs", "max_cron_jobs", "cron_job_limit_reached")
+                body = self.read_json()
+                try:
+                    schedule = validate_cron_schedule(body.get("schedule", "*/15 * * * *"))
+                except AgentError as exc:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+                command = str(body.get("command", "php cron.php")).replace("\n", " ").strip()
+                if not command:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cron_command")
+                cur = conn.execute(
+                    "INSERT INTO cron_jobs(account_id, schedule, command, status, next_run_at, last_exit_code, last_output) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (account["id"], schedule, command, "enabled", cron_next_run_at(schedule), None, None),
+                )
+                job_id = enqueue_agent_job(conn, "create_cron_job", "cron_job", cur.lastrowid, {})
+                return self.json_response({"cron_job_id": cur.lastrowid, "job_id": job_id}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/cron-jobs/"):
+                require_active_account(account)
+                cron_id = path_int_id(path, "/api/client/cron-jobs/")
+                cron = conn.execute(
+                    "SELECT * FROM cron_jobs WHERE id = ? AND account_id = ?",
+                    (cron_id, account["id"]),
+                ).fetchone()
+                if not cron:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "cron_job_not_found")
+                if method == "PATCH":
+                    body = self.read_json()
+                    try:
+                        schedule = validate_cron_schedule(body.get("schedule", cron["schedule"]))
+                    except AgentError as exc:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+                    command = str(body.get("command", cron["command"])).replace("\n", " ").strip()
+                    if not command:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cron_command")
+                    status = body.get("status", cron["status"])
+                    if status not in {"enabled", "disabled"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cron_status")
+                    conn.execute(
+                        "UPDATE cron_jobs SET schedule = ?, command = ?, status = ?, next_run_at = ? WHERE id = ?",
+                        (schedule, command, status, cron_next_run_at(schedule) if status == "enabled" else None, cron_id),
+                    )
+                    job_id = enqueue_agent_job(conn, "sync_cron_jobs", "hosting_account", account["id"], {})
+                    log_activity(conn, actor["id"], "cron_job_updated", {"cron_id": cron_id})
+                    updated = conn.execute("SELECT * FROM cron_jobs WHERE id = ?", (cron_id,)).fetchone()
+                    return self.json_response({"cron_job": row_to_dict(updated), "job_id": job_id})
+                if method == "DELETE":
+                    conn.execute("DELETE FROM cron_jobs WHERE id = ?", (cron_id,))
+                    job_id = enqueue_agent_job(conn, "sync_cron_jobs", "hosting_account", account["id"], {})
+                    log_activity(conn, actor["id"], "cron_job_deleted", {"cron_id": cron_id})
+                    return self.json_response({"deleted": True, "job_id": job_id})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_cron_job_route")
+
+            if path == "/api/client/services/restart" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                service_name = body.get("service")
+                if not service_name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "service_required")
+                valid_services = ["web", "db", "filebrowser", "phpmyadmin"]
+                if service_name not in valid_services:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_service")
+                job_id = enqueue_agent_job(conn, "restart_service", "hosting_account", account["id"], {"service": service_name})
+                log_activity(conn, actor["id"], "service_restarted", {"account_id": account["id"], "service": service_name})
+                return self.json_response({"success": True, "job_id": job_id})
+
+            if path == "/api/client/services/php-workers" and method == "GET":
+                require_account(account)
+                plan = conn.execute("SELECT php_workers FROM plans WHERE id = ?", (account["plan_id"],)).fetchone()
+                websites = conn.execute("SELECT id, domain, php_workers_limit FROM websites WHERE account_id = ? ORDER BY domain", (account["id"],)).fetchall()
+                mode = str(account["php_workers_mode"] or "max_per_site")
+                default_workers = int(plan["php_workers"] or 3) if plan else 3
+                maximum = int(account["php_workers_max_per_site"] or default_workers)
+                return self.json_response({"mode": mode, "max_workers": maximum, "plan_default_workers": default_workers, "websites": [{"id": row["id"], "domain": row["domain"], "workers": row["php_workers_limit"] if row["php_workers_limit"] is not None else default_workers} for row in websites]})
+
+            if path == "/api/client/services/php-workers" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                mode = str(body.get("mode") or "").strip().lower()
+                if mode not in {"unlimited", "per_site", "max_per_site"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_php_workers_mode")
+                max_workers = positive_int(body.get("max_workers", 1), "invalid_php_workers", minimum=1, maximum=1000)
+                entries = body.get("website_workers") or []
+                if not isinstance(entries, list):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website_workers")
+                known = {row["id"] for row in conn.execute("SELECT id FROM websites WHERE account_id = ?", (account["id"],)).fetchall()}
+                updates = []
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website_workers")
+                    website_id = positive_int(entry.get("website_id"), "invalid_website_id")
+                    if website_id not in known:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    updates.append((positive_int(entry.get("workers"), "invalid_php_workers", minimum=1, maximum=1000), website_id))
+                if mode == "per_site" and len({website_id for _, website_id in updates}) != len(known):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "workers_required_for_each_website")
+                conn.execute("UPDATE hosting_accounts SET php_workers_mode = ?, php_workers_max_per_site = ? WHERE id = ?", (mode, max_workers, account["id"]))
+                if updates:
+                    conn.executemany("UPDATE websites SET php_workers_limit = ? WHERE id = ?", updates)
+                payload = {"mode": mode, "max_workers": max_workers, "website_workers": [{"website_id": website_id, "workers": workers} for workers, website_id in updates]}
+                job_id = enqueue_agent_job(conn, "apply_php_worker_settings", "hosting_account", account["id"], payload)
+                log_activity(conn, actor["id"], "php_worker_settings_changed", payload)
+                return self.json_response({"status": "queued", "job_id": job_id, **payload})
+
+            if path == "/api/client/services/status" and method == "GET":
+                require_account(account)
+                service_name = query.get("service", [""])[0].strip()
+                if service_name:
+                    valid_services = ["web", "db", "filebrowser", "phpmyadmin"]
+                    if service_name not in valid_services:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_service")
+                stack = conn.execute(
+                    "SELECT * FROM account_stacks WHERE account_id = ?",
+                    (account["id"],),
+                ).fetchone()
+                if not stack:
+                    status = "provisioning" if account["status"] in {"provisioning", "rebuilding"} else "unavailable"
+                    services = [service_name] if service_name else ["web", "db", "filebrowser", "phpmyadmin"]
+                    return self.json_response({
+                        "account_id": account["id"],
+                        "username": account["username"],
+                        "compose_path": None,
+                        "mode": CONFIG.agent_mode,
+                        "services": [
+                            {
+                                "service": service,
+                                "container": Agent(CONFIG).service_container_name(account, service),
+                                "mode": CONFIG.agent_mode,
+                                "supported": True,
+                                "status": status,
+                                "health": "unknown",
+                                "running": False,
+                            }
+                            for service in services
+                        ],
+                    })
+                payload = Agent(CONFIG).service_status(row_to_dict(account), row_to_dict(stack), service_name or None)
+                return self.json_response(payload)
+
+            if path == "/api/client/services/kill-all" and method == "POST":
+                require_active_account(account)
+                job_id = enqueue_agent_job(conn, "kill_all_processes", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "stack_rebooted", {"account_id": account["id"]})
+                return self.json_response({"success": True, "job_id": job_id})
+
+            if path == "/api/client/backups" and method == "GET":
+                require_account(account)
+                website_filter = query.get("website_id", [""])[0].strip()
+                backup_params = [account["id"]]
+                website_clause = ""
+                if website_filter and website_filter != "all":
+                    website_id = optional_positive_int(website_filter)
+                    if not conn.execute("SELECT id FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone():
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    website_clause = " AND b.website_id = ?"
+                    backup_params.append(website_id)
+                rows = conn.execute(
+                    "SELECT b.*, w.domain AS website_domain FROM backups b LEFT JOIN websites w ON w.id = b.website_id WHERE b.account_id = ?" + website_clause + " ORDER BY b.id DESC LIMIT 100",
+                    backup_params,
+                ).fetchall()
+                active = conn.execute(
+                    "SELECT COUNT(*) AS count FROM backups WHERE account_id = ? AND status IN ('queued','running')",
+                    (account["id"],),
+                ).fetchone()["count"]
+                return self.json_response({"backups": rows_to_dicts(rows), "backup_in_progress": bool(active)})
+            if path == "/api/client/backups" and method == "POST":
+                require_active_account(account)
+                body = self.read_json() if self.headers.get("Content-Length", "0") != "0" else {}
+                website_id = body.get("website_id")
+                if website_id not in (None, "", "all"):
+                    website_id = optional_positive_int(website_id)
+                    if not conn.execute("SELECT id FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone():
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                else:
+                    website_id = None
+                cur = conn.execute(
+                    "INSERT INTO backups(account_id, website_id, kind, includes_database, status) VALUES (?, ?, ?, ?, ?)",
+                    (account["id"], website_id, "manual", 1, "queued"),
+                )
+                job_id = enqueue_agent_job(conn, "manual_backup", "backup", cur.lastrowid, {})
+                backup = conn.execute("SELECT * FROM backups WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"backup_id": cur.lastrowid, "status": backup["status"], "job_id": job_id}, HTTPStatus.CREATED)
+            if path.startswith("/api/client/backups/") and path.endswith("/restore") and method == "POST":
+                require_active_account(account)
+                backup_id = path_int_id(path, "/api/client/backups/")
+                backup = conn.execute("SELECT * FROM backups WHERE id = ? AND account_id = ?", (backup_id, account["id"])).fetchone()
+                if not backup:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "backup_not_found")
+                if backup["status"] != "completed":
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "backup_not_completed")
+                body = self.read_json() if self.headers.get("Content-Length", "0") != "0" else {}
+                include_database = bool(body.get("include_database", True))
+                job_id = enqueue_agent_job(conn, "restore_backup", "backup", backup_id, {"include_database": include_database})
+                conn.execute(
+                    """
+                    INSERT INTO restore_history
+                      (account_id, backup_id, job_id, website_id, include_database, status)
+                    VALUES (?, ?, ?, ?, ?, 'queued')
+                    """,
+                    (account["id"], backup_id, job_id, backup["website_id"], int(include_database)),
+                )
+                return self.json_response({"restoring": True, "backup_id": backup_id, "job_id": job_id})
+            if path == "/api/client/fix-ownership" and method == "POST":
+                require_active_account(account)
+                body = self.read_json() if self.headers.get("Content-Length", "0") != "0" else {}
+                raw_site = body.get("website_id")
+                website_id = None
+                if raw_site not in (None, "", "all", 0, "0"):
+                    try:
+                        website_id = int(raw_site)
+                    except (ValueError, TypeError):
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website_id")
+                    website = conn.execute("SELECT id, domain FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                    if not website:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    if actor.get("actor_type") == "user" and actor.get("id") != account["user_id"]:
+                        scope = get_collaborator_scope(conn, actor["id"], account["id"])
+                        if scope and scope.get("is_collaborator") and scope.get("allowed_website_ids") is not None:
+                            if website_id not in scope["allowed_website_ids"]:
+                                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_website")
+
+                payload = {"website_id": website_id} if website_id else {}
+                job_id = enqueue_agent_job(conn, "fix_file_ownership", "hosting_account", account["id"], payload)
+                return self.json_response({"fixed": True, "job_id": job_id, "website_id": website_id})
+            if path == "/api/client/wordpress/install" and method == "POST":
+                require_active_account(account)
+                require_plan_capacity(conn, account["id"], "databases", "max_databases", "database_limit_reached")
+                body = self.read_json()
+                website_id = int(body.get("website_id", 0))
+                website = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+
+                # Validate WordPress form inputs
+                site_title = clean_text(body.get("site_title", ""), "My Site")
+                admin_username = body.get("admin_username", "").strip()
+                if not admin_username or not (admin_username.replace("_", "").replace("-", "").isalnum()):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_admin_username")
+                admin_email = normalize_email(body.get("admin_email", ""))
+                user_email = (actor.get("email") if actor and isinstance(actor, dict) else "") or ""
+                if not user_email and account and isinstance(account, dict) and account.get("user_id"):
+                    user_row = conn.execute("SELECT email FROM users WHERE id = ?", (account["user_id"],)).fetchone()
+                    if user_row:
+                        user_email = user_row["email"]
+                if not admin_email or "@mail.com" in admin_email or "@example." in admin_email or admin_email == "admin@example.com":
+                    if user_email:
+                        admin_email = user_email
+                admin_password = body.get("admin_password", "")
+                if not admin_password or len(admin_password) < 8:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "password_too_short")
+                allow_overwrite = bool(body.get("allow_overwrite", False))
+
+                # Check if WordPress is already installed
+                existing = conn.execute("SELECT id FROM wordpress_installs WHERE website_id = ?", (website_id,)).fetchone()
+                if existing:
+                    raise ApiError(HTTPStatus.CONFLICT, "wordpress_already_installed")
+
+                # Create database for WordPress
+                db_name = f"{account['username']}_wp_{website_id}"
+                # Give each WordPress site its own database principal. Reusing
+                # one account-level user makes grants for multiple sites
+                # accumulate on that user and breaks database isolation.
+                db_user = f"{account['username']}_wp_{website_id}"
+                db_password = "dev-db-password-change-me"
+                
+                existing_db = conn.execute("SELECT id FROM databases WHERE name = ?", (db_name,)).fetchone()
+                if existing_db:
+                    database_id = existing_db["id"]
+                else:
+                    cur_db = conn.execute(
+                        "INSERT INTO databases(account_id, name, username, status, created_by_user_id) VALUES (?, ?, ?, ?, ?)",
+                        (account["id"], db_name, db_user, "active", actor["id"]),
+                    )
+                    database_id = cur_db.lastrowid
+                    enqueue_agent_job(conn, "create_database", "database", database_id, {"name": db_name, "account_id": account["id"]})
+
+                existing_user = conn.execute("SELECT id FROM database_users WHERE username = ?", (db_user,)).fetchone()
+                if existing_user:
+                    user_id = existing_user["id"]
+                else:
+                    user_cur = conn.execute(
+                        "INSERT INTO database_users(account_id, username, password_hash, status) VALUES (?, ?, ?, ?)",
+                        (account["id"], db_user, hash_password(db_password), "active"),
+                    )
+                    user_id = user_cur.lastrowid
+                    enqueue_agent_job(conn, "create_database_user", "database_user", user_id, {"username": db_user, "password": db_password, "account_id": account["id"]})
+
+                grant = conn.execute("SELECT id FROM database_grants WHERE database_id = ? AND user_id = ?", (database_id, user_id)).fetchone()
+                if not grant:
+                    grant_cur = conn.execute(
+                        "INSERT INTO database_grants(database_id, user_id, privileges, status) VALUES (?, ?, 'ALL', 'active')",
+                        (database_id, user_id),
+                    )
+                    enqueue_agent_job(conn, "grant_database_user", "database_grant", grant_cur.lastrowid, {
+                        "database_id": database_id,
+                        "user_id": user_id,
+                        "privileges": "ALL",
+                        "account_id": account["id"],
+                    })
+
+                # Create WordPress install record
+                sso_secret = wordpress_sso_secret()
+                cur = conn.execute(
+                    """
+                    INSERT INTO wordpress_installs(website_id, database_id, site_title, admin_username, admin_email, sso_secret, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (website_id, database_id, site_title, admin_username, admin_email, sso_secret, "installing"),
+                )
+                install_id = cur.lastrowid
+
+                # Enqueue installation job
+                job_id = enqueue_agent_job(conn, "install_wordpress", "wordpress_install", install_id, {
+                    "website_id": website_id,
+                    "database_id": database_id,
+                    "database_name": db_name,
+                    "database_user": db_user,
+                    "database_password": "dev-db-password-change-me",
+                    "database_host": "db",
+                    "site_title": site_title,
+                    "admin_username": admin_username,
+                    "admin_email": admin_email,
+                    "admin_password": admin_password,
+                    "sso_secret": sso_secret,
+                    "allow_overwrite": allow_overwrite,
+                })
+                job = conn.execute("SELECT status, result FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if job and job["status"] == "failed":
+                    result = parse_json_field(job["result"], {})
+                    raise ApiError(HTTPStatus.BAD_REQUEST, result.get("error", "wordpress_install_failed"))
+
+                log_activity(conn, actor["id"], "wordpress_install_started", {
+                    "website_id": website_id,
+                    "site_title": site_title,
+                    "domain": website["domain"],
+                })
+                log_audit(conn, "user", actor["id"], "wordpress_install", "wordpress_install", install_id,
+                         metadata={"website_id": website_id, "site_title": site_title})
+
+                return self.json_response({
+                    "install_id": install_id,
+                    "database_id": database_id,
+                    "job_id": job_id,
+                    "status": "installing"
+                }, HTTPStatus.CREATED)
+            if path == "/api/client/wordpress/installs" and method == "GET":
+                require_account(account)
+                rows = conn.execute(
+                    """
+                    SELECT wi.website_id, w.domain, wi.site_title, wi.admin_username, wi.admin_email,
+                           wi.status, wi.installed_at, wi.created_at,
+                           COALESCE(wi.Zeropanel_cron_enabled, 0) AS Zeropanel_cron_enabled,
+                           COALESCE(wi.litespeed_cache_status, 'pending') AS litespeed_cache_status,
+                           COALESCE(wi.litespeed_object_cache_status, 'pending') AS litespeed_object_cache_status,
+                           COALESCE(wi.cloudflare_security_status, 'pending') AS cloudflare_security_status,
+                           wi.wordpress_task_job_id
+                    FROM wordpress_installs wi
+                    JOIN websites w ON w.id = wi.website_id
+                    WHERE w.account_id = ?
+                    ORDER BY lower(w.domain)
+                    """,
+                    (account["id"],),
+                ).fetchall()
+                sites = rows_to_dicts(rows)
+                for site in sites:
+                    site["admin_url"] = f"https://{site['domain']}/wp-admin/"
+                return self.json_response({"sites": sites})
+            if path == "/api/client/wordpress/detect/active" and method == "GET":
+                require_active_account(account)
+                run = conn.execute(
+                    "SELECT * FROM wordpress_detection_runs WHERE account_id = ? AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1",
+                    (account["id"],),
+                ).fetchone()
+                if not run:
+                    return self.json_response({"active": False})
+                tasks = conn.execute(
+                    "SELECT t.website_id, w.domain, t.status, t.step, t.result_json, t.error, t.started_at, t.completed_at FROM wordpress_detection_tasks t JOIN websites w ON w.id = t.website_id WHERE t.run_id = ? ORDER BY t.id",
+                    (run["id"],),
+                ).fetchall()
+                task_rows = rows_to_dicts(tasks)
+                for task in task_rows:
+                    task["result"] = parse_json_field(task.pop("result_json"), {})
+                return self.json_response({"active": True, "run": row_to_dict(run), "tasks": task_rows})
+            if path == "/api/client/wordpress/detect" and method == "POST":
+                require_active_account(account)
+                active_run = conn.execute(
+                    "SELECT * FROM wordpress_detection_runs WHERE account_id = ? AND status IN ('queued', 'running') ORDER BY id DESC LIMIT 1",
+                    (account["id"],),
+                ).fetchone()
+                if active_run:
+                    active_counts = conn.execute(
+                        "SELECT COUNT(*) AS total, SUM(CASE WHEN status IN ('completed', 'completed_with_errors', 'failed', 'skipped') THEN 1 ELSE 0 END) AS completed FROM wordpress_detection_tasks WHERE run_id = ?",
+                        (active_run["id"],),
+                    ).fetchone()
+                    return self.json_response({
+                        "detected": 0,
+                        "run_id": active_run["id"],
+                        "job_id": active_run["job_id"],
+                        "total_sites": active_counts["total"] or 0,
+                        "completed_sites": active_counts["completed"] or 0,
+                        "status": active_run["status"],
+                        "already_running": True,
+                    })
+                websites = conn.execute("SELECT * FROM websites WHERE account_id = ? ORDER BY id", (account["id"],)).fetchall()
+                detected = 0
+                website_ids = []
+                for website in websites:
+                    root = Path(website["document_root"])
+                    if not (root / "wp-config.php").exists() or not (root / "wp-admin").is_dir():
+                        continue
+                    existing = conn.execute("SELECT * FROM wordpress_installs WHERE website_id = ?", (website["id"],)).fetchone()
+                    if existing:
+                        admin_username = existing["admin_username"]
+                        admin_email = existing["admin_email"]
+                        sso_secret = existing["sso_secret"] or wordpress_sso_secret()
+                        if not existing["sso_secret"]:
+                            conn.execute("UPDATE wordpress_installs SET sso_secret = ? WHERE website_id = ?", (sso_secret, website["id"]))
+                    else:
+                        config_text = (root / "wp-config.php").read_text(encoding="utf-8", errors="ignore")
+                        user_match = re.search(r"define\(\s*['\"]WP_ADMIN_USER['\"]\s*,\s*['\"]([^'\"]+)", config_text)
+                        email_match = re.search(r"define\(\s*['\"]WP_ADMIN_EMAIL['\"]\s*,\s*['\"]([^'\"]+)", config_text)
+                        admin_username = user_match.group(1) if user_match else "admin"
+                        admin_email = email_match.group(1) if email_match else (actor.get("email") or "")
+                        sso_secret = wordpress_sso_secret()
+                        conn.execute(
+                            "INSERT INTO wordpress_installs(website_id, site_title, admin_username, admin_email, sso_secret, status) VALUES (?, ?, ?, ?, ?, 'detected')",
+                            (website["id"], website["domain"], admin_username, admin_email, sso_secret),
+                        )
+                    if ensure_wordpress_compat(root, website["id"], admin_username, admin_email, sso_secret):
+                        conn.execute("UPDATE wordpress_installs SET status = CASE WHEN status = 'installing' THEN status ELSE 'installed' END, updated_at = CURRENT_TIMESTAMP WHERE website_id = ?", (website["id"],))
+                        website_ids.append(website["id"])
+                        detected += 1
+                run_id = Agent.create_wordpress_detection_run(conn, account["id"], website_ids)
+                for website_id in website_ids:
+                    install = conn.execute("SELECT * FROM wordpress_installs WHERE website_id = ?", (website_id,)).fetchone()
+                    cache_done = install["litespeed_cache_status"] in {"installed", "activated", "installed_inactive"}
+                    security_done = install["cloudflare_security_status"] in {"ruleset_created", "ruleset_exists", "mocked", "skipped"}
+                    cron_done = bool(install["Zeropanel_cron_enabled"])
+                    if cache_done and security_done and cron_done:
+                        conn.execute("UPDATE wordpress_detection_tasks SET status = 'skipped', step = 'already_configured', completed_at = CURRENT_TIMESTAMP WHERE run_id = ? AND website_id = ?", (run_id, website_id))
+                job_id = enqueue_agent_job(conn, "detect_wordpress_sites", "hosting_account", account["id"], {"run_id": run_id}, inline=False)
+                conn.execute("UPDATE wordpress_detection_runs SET job_id = ? WHERE id = ?", (job_id, run_id))
+                conn.execute("UPDATE wordpress_installs SET wordpress_task_job_id = ? WHERE website_id IN ({})".format(",".join("?" for _ in website_ids)), [job_id, *website_ids]) if website_ids else None
+                total = conn.execute("SELECT COUNT(*) AS count FROM wordpress_detection_tasks WHERE run_id = ?", (run_id,)).fetchone()["count"]
+                completed = conn.execute("SELECT COUNT(*) AS count FROM wordpress_detection_tasks WHERE run_id = ? AND status = 'skipped'", (run_id,)).fetchone()["count"]
+                conn.execute("UPDATE wordpress_detection_runs SET total_sites = ?, completed_sites = ? WHERE id = ?", (total, completed, run_id))
+                return self.json_response({"detected": detected, "run_id": run_id, "job_id": job_id, "total_sites": total, "completed_sites": completed, "status": "queued"})
+            if path.startswith("/api/client/wordpress/detect/status/") and method == "GET":
+                require_active_account(account)
+                run_id = path_int_id(path, "/api/client/wordpress/detect/status/")
+                run = conn.execute("SELECT * FROM wordpress_detection_runs WHERE id = ? AND account_id = ?", (run_id, account["id"])).fetchone()
+                if not run:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "wordpress_detection_run_not_found")
+                tasks = conn.execute(
+                    "SELECT t.website_id, w.domain, t.status, t.step, t.result_json, t.error, t.started_at, t.completed_at FROM wordpress_detection_tasks t JOIN websites w ON w.id = t.website_id WHERE t.run_id = ? ORDER BY t.id",
+                    (run_id,),
+                ).fetchall()
+                task_rows = rows_to_dicts(tasks)
+                for task in task_rows:
+                    task["result"] = parse_json_field(task.pop("result_json"), {})
+                return self.json_response({"run": row_to_dict(run), "tasks": task_rows})
+            if path.startswith("/api/client/wordpress/") and path.endswith("/cron") and method == "POST":
+                require_active_account(account)
+                website_id = path_int_id(path, "/api/client/wordpress/")
+                website = require_owned_website(conn, account["id"], website_id, actor.get("id"))
+                install = conn.execute("SELECT * FROM wordpress_installs WHERE website_id = ?", (website_id,)).fetchone()
+                if not install:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "wordpress_not_found")
+                body = self.read_json()
+                enabled = bool(body.get("enabled"))
+                job_id = enqueue_agent_job(
+                    conn,
+                    "configure_wordpress_site",
+                    "website",
+                    website_id,
+                    {"install_litespeed_cache": False, "configure_cloudflare": False, "manage_wp_cron": enabled},
+                )
+                conn.execute("UPDATE wordpress_installs SET wordpress_task_job_id = ? WHERE website_id = ?", (job_id, website_id))
+                return self.json_response({"website_id": website_id, "job_id": job_id, "Zeropanel_cron_enabled": enabled, "status": "queued"})
+            if path.startswith("/api/client/wordpress/") and path.endswith("/launch") and method == "GET":
+                require_active_account(account)
+                website_id = path_int_id(path, "/api/client/wordpress/")
+                website = require_owned_website(conn, account["id"], website_id, actor.get("id"))
+                install = conn.execute("SELECT * FROM wordpress_installs WHERE website_id = ?", (website_id,)).fetchone()
+                if not install:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "wordpress_not_found")
+                if install["status"] not in {"installed", "detected"}:
+                    raise ApiError(HTTPStatus.CONFLICT, "wordpress_install_not_ready")
+                sso_secret = install["sso_secret"] or wordpress_sso_secret()
+                if not install["sso_secret"]:
+                    conn.execute("UPDATE wordpress_installs SET sso_secret = ? WHERE website_id = ?", (sso_secret, website_id))
+                if not ensure_wordpress_compat(website["document_root"], website_id, install["admin_username"], install["admin_email"], sso_secret):
+                    raise ApiError(HTTPStatus.CONFLICT, "wordpress_compat_plugin_unavailable")
+                token = create_jwt({
+                    "purpose": "wordpress_sso",
+                    "website_id": website_id,
+                    "admin_username": install["admin_username"],
+                    "admin_email": install["admin_email"],
+                }, sso_secret, 90)
+                return self.json_response({"launch_url": f"https://{website['domain']}/wp-admin/?Zeropanel_sso={quote(token)}"})
+            if path == "/api/client/installer/scripts" and method == "GET":
+                require_account(account)
+                from .installers import INSTALLERS
+                return self.json_response({
+                    "scripts": [inst.get_info() for inst in INSTALLERS.values()]
+                })
+            if path == "/api/client/installer/install" and method == "POST":
+                require_active_account(account)
+                require_plan_capacity(conn, account["id"], "databases", "max_databases", "database_limit_reached")
+                body = self.read_json()
+                script_id = body.get("script_id")
+                website_id = int(body.get("website_id", 0))
+                website = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                
+                from .installers import INSTALLERS
+                installer = INSTALLERS.get(script_id)
+                if not installer:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_script_id")
+                
+                site_title = clean_text(body.get("site_title", ""), "My Site")
+                admin_username = body.get("admin_username", "").strip()
+                if not admin_username or not (admin_username.replace("_", "").replace("-", "").isalnum()):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_admin_username")
+                admin_email = normalize_email(body.get("admin_email", ""))
+                user_email = (actor.get("email") if actor and isinstance(actor, dict) else "") or ""
+                if not user_email and account and isinstance(account, dict) and account.get("user_id"):
+                    user_row = conn.execute("SELECT email FROM users WHERE id = ?", (account["user_id"],)).fetchone()
+                    if user_row:
+                        user_email = user_row["email"]
+                if not admin_email or "@mail.com" in admin_email or "@example." in admin_email or admin_email == "admin@example.com":
+                    if user_email:
+                        admin_email = user_email
+                admin_password = body.get("admin_password", "")
+                if not admin_password or len(admin_password) < 8:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "password_too_short")
+                allow_overwrite = bool(body.get("allow_overwrite", False))
+
+                if script_id == "wordpress":
+                    existing = conn.execute("SELECT id FROM wordpress_installs WHERE website_id = ?", (website_id,)).fetchone()
+                    if existing:
+                        if not allow_overwrite:
+                            raise ApiError(HTTPStatus.CONFLICT, "wordpress_already_installed")
+                        conn.execute("DELETE FROM wordpress_installs WHERE website_id = ?", (website_id,))
+                        conn.execute("DELETE FROM script_installs WHERE website_id = ? AND script_id = 'wordpress'", (website_id,))
+                    
+                    db_name = f"{account['username']}_wp_{website_id}"
+                    # Keep the database credentials isolated per WordPress
+                    # site; a shared account_wp user would receive grants for
+                    # every WordPress database in the account.
+                    db_user = f"{account['username']}_wp_{website_id}"
+                    db_password = "dev-db-password-change-me"
+                    
+                    existing_db = conn.execute("SELECT id FROM databases WHERE name = ?", (db_name,)).fetchone()
+                    if existing_db:
+                        database_id = existing_db["id"]
+                    else:
+                        cur_db = conn.execute(
+                            "INSERT INTO databases(account_id, name, username, status, created_by_user_id) VALUES (?, ?, ?, ?, ?)",
+                            (account["id"], db_name, db_user, "active", actor["id"]),
+                        )
+                        database_id = cur_db.lastrowid
+                        enqueue_agent_job(conn, "create_database", "database", database_id, {"name": db_name, "account_id": account["id"]})
+
+                    existing_user = conn.execute("SELECT id FROM database_users WHERE username = ?", (db_user,)).fetchone()
+                    if existing_user:
+                        user_id = existing_user["id"]
+                    else:
+                        user_cur = conn.execute(
+                            "INSERT INTO database_users(account_id, username, password_hash, status) VALUES (?, ?, ?, ?)",
+                            (account["id"], db_user, hash_password(db_password), "active"),
+                        )
+                        user_id = user_cur.lastrowid
+                        enqueue_agent_job(conn, "create_database_user", "database_user", user_id, {"username": db_user, "password": db_password, "account_id": account["id"]})
+
+                    grant = conn.execute("SELECT id FROM database_grants WHERE database_id = ? AND user_id = ?", (database_id, user_id)).fetchone()
+                    if not grant:
+                        grant_cur = conn.execute(
+                            "INSERT INTO database_grants(database_id, user_id, privileges, status) VALUES (?, ?, 'ALL', 'active')",
+                            (database_id, user_id),
+                        )
+                        enqueue_agent_job(conn, "grant_database_user", "database_grant", grant_cur.lastrowid, {
+                            "database_id": database_id,
+                            "user_id": user_id,
+                            "privileges": "ALL",
+                            "account_id": account["id"],
+                        })
+                    
+                    conn.execute(
+                        """
+                        INSERT INTO script_installs(website_id, script_id, database_id, site_title, admin_username, admin_email, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (website_id, script_id, database_id, site_title, admin_username, admin_email, "installing"),
+                    )
+
+                    sso_secret = wordpress_sso_secret()
+                    cur = conn.execute(
+                        """
+                        INSERT INTO wordpress_installs(website_id, database_id, site_title, admin_username, admin_email, sso_secret, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (website_id, database_id, site_title, admin_username, admin_email, sso_secret, "installing"),
+                    )
+                    install_id = cur.lastrowid
+                    
+                    job_id = enqueue_agent_job(conn, "install_wordpress", "wordpress_install", install_id, {
+                        "website_id": website_id,
+                        "database_id": database_id,
+                        "database_name": db_name,
+                        "database_user": db_user,
+                        "database_password": db_password,
+                        "database_host": "db",
+                        "site_title": site_title,
+                        "admin_username": admin_username,
+                        "admin_email": admin_email,
+                        "admin_password": admin_password,
+                        "sso_secret": sso_secret,
+                        "allow_overwrite": allow_overwrite,
+                    })
+                    job = conn.execute("SELECT status, result FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                    if job and job["status"] == "failed":
+                        result = parse_json_field(job["result"], {})
+                        raise ApiError(HTTPStatus.BAD_REQUEST, result.get("error", "wordpress_install_failed"))
+                else:
+                    existing = conn.execute("SELECT id FROM script_installs WHERE website_id = ?", (website_id,)).fetchone()
+                    if existing:
+                        raise ApiError(HTTPStatus.CONFLICT, "script_already_installed")
+                    
+                    cur = conn.execute(
+                        """
+                        INSERT INTO script_installs(website_id, script_id, database_id, site_title, admin_username, admin_email, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (website_id, script_id, None, site_title, admin_username, admin_email, "installing"),
+                    )
+                    install_id = cur.lastrowid
+                    
+                    job_id = enqueue_agent_job(conn, "install_script", "script_install", install_id, {
+                        "script_id": script_id,
+                        "website_id": website_id,
+                        "site_title": site_title,
+                        "admin_username": admin_username,
+                        "admin_email": admin_email,
+                        "admin_password": admin_password,
+                        "allow_overwrite": allow_overwrite,
+                    })
+
+                log_activity(conn, actor["id"], f"{script_id}_install_started", {
+                    "website_id": website_id,
+                    "site_title": site_title,
+                    "domain": website["domain"],
+                })
+
+                return self.json_response({
+                    "install_id": install_id,
+                    "job_id": job_id,
+                    "status": "installing"
+                }, HTTPStatus.CREATED)
+            if path == "/api/client/activity" and method == "GET":
+                rows = conn.execute("SELECT * FROM activity_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50", (actor["id"],)).fetchall()
+                return self.json_response({"activity": localize_client_rows(rows_to_dicts(rows), account["timezone"] if account and "timezone" in account.keys() else "UTC")})
+            if path == "/api/client/cache/status" and method == "GET":
+                require_account(account)
+                website_id = optional_positive_int(query.get("website_id", [""])[0])
+                website = None
+                if website_id:
+                    website = conn.execute(
+                        "SELECT * FROM websites WHERE id = ? AND account_id = ?",
+                        (website_id, account["id"]),
+                    ).fetchone()
+                    if not website:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                return self.json_response(client_cache_status(conn, account, website))
+            if path == "/api/client/cache/toggle" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                cache_type = str(body.get("type") or "").strip().lower()
+                if cache_type not in {"opcache", "object", "reverse_proxy", "litespeed"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cache_type")
+                enabled = 1 if bool(body.get("enabled")) else 0
+                columns = {
+                    "opcache": "opcache_enabled",
+                    "object": "object_cache_enabled",
+                    "reverse_proxy": "reverse_proxy_cache_enabled",
+                    "litespeed": "litespeed_cache_enabled",
+                }
+                column = columns[cache_type]
+                if cache_type in {"object", "reverse_proxy"}:
+                    # Redis is one service per account and the edge proxy is
+                    # rendered once per account stack, so these controls are
+                    # intentionally global. Keep website rows synchronized so
+                    # later vhost/container reconciliation cannot resurrect a
+                    # stale site-level value.
+                    conn.execute(f"UPDATE hosting_accounts SET {column} = ? WHERE id = ?", (enabled, account["id"]))
+                    conn.execute(f"UPDATE websites SET {column} = ? WHERE account_id = ?", (enabled, account["id"]))
+                    payload = {"type": cache_type, "enabled": enabled, "scope": "account"}
+                else:
+                    website_id = optional_positive_int(body.get("website_id") or "")
+                    if not website_id:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "website_id_required")
+                    website = conn.execute(
+                        "SELECT id FROM websites WHERE id = ? AND account_id = ?",
+                        (website_id, account["id"]),
+                    ).fetchone()
+                    if not website:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    conn.execute(f"UPDATE websites SET {column} = ? WHERE id = ?", (enabled, website_id))
+                    payload = {"type": cache_type, "enabled": enabled, "website_id": website_id, "scope": "website"}
+                job_id = enqueue_agent_job(conn, "set_cache_settings", "hosting_account", account["id"], payload)
+                log_activity(conn, actor["id"], "cache_setting_changed", payload)
+                return self.json_response({"job_id": job_id, "status": "queued", "type": cache_type, "enabled": bool(enabled), "scope": payload["scope"], **({"website_id": website_id} if "website_id" in payload else {})})
+            if path == "/api/client/cache/purge" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = optional_positive_int(body.get("website_id") or "")
+                payload = {"scope": "all"}
+                if website_id:
+                    website = conn.execute(
+                        "SELECT * FROM websites WHERE id = ? AND account_id = ?",
+                        (website_id, account["id"]),
+                    ).fetchone()
+                    if not website:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    payload["website_id"] = website_id
+                    payload["scope"] = "website"
+                job_id = enqueue_agent_job(conn, "purge_cache", "hosting_account", account["id"], payload)
+                log_activity(conn, actor["id"], "cache_purged", payload)
+                return self.json_response({"job_id": job_id, "status": "queued"})
+            if path == "/api/client/cache/cloudflare/purge" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = optional_positive_int(body.get("website_id") or "")
+                if not website_id:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_site_required")
+                website = conn.execute(
+                    """SELECT w.id, d.dns_provider FROM websites w
+                       LEFT JOIN domains d ON d.linked_website_id = w.id
+                       WHERE w.id = ? AND w.account_id = ?""",
+                    (website_id, account["id"]),
+                ).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                if website["dns_provider"] != DNS_PROVIDER_CLOUDFLARE:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_not_configured_for_site")
+                payload = {"scope": "website", "website_id": website_id}
+                job_id = enqueue_agent_job(conn, "purge_cloudflare_cache", "hosting_account", account["id"], payload)
+                log_activity(conn, actor["id"], "cloudflare_cache_purged", payload)
+                return self.json_response({"job_id": job_id, "status": "queued"})
+            if path == "/api/client/cache/cloudflare/toggle" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = optional_positive_int(body.get("website_id") or "")
+                if not website_id:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_site_required")
+                website = conn.execute(
+                    """SELECT w.id, d.dns_provider FROM websites w
+                       LEFT JOIN domains d ON d.linked_website_id = w.id
+                       WHERE w.id = ? AND w.account_id = ?""",
+                    (website_id, account["id"]),
+                ).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                if website["dns_provider"] != DNS_PROVIDER_CLOUDFLARE:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_not_configured_for_site")
+                enabled = bool(body.get("enabled"))
+                conn.execute("UPDATE websites SET cloudflare_cache_enabled = ? WHERE id = ?", (1 if enabled else 0, website_id))
+                payload = {"enabled": enabled, "website_id": website_id, "scope": "website"}
+                job_id = enqueue_agent_job(conn, "set_cloudflare_cache", "hosting_account", account["id"], payload)
+                log_activity(conn, actor["id"], "cloudflare_cache_setting_changed", payload)
+                return self.json_response({"job_id": job_id, "status": "queued", "enabled": enabled})
+            if path == "/api/client/cache/opcache/reset" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = optional_positive_int(body.get("website_id") or "")
+                payload = {"scope": "all"}
+                if website_id:
+                    website = conn.execute(
+                        "SELECT * FROM websites WHERE id = ? AND account_id = ?",
+                        (website_id, account["id"]),
+                    ).fetchone()
+                    if not website:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    payload["website_id"] = website_id
+                    payload["scope"] = "website"
+                job_id = enqueue_agent_job(conn, "reset_opcache", "hosting_account", account["id"], payload)
+                log_activity(conn, actor["id"], "opcache_reset", payload)
+                return self.json_response({"job_id": job_id, "status": "queued"})
+            if path == "/api/client/cache/object-cache/flush" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = optional_positive_int(body.get("website_id") or "")
+                payload = {"scope": "all"}
+                if website_id:
+                    website = conn.execute(
+                        "SELECT * FROM websites WHERE id = ? AND account_id = ?",
+                        (website_id, account["id"]),
+                    ).fetchone()
+                    if not website:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    payload["website_id"] = website_id
+                    payload["scope"] = "website"
+                job_id = enqueue_agent_job(conn, "flush_object_cache", "hosting_account", account["id"], payload)
+                log_activity(conn, actor["id"], "object_cache_flushed", payload)
+                return self.json_response({"job_id": job_id, "status": "queued"})
+
+            if path == "/api/client/disk-usage" and method == "GET":
+                require_account(account)
+                return self.json_response(client_disk_usage_payload(conn, account, actor["id"]))
+
+            if path == "/api/client/redirects" and method == "GET":
+                require_account(account)
+                redirects = conn.execute(
+                    "SELECT r.id, r.website_id, w.domain, r.source_path, r.target_url, r.type, r.match_type, r.created_at FROM redirects r JOIN websites w ON r.website_id = w.id WHERE r.account_id = ?",
+                    (account["id"],),
+                ).fetchall()
+                return self.json_response({"redirects": [dict(r) for r in redirects]})
+
+            if path == "/api/client/api-tokens" and method == "GET":
+                require_account(account)
+                tokens = conn.execute("SELECT id, name, expires_at, last_used_at, created_at FROM api_tokens WHERE account_id = ?", (account["id"],)).fetchall()
+                return self.json_response({"api_tokens": [dict(t) for t in tokens]})
+
+            if path == "/api/client/ftp-accounts" and method == "GET":
+                require_account(account)
+                ftp_accounts = conn.execute("SELECT id, username, path, created_at FROM ftp_accounts WHERE account_id = ?", (account["id"],)).fetchall()
+                return self.json_response({"ftp_accounts": [dict(fa) for fa in ftp_accounts]})
+
+            if path == "/api/client/ftp-accounts" and method == "POST":
+                require_active_account(account)
+                require_collaborator_permission(conn, actor["id"], account["id"], "can_create_ftp")
+                body = self.read_json()
+                username = validate_db_identifier(body.get("username", ""), "invalid_ftp_username")
+                password = body.get("password", "")
+                ftp_path = body.get("path", "").strip() or "upload"
+                if not password:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "username_and_password_required")
+                if len(password) < 8:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "password_too_short")
+                
+                # Prepend the main account username as prefix
+                full_username = f"{account['username']}_{username}"
+                
+                # Check uniqueness
+                exists = conn.execute("SELECT id FROM ftp_accounts WHERE username = ?", (full_username,)).fetchone()
+                if exists:
+                    raise ApiError(HTTPStatus.CONFLICT, "username_taken")
+                _, normalized_path = normalize_account_relative_path(account, ftp_path, label="path")
+                if not normalized_path:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_path")
+                
+                cursor = conn.execute(
+                    "INSERT INTO ftp_accounts (account_id, username, password, path) VALUES (?, ?, ?, ?)",
+                    (account["id"], full_username, password, normalized_path)
+                )
+                
+                job_id = enqueue_agent_job(conn, "sync_ftp_accounts", "hosting_account", account["id"], {})
+                
+                log_activity(conn, actor["id"], "ftp_account_created", {"username": full_username})
+                return self.json_response({"success": True, "job_id": job_id, "ftp_account": {"id": cursor.lastrowid, "username": full_username, "path": normalized_path}})
+
+            if path == "/api/client/api-tokens" and method == "POST":
+                require_active_account(account)
+                plan_access = conn.execute(
+                    "SELECT p.allow_api_access FROM hosting_accounts ha JOIN plans p ON p.id = ha.plan_id WHERE ha.id = ?",
+                    (account["id"],),
+                ).fetchone()
+                if not plan_access or not plan_access["allow_api_access"]:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "api_access_disabled_for_plan")
+                body = self.read_json()
+                name = body.get("name", "").strip()
+                if not name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "name_required")
+
+                raw_token = secrets.token_hex(32)
+                token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+
+                cursor = conn.execute(
+                    "INSERT INTO api_tokens (account_id, name, token_hash) VALUES (?, ?, ?)",
+                    (account["id"], name, token_hash)
+                )
+                log_activity(conn, actor["id"], "api_token_created", {"name": name})
+                return self.json_response({
+                    "id": cursor.lastrowid,
+                    "name": name,
+                    "token": f"mp_{raw_token}"
+                }, HTTPStatus.CREATED)
+
+            match_token = re.match(r"^/api/client/api-tokens/(\d+)$", path)
+            if match_token and method == "DELETE":
+                require_active_account(account)
+                token_id = int(match_token.group(1))
+                r = conn.execute("SELECT * FROM api_tokens WHERE id = ? AND account_id = ?", (token_id, account["id"])).fetchone()
+                if not r:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "token_not_found")
+                
+                conn.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
+                log_activity(conn, actor["id"], "api_token_deleted", {"token_id": token_id})
+                return self.json_response({"deleted": True})
+
+            if path == "/api/client/2fa/generate" and method == "POST":
+                require_active_account(account)
+                secret = generate_totp_secret()
+                uri = otpauth_uri("ZeroPanel", actor["email"], secret)
+                return self.json_response({"secret": secret, "uri": uri})
+
+            if path == "/api/client/2fa/enable" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                secret = body.get("secret", "")
+                code = body.get("code", "")
+                if not verify_totp(secret, code):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_totp_code")
+                conn.execute("UPDATE users SET totp_secret = ? WHERE id = ?", (secret, actor["id"]))
+                log_activity(conn, actor["id"], "totp_enabled", {})
+                return self.json_response({"enabled": True})
+
+            if path == "/api/client/2fa/disable" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                verify_user_sensitive_change(actor, body, "2fa_disable")
+                code = body.get("code", "")
+                if not verify_totp(actor["totp_secret"], code):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_totp_code")
+                conn.execute("UPDATE users SET totp_secret = NULL WHERE id = ?", (actor["id"],))
+                revoke_user_sessions(conn, actor["id"])
+                log_activity(conn, actor["id"], "totp_disabled", {})
+                return self.json_response({"disabled": True, "reauth_required": True})
+
+            if path == "/api/client/redirects" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = body.get("website_id")
+                source_path = body.get("source_path", "").strip()
+                target_url = body.get("target_url", "").strip()
+                r_type = body.get("type", "301")
+                match_type = body.get("match_type", "exact")
+                
+                if not website_id or not source_path or not target_url:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "missing_fields")
+                    
+                website = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                if not website:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_website")
+
+                # RewriteRule redirects must point to an absolute HTTP(S) URL.
+                # Otherwise `google.com` becomes a relative `/google.com` path.
+                if "\r" in target_url or "\n" in target_url:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_redirect_target")
+                if not re.match(r"^https?://", target_url, re.IGNORECASE):
+                    target_url = "https://" + target_url.lstrip("/")
+                parsed_target = urlparse(target_url)
+                if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_redirect_target")
+                    
+                if not source_path.startswith("/"):
+                    source_path = "/" + source_path
+                    
+                cursor = conn.execute(
+                    "INSERT INTO redirects(account_id, website_id, source_path, target_url, type, match_type) VALUES (?, ?, ?, ?, ?, ?)",
+                    (account["id"], website_id, source_path, target_url, r_type, match_type),
+                )
+                redirect_id = cursor.lastrowid
+                
+                job_id = enqueue_agent_job(conn, "sync_redirects", "website", website_id, {})
+                log_activity(conn, actor["id"], "redirect_created", {"domain": website["domain"], "source_path": source_path, "target_url": target_url})
+                return self.json_response({"id": redirect_id, "job_id": job_id}, HTTPStatus.CREATED)
+
+            match_redirect = re.match(r"^/api/client/redirects/(\d+)$", path)
+            if match_redirect and method == "DELETE":
+                require_active_account(account)
+                redirect_id = int(match_redirect.group(1))
+                r = conn.execute("SELECT * FROM redirects WHERE id = ? AND account_id = ?", (redirect_id, account["id"])).fetchone()
+                if not r:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "redirect_not_found")
+                
+                conn.execute("DELETE FROM redirects WHERE id = ?", (redirect_id,))
+                job_id = enqueue_agent_job(conn, "sync_redirects", "website", r["website_id"], {})
+                log_activity(conn, actor["id"], "redirect_deleted", {"redirect_id": redirect_id})
+                return self.json_response({"deleted": True, "job_id": job_id})
+
+            if path == "/api/client/protected-directories" and method == "GET":
+                require_account(account)
+                dirs = conn.execute("SELECT id, path, username, created_at FROM protected_directories WHERE account_id = ?", (account["id"],)).fetchall()
+                protected_dirs = []
+                for row in dirs:
+                    item = dict(row)
+                    item["path"] = "/" + item["path"].lstrip("/")
+                    protected_dirs.append(item)
+                return self.json_response({"protected_dirs": protected_dirs})
+
+            if path == "/api/client/protected-directories" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                dir_path = body.get("path", "").strip()
+                username = body.get("username", "").strip()
+                password = body.get("password", "")
+                
+                if not dir_path or not username or not password:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "missing_fields")
+                if len(password) < 8:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "password_too_short")
+                    
+                _, normalized_dir = normalize_account_relative_path(account, dir_path, label="path")
+                if not normalized_dir:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_path")
+                username = validate_db_identifier(username, "invalid_protected_directory_username")
+                    
+                try:
+                    cursor = conn.execute("INSERT INTO protected_directories(account_id, path, username, password_hash) VALUES (?, ?, ?, ?)", 
+                                          (account["id"], normalized_dir, username, "managed_by_agent"))
+                    dir_id = cursor.lastrowid
+                except sqlite3.IntegrityError:
+                    raise ApiError(HTTPStatus.CONFLICT, "directory_already_protected")
+
+                job_id = enqueue_agent_job(conn, "sync_protected_directories", "hosting_account", account["id"], {"path": normalized_dir, "username": username, "password": password})
+                log_activity(conn, actor["id"], "directory_protected", {"path": normalized_dir, "username": username})
+                return self.json_response({"id": dir_id, "path": "/" + normalized_dir, "username": username, "job_id": job_id}, HTTPStatus.CREATED)
+
+            match_dir = re.match(r"^/api/client/protected-directories/(\d+)$", path)
+            if match_dir and method == "DELETE":
+                require_active_account(account)
+                dir_id = int(match_dir.group(1))
+                p_dir = conn.execute("SELECT * FROM protected_directories WHERE id = ? AND account_id = ?", (dir_id, account["id"])).fetchone()
+                if not p_dir:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "directory_not_found")
+                
+                conn.execute("DELETE FROM protected_directories WHERE id = ?", (dir_id,))
+                job_id = enqueue_agent_job(conn, "sync_protected_directories", "hosting_account", account["id"], {"path": p_dir["path"], "remove": True})
+                log_activity(conn, actor["id"], "directory_unprotected", {"path": p_dir["path"]})
+                return self.json_response({"deleted": True, "job_id": job_id})
+
+            if path == "/api/client/ip-rules" and method == "GET":
+                require_account(account)
+                rules = conn.execute("SELECT id, ip, type, expires_at, source, reason, created_at FROM ip_rules WHERE account_id = ?", (account["id"],)).fetchall()
+                return self.json_response({"ip_rules": [dict(r) for r in rules]})
+
+            if path == "/api/client/ip-rules" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                ip_val = body.get("ip", "").strip()
+                rule_type = body.get("type", "block")
+                if rule_type not in {"allow", "block"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_rule_type")
+                try:
+                    ipaddress.ip_network(ip_val, strict=False)
+                except ValueError:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_ip_address")
+                
+                try:
+                    cursor = conn.execute("INSERT INTO ip_rules(account_id, ip, type) VALUES (?, ?, ?)", (account["id"], ip_val, rule_type))
+                    rule_id = cursor.lastrowid
+                except sqlite3.IntegrityError:
+                    raise ApiError(HTTPStatus.CONFLICT, "rule_already_exists")
+
+                job_id = enqueue_agent_job(conn, "sync_ip_rules", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "ip_rule_added", {"ip": ip_val, "type": rule_type})
+                return self.json_response({"id": rule_id, "ip": ip_val, "type": rule_type, "expires_at": None, "source": "manual", "reason": "", "status": "active", "job_id": job_id}, HTTPStatus.CREATED)
+
+            match = re.match(r"^/api/client/ip-rules/(\d+)$", path)
+            if match and method == "DELETE":
+                require_active_account(account)
+                rule_id = int(match.group(1))
+                rule = conn.execute("SELECT * FROM ip_rules WHERE id = ? AND account_id = ?", (rule_id, account["id"])).fetchone()
+                if not rule:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "rule_not_found")
+                
+                conn.execute("DELETE FROM ip_rules WHERE id = ?", (rule_id,))
+                job_id = enqueue_agent_job(conn, "sync_ip_rules", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "ip_rule_deleted", {"ip": rule["ip"]})
+                return self.json_response({"deleted": True, "job_id": job_id})
+
+            if path == "/api/client/hotlink-protection" and method == "GET":
+                require_account(account)
+                settings = conn.execute("SELECT * FROM hotlink_settings WHERE account_id = ?", (account["id"],)).fetchone()
+                return self.json_response({
+                    "hotlink": {
+                        "enabled": bool(settings["enabled"]) if settings else False,
+                        "allowed_domains": settings["allowed_domains"] if settings else "",
+                    }
+                })
+
+            if path == "/api/client/hotlink-protection" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                enabled = 1 if body.get("enabled") else 0
+                allowed_domains = validate_hotlink_allowed_domains(body.get("allowed_domains", ""))
+                conn.execute(
+                    """
+                    INSERT INTO hotlink_settings(account_id, enabled, allowed_domains, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                      enabled = excluded.enabled,
+                      allowed_domains = excluded.allowed_domains,
+                      updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (account["id"], enabled, allowed_domains),
+                )
+                job_id = enqueue_agent_job(conn, "sync_hotlink_protection", "hosting_account", account["id"], {})
+                log_activity(conn, actor["id"], "hotlink_protection_updated", {"enabled": bool(enabled)})
+                return self.json_response({"success": True, "job_id": job_id, "hotlink": {"enabled": bool(enabled), "allowed_domains": allowed_domains}})
+
+            if path == "/api/client/settings/change-password" and method == "POST":
+                body = self.read_json()
+                current_password = body.get("current_password", "")
+                new_password = body.get("new_password", "")
+                verify_user_sensitive_change(actor, body, "password_change")
+                validated_new_password = validate_password(new_password)
+                conn.execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    (hash_password(validated_new_password), actor["id"]),
+                )
+                revoke_user_sessions(conn, actor["id"])
+                log_activity(conn, actor["id"], "user_password_changed", {})
+                return self.json_response({"success": True, "reauth_required": True})
+            
+            if match := re.match(r"^/api/client/ftp-accounts/(\d+)$", path):
+                ftp_id = int(match.group(1))
+                if method == "DELETE":
+                    require_active_account(account)
+                    ftp = conn.execute("SELECT * FROM ftp_accounts WHERE id = ? AND account_id = ?", (ftp_id, account["id"])).fetchone()
+                    if not ftp:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "ftp_account_not_found")
+                    conn.execute("DELETE FROM ftp_accounts WHERE id = ?", (ftp_id,))
+                    
+                    job_id = enqueue_agent_job(conn, "sync_ftp_accounts", "hosting_account", account["id"], {})
+                    
+                    log_activity(conn, actor["id"], "ftp_account_deleted", {"username": ftp["username"]})
+                    return self.json_response({"success": True, "job_id": job_id})
+
+
+            if path == "/api/client/site-builder/templates" and method == "GET":
+                require_account(account)
+                return self.json_response({
+                    "templates": [
+                        {"id": "ecommerce", "name": "E-Commerce", "description": "Online store with cart and checkout.", "thumbnail": "https://placehold.co/400x250/3b82f6/white?text=E-Commerce"},
+                        {"id": "portfolio", "name": "Portfolio", "description": "Showcase your work and projects.", "thumbnail": "https://placehold.co/400x250/10b981/white?text=Portfolio"},
+                        {"id": "business", "name": "Business", "description": "Corporate landing page and contact info.", "thumbnail": "https://placehold.co/400x250/f59e0b/white?text=Business"},
+                        {"id": "blog", "name": "Blog", "description": "Personal or corporate blog template.", "thumbnail": "https://placehold.co/400x250/8b5cf6/white?text=Blog"}
+                    ]
+                })
+
+            if path == "/api/client/site-builder/install" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                website_id = optional_positive_int(body.get("website_id") or "")
+                domain = body.get("domain")
+                template_id = body.get("template_id")
+                if not (domain or website_id) or not template_id:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "missing_fields")
+                if website_id:
+                    site = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                else:
+                    site = conn.execute("SELECT * FROM websites WHERE account_id = ? AND domain = ?", (account["id"], domain)).fetchone()
+                if not site:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                domain = site["domain"]
+                job_id = enqueue_agent_job(conn, "install_site_builder", "website", site["id"], {"domain": domain, "template_id": template_id, "document_root": site["document_root"]})
+                log_activity(conn, actor["id"], "site_builder_installed", {"domain": domain, "template_id": template_id})
+                return self.json_response({"success": True, "job_id": job_id})
+
+            if path == "/api/client/images/optimize" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                target_path = body.get("path") or body.get("directory")
+                website_id = optional_positive_int(body.get("website_id") or "")
+                if not target_path and website_id:
+                    site = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account["id"])).fetchone()
+                    if not site:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    target_path = site["document_root"]
+                if not target_path:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "missing_fields")
+                job_id = enqueue_agent_job(conn, "optimize_images", "account", account["id"], {"path": target_path})
+                log_activity(conn, actor["id"], "images_optimized", {"path": target_path})
+                return self.json_response({"success": True, "job_id": job_id})
+
+            if match := re.match(r"^/api/client/websites/(\d+)/modsec$", path):
+                if method == "POST":
+                    require_active_account(account)
+                    site_id = int(match.group(1))
+                    body = self.read_json()
+                    raw_enabled = body.get("enabled")
+                    if raw_enabled in {True, 1, "1", "true", "True"}:
+                        enabled = 1
+                    elif raw_enabled in {False, 0, "0", "false", "False"}:
+                        enabled = 0
+                    elif raw_enabled is None:
+                        enabled = 1
+                    else:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_enabled")
+                    site = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (site_id, account["id"])).fetchone()
+                    if not site:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                    conn.execute("UPDATE websites SET modsec_enabled = ? WHERE id = ?", (enabled, site_id))
+                    job_id = enqueue_agent_job(conn, "sync_website_modsec", "website", site_id, {"enabled": enabled})
+                    log_activity(conn, actor["id"], "modsec_updated", {"domain": site["domain"], "enabled": bool(enabled)})
+                    return self.json_response({"success": True, "enabled": bool(enabled), "job_id": job_id})
+
+            if path == "/api/client/remote-mysql" and method == "GET":
+                require_account(account)
+                hosts = rows_to_dicts(conn.execute("SELECT * FROM remote_mysql_hosts WHERE account_id = ? ORDER BY id", (account["id"],)).fetchall())
+                return self.json_response({"remote_mysql_hosts": hosts})
+
+            if path == "/api/client/remote-mysql" and method == "POST":
+                require_active_account(account)
+                body = self.read_json()
+                host_ip = body.get("host_ip", "").strip()
+                if not host_ip:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "missing_fields")
+                try:
+                    ipaddress.ip_address(host_ip)
+                except ValueError as exc:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_host_ip") from exc
+                try:
+                    cursor = conn.execute("INSERT INTO remote_mysql_hosts (account_id, host_ip) VALUES (?, ?)", (account["id"], host_ip))
+                    host_id = cursor.lastrowid
+                    job_id = enqueue_agent_job(conn, "sync_remote_mysql", "account", account["id"], {})
+                    log_activity(conn, actor["id"], "remote_mysql_added", {"host_ip": host_ip})
+                    return self.json_response({"success": True, "id": host_id, "host_ip": host_ip, "job_id": job_id})
+                except Exception:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "host_already_exists")
+
+            if match := re.match(r"^/api/client/remote-mysql/(\d+)$", path):
+                if method == "DELETE":
+                    require_active_account(account)
+                    host_id = int(match.group(1))
+                    r = conn.execute("SELECT * FROM remote_mysql_hosts WHERE id = ? AND account_id = ?", (host_id, account["id"])).fetchone()
+                    if not r:
+                        raise ApiError(HTTPStatus.NOT_FOUND, "host_not_found")
+                    conn.execute("DELETE FROM remote_mysql_hosts WHERE id = ?", (host_id,))
+                    job_id = enqueue_agent_job(conn, "sync_remote_mysql", "account", account["id"], {})
+                    log_activity(conn, actor["id"], "remote_mysql_removed", {"host_ip": r["host_ip"]})
+                    return self.json_response({"deleted": True, "job_id": job_id})
+
+            if path == "/api/client/logs/raw" and method == "GET":
+                require_account(account)
+                domain = query.get("domain", [""])[0]
+                if not domain:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "missing_domain")
+                site = conn.execute("SELECT * FROM websites WHERE account_id = ? AND domain = ?", (account["id"], domain)).fetchone()
+                if not site:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+                return self.json_response({
+                    "download_url": f"/api/client/files/launch?path=/domains/{domain}/logs/access.log",
+                    "success": True
+                })
+
+        raise ApiError(HTTPStatus.NOT_FOUND, "unknown_client_route")
+
+    def route_reseller_api(self, method, path, query, actor):
+        path = path.rstrip("/")
+        reseller_id = actor["id"]
+        with connect(CONFIG.db_path) as conn:
+            reseller_user = conn.execute(
+                """
+                SELECT u.*, rp.name AS plan_name, rp.max_storage_mb AS storage_mb, rp.max_clients,
+                       rp.max_subplans AS max_reseller_subplans, rp.max_websites, rp.max_databases, rp.max_ram_mb AS memory_mb
+                FROM users u
+                LEFT JOIN reseller_plans rp ON rp.id = u.reseller_plan_id
+                WHERE u.id = ? AND u.status = 'active' AND (u.is_reseller = 1 OR u.reseller_plan_id IS NOT NULL)
+                """,
+                (reseller_id,),
+            ).fetchone()
+
+            if reseller_user:
+                master_plan = row_to_dict(reseller_user)
+                if not master_plan.get("plan_name"):
+                    rp_default = conn.execute("SELECT * FROM reseller_plans ORDER BY id ASC LIMIT 1").fetchone()
+                    if rp_default:
+                        master_plan["plan_name"] = rp_default["name"]
+                        master_plan["storage_mb"] = rp_default["max_storage_mb"]
+                        master_plan["max_clients"] = rp_default["max_clients"]
+                        master_plan["max_reseller_subplans"] = rp_default["max_subplans"]
+                        master_plan["max_websites"] = rp_default["max_websites"]
+                        master_plan["max_databases"] = rp_default["max_databases"]
+                        master_plan["memory_mb"] = rp_default["max_ram_mb"]
+                    else:
+                        master_plan["plan_name"] = "Default Reseller Plan"
+                        master_plan["storage_mb"] = 50000
+                        master_plan["max_clients"] = 10
+                        master_plan["max_reseller_subplans"] = 10
+                        master_plan["max_websites"] = 50
+                        master_plan["max_databases"] = 50
+                        master_plan["memory_mb"] = 8192
+            else:
+                master_account = conn.execute(
+                    """
+                    SELECT ha.*, p.name AS plan_name, p.storage_mb, p.memory_mb, p.inode_limit,
+                           p.max_websites, p.max_databases, p.max_mailboxes, p.max_clients, p.max_reseller_subplans, p.is_reseller
+                    FROM hosting_accounts ha
+                    JOIN plans p ON p.id = ha.plan_id
+                    WHERE ha.user_id = ? AND ha.status = 'active' AND p.is_reseller = 1
+                    LIMIT 1
+                    """,
+                    (reseller_id,),
+                ).fetchone()
+                if not master_account:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "reseller_plan_not_active")
+                master_plan = row_to_dict(master_account)
+
+            # 1. Reseller Dashboard
+            if path == "/api/reseller/dashboard" and method == "GET":
+                sub_clients = conn.execute("SELECT COUNT(*) AS count FROM users WHERE reseller_id = ?", (reseller_id,)).fetchone()["count"]
+                sub_accounts = conn.execute(
+                    "SELECT COUNT(*) AS count FROM hosting_accounts ha JOIN users u ON u.id = ha.user_id WHERE u.reseller_id = ?",
+                    (reseller_id,),
+                ).fetchone()["count"]
+                sub_websites = conn.execute(
+                    "SELECT COUNT(*) AS count FROM websites w JOIN hosting_accounts ha ON ha.id = w.account_id JOIN users u ON u.id = ha.user_id WHERE u.reseller_id = ?",
+                    (reseller_id,),
+                ).fetchone()["count"]
+                sub_plans = conn.execute("SELECT COUNT(*) AS count FROM plans WHERE reseller_id = ?", (reseller_id,)).fetchone()["count"]
+                allocated_storage_mb = conn.execute(
+                    "SELECT COALESCE(SUM(p.storage_mb), 0) AS total FROM hosting_accounts ha JOIN users u ON u.id = ha.user_id JOIN plans p ON p.id = ha.plan_id WHERE u.reseller_id = ?",
+                    (reseller_id,),
+                ).fetchone()["total"]
+
+                nodes = rows_to_dicts(conn.execute("SELECT * FROM nodes ORDER BY id").fetchall())
+                jobs = rows_to_dicts(conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 10").fetchall())
+                status = build_status_payload(conn)
+
+                counts = {
+                    "users": sub_clients,
+                    "hosting_accounts": sub_accounts,
+                    "websites": sub_websites,
+                    "account_stacks": sub_accounts,
+                    "jobs": len(jobs),
+                    "open_incidents": len(status.get("active_incidents", [])),
+                }
+
+                return self.json_response({
+                    "counts": counts,
+                    "nodes": nodes,
+                    "recent_jobs": jobs,
+                    "status": status,
+                    "dashboard": {
+                        "sub_clients_count": sub_clients,
+                        "sub_accounts_count": sub_accounts,
+                        "sub_plans_count": sub_plans,
+                        "master_plan": master_plan,
+                        "allocated_storage_mb": allocated_storage_mb,
+                        "master_storage_mb": master_plan["storage_mb"],
+                        "max_clients_limit": master_plan["max_clients"],
+                        "max_subplans_limit": master_plan["max_reseller_subplans"],
+                    }
+                })
+
+            if path == "/api/reseller/users" and method == "GET":
+                return self.json_response({"users": rows_to_dicts(conn.execute("SELECT id, email, full_name, status, created_at FROM users WHERE reseller_id = ? ORDER BY id", (reseller_id,)).fetchall())})
+
+            if path == "/api/reseller/account-stacks" and method == "GET":
+                stacks = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT ha.*, u.email AS user_email, u.full_name AS user_full_name, p.name AS plan_name
+                        FROM hosting_accounts ha
+                        JOIN users u ON u.id = ha.user_id
+                        JOIN plans p ON p.id = ha.plan_id
+                        WHERE u.reseller_id = ?
+                        ORDER BY ha.id DESC
+                        """,
+                        (reseller_id,),
+                    ).fetchall()
+                )
+                return self.json_response({"stacks": stacks})
+
+            if path == "/api/reseller/job-events" and method == "GET":
+                events = rows_to_dicts(conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 50").fetchall())
+                return self.json_response({"events": events})
+
+            # 2. Reseller Sub-Clients
+            if path == "/api/reseller/clients" and method == "GET":
+                clients = rows_to_dicts(conn.execute("SELECT * FROM users WHERE reseller_id = ? ORDER BY id DESC", (reseller_id,)).fetchall())
+                for client in clients:
+                    client["accounts"] = rows_to_dicts(conn.execute("SELECT * FROM hosting_accounts WHERE user_id = ?", (client["id"],)).fetchall())
+                return self.json_response({"clients": clients})
+
+            if path == "/api/reseller/clients" and method == "POST":
+                if master_plan["max_clients"] > 0:
+                    current_clients = conn.execute("SELECT COUNT(*) AS count FROM users WHERE reseller_id = ?", (reseller_id,)).fetchone()["count"]
+                    if current_clients >= master_plan["max_clients"]:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "max_clients_limit_reached")
+                body = self.read_json()
+                email = clean_text(body.get("email"), "").lower()
+                password = body.get("password", "").strip()
+                full_name = clean_text(body.get("full_name"), email.split("@")[0])
+                if not email or "@" not in email:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_email")
+                if len(password) < 8:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "password_too_short")
+                if conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "user_email_already_exists")
+
+                cur = conn.execute(
+                    "INSERT INTO users(email, password_hash, full_name, reseller_id) VALUES (?, ?, ?, ?)",
+                    (email, hash_password(password), full_name, reseller_id),
+                )
+                conn.commit()
+                created = conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"client": row_to_dict(created)}, HTTPStatus.CREATED)
+
+            if path.startswith("/api/reseller/clients/") and method == "PATCH":
+                client_id = int(path.split("/")[-1])
+                client = conn.execute("SELECT * FROM users WHERE id = ? AND reseller_id = ?", (client_id, reseller_id)).fetchone()
+                if not client:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "client_not_found")
+                body = self.read_json()
+                status = body.get("status")
+                full_name = body.get("full_name")
+                if status in {"active", "suspended"}:
+                    conn.execute("UPDATE users SET status = ? WHERE id = ?", (status, client_id))
+                if full_name:
+                    conn.execute("UPDATE users SET full_name = ? WHERE id = ?", (clean_text(full_name, client["full_name"]), client_id))
+                conn.commit()
+                updated = conn.execute("SELECT * FROM users WHERE id = ?", (client_id,)).fetchone()
+                return self.json_response({"client": row_to_dict(updated)})
+
+            if path.startswith("/api/reseller/clients/") and method == "DELETE":
+                client_id = int(path.split("/")[-1])
+                client = conn.execute("SELECT * FROM users WHERE id = ? AND reseller_id = ?", (client_id, reseller_id)).fetchone()
+                if not client:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "client_not_found")
+                conn.execute("DELETE FROM users WHERE id = ?", (client_id,))
+                conn.commit()
+                return self.json_response({"deleted": True})
+
+            # 3. Reseller Sub-Plans
+            if path == "/api/reseller/plans" and method == "GET":
+                plans = rows_to_dicts(conn.execute("SELECT * FROM plans WHERE reseller_id = ? ORDER BY id DESC", (reseller_id,)).fetchall())
+                return self.json_response({"plans": plans})
+
+            if path == "/api/reseller/plans" and method == "POST":
+                if master_plan["max_reseller_subplans"] > 0:
+                    current_plans = conn.execute("SELECT COUNT(*) AS count FROM plans WHERE reseller_id = ?", (reseller_id,)).fetchone()["count"]
+                    if current_plans >= master_plan["max_reseller_subplans"]:
+                        raise ApiError(HTTPStatus.FORBIDDEN, "max_subplans_limit_reached")
+
+                body = self.read_json()
+                plan = validate_plan_payload(body)
+                validate_plan_dns_accounts(conn, plan)
+
+                # ENFORCE: Sub-plan package limits cannot exceed reseller master plan package limits!
+                if plan["storage_mb"] > master_plan["storage_mb"]:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, f"subplan_storage_exceeds_master_limit (Max: {master_plan['storage_mb']} MB)")
+                if plan["memory_mb"] > master_plan["memory_mb"]:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, f"subplan_memory_exceeds_master_limit (Max: {master_plan['memory_mb']} MB)")
+                if plan["max_websites"] > master_plan["max_websites"]:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, f"subplan_websites_exceeds_master_limit (Max: {master_plan['max_websites']})")
+                if plan["max_databases"] > master_plan["max_databases"]:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, f"subplan_databases_exceeds_master_limit (Max: {master_plan['max_databases']})")
+
+                if conn.execute("SELECT id FROM plans WHERE name = ? AND reseller_id = ?", (plan["name"], reseller_id)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "plan_name_already_exists")
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO plans(
+                      name, cpu_limit, memory_mb, storage_mb, inode_limit, max_websites, max_subdomains,
+                      max_databases, max_mailboxes, max_cron_jobs, daily_email_limit, backup_retention_days, backup_schedule,
+                      max_processes, php_workers, php_timeout, bandwidth_mb, nameserver_1, nameserver_2, backup_location,
+                      frontend_frameworks, backend_frameworks, nodejs_versions, package_managers,
+                      dns_default_provider, dns_allowed_providers_json, dns_allowed_provider_accounts_json, dns_default_provider_account_id,
+                      dns_customer_editable, dns_max_records_per_domain, dns_allowed_record_types_json,
+                      dns_min_ttl, dns_wildcard_records_allowed, dns_cloudflare_proxy_allowed,
+                      dns_dnssec_allowed, dns_dnssec_required, allow_api_access, reseller_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        plan["name"], plan["cpu_limit"], plan["memory_mb"], plan["storage_mb"], plan["inode_limit"],
+                        plan["max_websites"], plan["max_databases"], plan["max_mailboxes"], plan["max_cron_jobs"],
+                        plan["daily_email_limit"], plan["backup_retention_days"], plan["backup_schedule"], plan["max_processes"], plan["php_workers"], plan["php_timeout"],
+                        plan["bandwidth_mb"], plan["nameserver_1"], plan["nameserver_2"], plan["backup_location"],
+                        plan["frontend_frameworks"], plan["backend_frameworks"], plan["nodejs_versions"], plan["package_managers"],
+                        plan["dns_default_provider"], plan["dns_allowed_providers_json"], plan["dns_allowed_provider_accounts_json"], plan["dns_default_provider_account_id"],
+                        plan["dns_customer_editable"], plan["dns_max_records_per_domain"], plan["dns_allowed_record_types_json"],
+                        plan["dns_min_ttl"], plan["dns_wildcard_records_allowed"], plan["dns_cloudflare_proxy_allowed"],
+                        plan["dns_dnssec_allowed"], plan["dns_dnssec_required"], plan["allow_api_access"], reseller_id
+                    )
+                )
+                conn.commit()
+                created = conn.execute("SELECT * FROM plans WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"plan": row_to_dict(created)}, HTTPStatus.CREATED)
+
+            # 4. Provision Hosting Accounts
+            if path == "/api/reseller/hosting-accounts" and method == "POST":
+                body = self.read_json()
+                user_id = int(body.get("user_id", 0))
+                plan_id = int(body.get("plan_id", 0))
+
+                user = conn.execute("SELECT * FROM users WHERE id = ? AND reseller_id = ?", (user_id, reseller_id)).fetchone()
+                if not user:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "subclient_not_found")
+                plan = conn.execute("SELECT * FROM plans WHERE id = ? AND reseller_id = ?", (plan_id, reseller_id)).fetchone()
+                if not plan:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "subplan_not_found")
+
+                node = conn.execute("SELECT * FROM nodes WHERE status = 'online' LIMIT 1").fetchone()
+                if not node:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "no_active_node")
+
+                total_allocated_mb = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(p.storage_mb), 0) AS total
+                    FROM hosting_accounts ha
+                    JOIN users u ON u.id = ha.user_id
+                    JOIN plans p ON p.id = ha.plan_id
+                    WHERE u.reseller_id = ?
+                    """,
+                    (reseller_id,),
+                ).fetchone()["total"]
+
+                if (total_allocated_mb + plan["storage_mb"]) > master_plan["storage_mb"]:
+                    raise ApiError(HTTPStatus.FORBIDDEN, "reseller_aggregate_storage_limit_exceeded")
+
+                existing_count = conn.execute("SELECT COUNT(*) AS count FROM hosting_accounts WHERE user_id = ?", (user_id,)).fetchone()["count"]
+                username = "u{:06d}".format(user_id) if existing_count == 0 else "u{:06d}x{}".format(user_id, existing_count)
+                base_path = str(CONFIG.account_root / username)
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO hosting_accounts(
+                      user_id, plan_id, node_id, username, base_path, status,
+                      opcache_enabled, object_cache_enabled, reverse_proxy_cache_enabled,
+                      litespeed_cache_enabled, cloudflare_cache_enabled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, plan_id, node["id"], username, base_path, "active", 1, 0, 0, 1, 1),
+                )
+                conn.commit()
+                created = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"hosting_account": row_to_dict(created)}, HTTPStatus.CREATED)
+
+            # 5. Reseller Storage Quotas
+            if path == "/api/reseller/storage/quotas" and method == "GET":
+                accounts = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT ha.*, u.email, u.full_name, p.name AS plan_name, p.storage_mb AS plan_storage_mb, p.inode_limit AS plan_inode_limit
+                        FROM hosting_accounts ha
+                        JOIN users u ON u.id = ha.user_id
+                        JOIN plans p ON p.id = ha.plan_id
+                        WHERE u.reseller_id = ?
+                        """,
+                        (reseller_id,),
+                    ).fetchall()
+                )
+                return self.json_response({"accounts": accounts})
+
+            # 6. Reseller API Tokens
+            if path == "/api/reseller/api-tokens" and method == "GET":
+                tokens = rows_to_dicts(conn.execute("SELECT id, name, permissions_json, expires_at, last_used_at, created_at FROM reseller_api_tokens WHERE reseller_user_id = ? ORDER BY id DESC", (reseller_id,)).fetchall())
+                for t in tokens:
+                    t["permissions"] = parse_json_field(t.get("permissions_json"), ["*"])
+                return self.json_response({"tokens": tokens})
+
+            if path == "/api/reseller/api-tokens" and method == "POST":
+                body = self.read_json()
+                name = clean_text(body.get("name"), "Reseller Token")
+                raw_token_hex = secrets.token_hex(20)
+                raw_token = f"mp_reseller_{raw_token_hex}"
+                token_hash = hashlib.sha256(raw_token_hex.encode("utf-8")).hexdigest()
+                expires_at = int(time.time()) + (365 * 86400)
+                cur = conn.execute(
+                    "INSERT INTO reseller_api_tokens(reseller_user_id, name, token_hash, permissions_json, expires_at) VALUES (?, ?, ?, ?, ?)",
+                    (reseller_id, name, token_hash, json.dumps(body.get("permissions", ["*"])), expires_at),
+                )
+                conn.commit()
+                return self.json_response({"token_id": cur.lastrowid, "token": raw_token, "name": name}, HTTPStatus.CREATED)
+
+            if path.startswith("/api/reseller/api-tokens/") and method == "DELETE":
+                t_id = int(path.split("/")[-1])
+                conn.execute("DELETE FROM reseller_api_tokens WHERE id = ? AND reseller_user_id = ?", (t_id, reseller_id))
+                conn.commit()
+                return self.json_response({"deleted": True})
+
+            # Live Storage & Disk IO
+            if path == "/api/reseller/storage/df" and method == "GET":
+                master_storage_mb = master_plan["storage_mb"] if master_plan else 50000
+                total_used_mb = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(ha.storage_used_mb), 0) AS total
+                    FROM hosting_accounts ha
+                    JOIN users u ON u.id = ha.user_id
+                    WHERE u.reseller_id = ?
+                    """,
+                    (reseller_id,),
+                ).fetchone()["total"]
+
+                total_allocated_mb = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(p.storage_mb), 0) AS total
+                    FROM hosting_accounts ha
+                    JOIN users u ON u.id = ha.user_id
+                    JOIN plans p ON p.id = ha.plan_id
+                    WHERE u.reseller_id = ?
+                    """,
+                    (reseller_id,),
+                ).fetchone()["total"]
+
+                total_size_bytes = master_storage_mb * 1024 * 1024
+                total_used_bytes = int(total_used_mb * 1024 * 1024)
+                total_avail_bytes = max(0, total_size_bytes - total_used_bytes)
+                capacity_pct = round((total_used_bytes / total_size_bytes) * 100, 1) if total_size_bytes > 0 else 0
+
+                size_gb = round(master_storage_mb / 1024.0, 2)
+                used_gb = round(total_used_mb / 1024.0, 2)
+                avail_gb = round(total_avail_bytes / (1024.0 * 1024.0 * 1024.0), 2)
+                allocated_gb = round(total_allocated_mb / 1024.0, 2)
+
+                filesystems = [
+                    {
+                        "filesystem": f"Reseller Plan ({master_plan.get('plan_name', 'Master') if master_plan else 'Master'})",
+                        "mount": "/home/reseller",
+                        "size_human": f"{size_gb} GB",
+                        "used_human": f"{used_gb} GB (Used) / {allocated_gb} GB (Allocated)",
+                        "avail_human": f"{avail_gb} GB",
+                        "use_pct": capacity_pct,
+                        "size_bytes": total_size_bytes,
+                        "used_bytes": total_used_bytes,
+                        "avail_bytes": total_avail_bytes,
+                    }
+                ]
+
+                return self.json_response({
+                    "filesystems": filesystems,
+                    "root_capacity_pct": capacity_pct,
+                    "total_main_size_bytes": total_size_bytes,
+                    "total_main_used_bytes": total_used_bytes,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
+
+            if path in {"/api/reseller/storage/live", "/api/reseller/storage/live/stream"} and method == "GET":
+                return self.json_response(get_live_disk_io(conn, reseller_id=reseller_id))
+
+            if path == "/api/reseller/storage/paths" and method == "GET":
+                return self.json_response(get_path_size_breakdown())
+
+            if path == "/api/reseller/storage/cleanup" and method == "POST":
+                body = self.read_json() if self.headers.get("Content-Length") else {}
+                return self.json_response(run_storage_cleanup(
+                    clean_docker=body.get("clean_docker", True),
+                    clean_logs=body.get("clean_logs", True),
+                    clean_tmp=body.get("clean_tmp", True),
+                ))
+
+            if path == "/api/reseller/storage/alerts" and method == "GET":
+                return self.json_response(get_storage_alert_settings(conn))
+
+            # Live Networking & Bandwidth
+            if path == "/api/reseller/network/overview" and method == "GET":
+                return self.json_response(get_network_overview(conn))
+
+            if path in {"/api/reseller/network/live", "/api/reseller/network/live/stream"} and method == "GET":
+                return self.json_response(get_live_network_io(conn, reseller_id=reseller_id))
+
+            if path in {"/api/reseller/cpu/live", "/api/reseller/cpu/live/stream"} and method == "GET":
+                return self.json_response(get_live_cpu_io(conn, reseller_id=reseller_id))
+
+            if path == "/api/reseller/cpu/history" and method == "GET":
+                range_str = (query.get("range") or ["72h"])[0]
+                return self.json_response(get_system_cpu_history(conn, range_str))
+
+            if path in {"/api/reseller/ram/live", "/api/reseller/ram/live/stream"} and method == "GET":
+                return self.json_response(get_live_ram_io(conn, reseller_id=reseller_id))
+
+            if path == "/api/reseller/ram/history" and method == "GET":
+                range_str = (query.get("range") or ["72h"])[0]
+                return self.json_response(get_system_ram_history(conn, range_str))
+
+            if path == "/api/reseller/network/ips" and method == "GET":
+                ips = rows_to_dicts(conn.execute("SELECT * FROM server_ips ORDER BY id").fetchall())
+                return self.json_response({"ips": ips})
+
+            # DNS Settings & Domains
+            if path in {"/api/reseller/dns-settings", "/api/reseller/dns/settings"} and method == "GET":
+                return self.json_response({"dns_settings": dns_settings_payload(conn)})
+
+            if path in {"/api/reseller/domains", "/api/reseller/dns-domains", "/api/reseller/dns/domains"} and method == "GET":
+                domains = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT d.*, u.email AS owner_email, ha.username AS account_username
+                        FROM domains d
+                        JOIN hosting_accounts ha ON ha.id = d.account_id
+                        JOIN users u ON u.id = ha.user_id
+                        WHERE u.reseller_id = ?
+                        ORDER BY d.id DESC
+                        """,
+                        (reseller_id,),
+                    ).fetchall()
+                )
+                return self.json_response({"domains": domains})
+
+            if path == "/api/reseller/dns-providers/cloudflare/accounts" and method == "GET":
+                return self.json_response({"accounts": []})
+
+            # Security Audit
+            if path in {"/api/reseller/security/audit", "/api/reseller/security"} and method == "GET":
+                return self.json_response({"security": run_server_security_audit(conn)})
+
+            # Admins & Reseller Profile
+            if path == "/api/reseller/admins" and method == "GET":
+                reseller_user = row_to_dict(conn.execute("SELECT id, email, full_name, created_at FROM users WHERE id = ?", (reseller_id,)).fetchone())
+                reseller_user["role"] = "reseller"
+                tokens = rows_to_dicts(conn.execute("SELECT id, name, permissions_json, expires_at, last_used_at, created_at FROM reseller_api_tokens WHERE reseller_user_id = ? ORDER BY id DESC", (reseller_id,)).fetchall())
+                return self.json_response({"admins": [reseller_user], "api_tokens": tokens})
+
+            # System Status & Incidents
+            if path in {"/api/reseller/status", "/api/reseller/system"} and method == "GET":
+                return self.json_response(build_status_payload(conn))
+
+            # Default Page
+            if path == "/api/reseller/default-page" and method == "GET":
+                return self.json_response({"default_page_content": DEFAULT_PAGE_CONTENT, "is_customized": False})
+
+            # Domain Registrars
+            if path == "/api/reseller/registrars" and method == "GET":
+                return self.json_response({"registrars": []})
+
+            # Automatic Admin API Fallback for reseller endpoints
+            try:
+                admin_path = path.replace("/api/reseller/", "/api/admin/")
+                return self.admin_api(method, admin_path, query, actor)
+            except ApiError as ae:
+                if ae.status_code == HTTPStatus.NOT_FOUND and ae.error == "unknown_api_route":
+                    raise ApiError(HTTPStatus.NOT_FOUND, "unknown_reseller_api_route")
+                raise
+
+
+    def admin_api(self, method, path, query, actor):
+        path = path.rstrip("/")
+        with connect(CONFIG.db_path) as conn:
+            if path == "/api/admin/store" and method == "GET":
+                require_admin_permission(actor, "billing.manage")
+                categories = rows_to_dicts(conn.execute("SELECT * FROM store_categories ORDER BY sort_order, name").fetchall())
+                plans = conn.execute(
+                    """SELECT sp.*, sc.name AS category_name, hp.name AS hosting_plan_name
+                       FROM store_plans sp JOIN store_categories sc ON sc.id = sp.category_id
+                       LEFT JOIN plans hp ON hp.id = sp.hosting_plan_id ORDER BY sc.sort_order, sp.id"""
+                ).fetchall()
+                orders = conn.execute("SELECT id FROM store_orders ORDER BY id DESC LIMIT 200").fetchall()
+                hosting_plans = rows_to_dicts(conn.execute("SELECT id, name, memory_mb, storage_mb, max_websites, max_databases, max_mailboxes FROM plans ORDER BY id").fetchall())
+                customers = rows_to_dicts(conn.execute(
+                    """SELECT u.id, u.email, u.full_name, COALESCE(w.balance_cents, 0) AS balance_cents
+                       FROM users u LEFT JOIN wallets w ON w.user_id = u.id
+                       WHERE u.status = 'active' ORDER BY u.email"""
+                ).fetchall())
+                return self.json_response({
+                    "categories": categories,
+                    "plans": [store_plan_payload(row) for row in plans],
+                    "hosting_plans": hosting_plans,
+                    "customers": customers,
+                    "orders": [store_order(conn, row["id"]) for row in orders],
+                })
+            if path == "/api/admin/store/categories" and method == "POST":
+                require_admin_permission(actor, "billing.manage")
+                try:
+                    category = save_category(conn, self.read_json())
+                except StoreError as exc:
+                    raise ApiError(exc.status, exc.code)
+                return self.json_response({"category": category}, HTTPStatus.CREATED)
+            category_match = re.fullmatch(r"/api/admin/store/categories/(\d+)", path)
+            if category_match and method == "PATCH":
+                require_admin_permission(actor, "billing.manage")
+                try:
+                    category = save_category(conn, self.read_json(), int(category_match.group(1)))
+                except StoreError as exc:
+                    raise ApiError(exc.status, exc.code)
+                return self.json_response({"category": category})
+            if path == "/api/admin/store/plans" and method == "POST":
+                require_admin_permission(actor, "billing.manage")
+                try:
+                    plan = save_plan(conn, self.read_json())
+                except StoreError as exc:
+                    raise ApiError(exc.status, exc.code)
+                return self.json_response({"plan": plan}, HTTPStatus.CREATED)
+            plan_match = re.fullmatch(r"/api/admin/store/plans/(\d+)", path)
+            if plan_match and method == "PATCH":
+                require_admin_permission(actor, "billing.manage")
+                try:
+                    plan = save_plan(conn, self.read_json(), int(plan_match.group(1)))
+                except StoreError as exc:
+                    raise ApiError(exc.status, exc.code)
+                return self.json_response({"plan": plan})
+            if path == "/api/admin/store/orders" and method == "GET":
+                require_admin_permission(actor, "billing.manage")
+                orders = conn.execute("SELECT id FROM store_orders ORDER BY id DESC LIMIT 500").fetchall()
+                return self.json_response({"orders": [store_order(conn, row["id"]) for row in orders]})
+            order_action = re.fullmatch(r"/api/admin/store/orders/(\d+)/(approve|reject)", path)
+            if order_action and method == "POST":
+                require_admin_permission(actor, "billing.manage")
+                body = self.read_json() if self.headers.get("Content-Length") else {}
+                try:
+                    if order_action.group(2) == "approve":
+                        result = approve_order(conn, int(order_action.group(1)), actor["id"], CONFIG.account_root)
+                    else:
+                        result = reject_order(conn, int(order_action.group(1)), actor["id"], body.get("note", ""))
+                except StoreError as exc:
+                    raise ApiError(exc.status, exc.code)
+                return self.json_response({"order": result})
+            wallet_match = re.fullmatch(r"/api/admin/store/users/(\d+)/wallet", path)
+            if wallet_match and method == "POST":
+                require_admin_permission(actor, "billing.manage")
+                body = self.read_json()
+                try:
+                    balance = adjust_wallet(conn, int(wallet_match.group(1)), body.get("delta_cents"), actor["id"], body.get("description", ""))
+                except StoreError as exc:
+                    raise ApiError(exc.status, exc.code)
+                return self.json_response({"balance_cents": balance})
+            if path == "/api/admin/system-backup" and method == "GET":
+                cfg = backup_config(conn, CONFIG)
+                cfg["remote_secret"] = "" if not cfg["remote_secret"] else "••••••••"
+                cfg["last_run"] = row_to_dict(conn.execute("SELECT * FROM system_backup_runs ORDER BY id DESC LIMIT 1").fetchone()) if conn.execute("SELECT 1 FROM system_backup_runs LIMIT 1").fetchone() else None
+                return self.json_response({"backup": cfg})
+            if path == "/api/admin/system-backup" and method in {"POST", "PATCH"}:
+                require_admin_permission(actor, "system.manage")
+                body = self.read_json()
+                bool_keys = {"local_enabled": "backup_local_enabled", "remote_enabled": "backup_remote_enabled", "db_enabled": "backup_db_enabled", "files_enabled": "backup_files_enabled", "local_remove_enabled": "backup_local_remove_enabled", "remote_remove_enabled": "backup_remote_remove_enabled"}
+                for field, key in bool_keys.items():
+                    if field in body:
+                        set_system_setting(conn, key, "1" if bool(body[field]) else "0")
+                text_fields = {"local_path": "backup_local_path", "remote_endpoint": "backup_s3_endpoint", "remote_bucket": "backup_s3_bucket", "remote_region": "backup_s3_region", "remote_access_key": "backup_s3_access_key", "remote_prefix": "backup_s3_prefix", "db_frequency": "backup_db_frequency", "files_frequency": "backup_files_frequency", "db_time": "backup_db_time", "files_time": "backup_files_time"}
+                for field, key in text_fields.items():
+                    if field in body:
+                        set_system_setting(conn, key, str(body[field] or "").strip())
+                if "remote_secret" in body and str(body.get("remote_secret") or "").strip() and "••••" not in str(body.get("remote_secret")):
+                    set_system_setting(conn, "backup_s3_secret_encrypted", encrypt_secret(str(body["remote_secret"]).strip(), CONFIG.jwt_secret))
+                try:
+                    retention = max(1, min(3650, int(body.get("retention_days", get_system_setting(conn, "backup_retention_days", "30")))))
+                except (TypeError, ValueError):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_backup_retention_days")
+                set_system_setting(conn, "backup_retention_days", str(retention))
+                for field in ("db_time", "files_time"):
+                    value = get_system_setting(conn, "backup_" + field, "02:00")
+                    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_backup_time")
+                response_config = backup_config(conn, CONFIG)
+                response_config["remote_secret"] = "" if not response_config["remote_secret"] else "••••••••"
+                return self.json_response({"backup": response_config})
+            if path == "/api/admin/system-backup/test" and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                try:
+                    result = test_remote(backup_config(conn, CONFIG))
+                except Exception as exc:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, str(exc))
+                return self.json_response(result)
+            if path == "/api/admin/system-backup/run" and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                body = self.read_json()
+                kind = str(body.get("kind") or "all").lower()
+                kinds = ("database",) if kind == "database" else (("files",) if kind == "files" else ("database", "files"))
+                cur = conn.execute("INSERT INTO system_backup_runs(kind, status) VALUES (?, 'queued')", ("+".join(kinds),))
+                job_id = enqueue_agent_job(conn, "system_backup", "system_backup", cur.lastrowid, {"kinds": kinds})
+                return self.json_response({"run_id": cur.lastrowid, "job_id": job_id, "status": "queued"}, HTTPStatus.CREATED)
+            if path == "/api/admin/configuration" and method == "GET":
+                return self.json_response({"configuration": {
+                    "backup_time": get_system_setting(conn, "backup_time", "02:00"),
+                    "resource_scan_time": get_system_setting(conn, "resource_scan_time", "03:00"),
+                    "timezone": get_system_setting(conn, "system_timezone", default_system_timezone_name()),
+                    "modsecurity_ruleset": get_system_setting(conn, "modsecurity_ruleset", "baseline"),
+                    "ssh_motd": get_system_setting(conn, "ssh_motd", DEFAULT_SSH_MOTD),
+                    "public_host": get_system_setting(conn, "public_host", CONFIG.public_host),
+                    "server_ip": get_host_public_ip(conn, self.headers.get("Host")),
+                    "admin_email": get_system_setting(conn, "admin_email", ""),
+                    "auto_updates_enabled": str(get_system_setting(conn, "auto_updates_enabled", "1")) in {"1", "true", "True"},
+                    "auto_update_frequency": get_system_setting(conn, "auto_update_frequency", "daily"),
+                    "auto_update_day_of_week": get_system_setting(conn, "auto_update_day_of_week", "1"),
+                    "auto_update_day_of_month": get_system_setting(conn, "auto_update_day_of_month", "1"),
+                    "auto_update_time": get_system_setting(conn, "auto_update_time", "04:00"),
+                    "update_email_notify": str(get_system_setting(conn, "update_email_notify", "1")) in {"1", "true", "True"},
+                    "current_commit": get_current_commit(),
+                }})
+            if path == "/api/admin/auto-update/run" and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                res = execute_auto_update(force=True)
+                return self.json_response(res)
+            if path == "/api/admin/modsecurity/rulesets" and method == "GET":
+                return self.json_response({"rulesets": [{"id": "baseline", "name": "ZeroPanel baseline", "description": "Managed high-confidence protection."}, {"id": "owasp", "name": "OWASP CRS 4.0.0", "description": "Downloaded from the official OWASP Core Rule Set release."}]})
+            if path == "/api/admin/modsecurity/rulesets/apply" and method == "POST":
+                body = self.read_json(); ruleset = str(body.get("ruleset") or "baseline").lower()
+                if ruleset not in {"baseline", "owasp"}: raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_modsecurity_ruleset")
+                # Persist the selected ruleset before queueing the apply job;
+                # otherwise the UI falls back to baseline after a refresh.
+                set_system_setting(conn, "modsecurity_ruleset", ruleset)
+                log_audit(conn, "admin", actor["id"], "update_modsecurity_ruleset", "system_settings", 0, metadata={"ruleset": ruleset})
+                account_id = optional_positive_int(body.get("account_id") or "")
+                job_id = enqueue_agent_job(conn, "apply_modsecurity_ruleset", "hosting_account" if account_id else "system", account_id or 0, {"ruleset": ruleset})
+                return self.json_response({"job_id": job_id, "status": "queued", "ruleset": ruleset})
+            if path == "/api/admin/configuration" and method in {"POST", "PATCH"}:
+                require_admin_permission(actor, "system.manage")
+                body = self.read_json()
+                backup_time = str(body.get("backup_time", "02:00") or "02:00").strip()
+                if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", backup_time):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_backup_time")
+                resource_scan_time = str(
+                    body.get("resource_scan_time", get_system_setting(conn, "resource_scan_time", "03:00")) or "03:00"
+                ).strip()
+                if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", resource_scan_time):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_resource_scan_time")
+                timezone_name = str(body.get("timezone", body.get("system_timezone", get_system_setting(conn, "system_timezone", default_system_timezone_name()))) or default_system_timezone_name()).strip()
+                try:
+                    ZoneInfo(timezone_name)
+                except (ZoneInfoNotFoundError, ValueError):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_timezone")
+                set_system_setting(conn, "backup_time", backup_time)
+                set_system_setting(conn, "resource_scan_time", resource_scan_time)
+                set_system_setting(conn, "system_timezone", timezone_name)
+                current_public_host = get_system_setting(conn, "public_host", CONFIG.public_host)
+                public_host = normalize_public_host(body.get("public_host", current_public_host))
+                public_host_changed = public_host != current_public_host
+                set_system_setting(conn, "public_host", public_host)
+                CONFIG.public_host = public_host
+                ruleset = str(body.get("modsecurity_ruleset", get_system_setting(conn, "modsecurity_ruleset", "baseline")) or "baseline").lower()
+                if ruleset not in {"baseline", "owasp"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_modsecurity_ruleset")
+                set_system_setting(conn, "modsecurity_ruleset", ruleset)
+                current_motd = get_system_setting(conn, "ssh_motd", DEFAULT_SSH_MOTD)
+                motd = str(body.get("ssh_motd", current_motd) or "")
+                if len(motd) > 32768:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "ssh_motd_too_long")
+                motd_job_id = None
+                if motd != current_motd:
+                    set_system_setting(conn, "ssh_motd", motd)
+                    motd_job_id = enqueue_agent_job(conn, "apply_ssh_motd", "system", 0, {"motd": motd})
+                public_host_job_ids = []
+                if public_host_changed:
+                    accounts = conn.execute(
+                        "SELECT id FROM hosting_accounts WHERE status NOT IN ('suspended', 'hard_suspended') ORDER BY id"
+                    ).fetchall()
+                    public_host_job_ids = [
+                        enqueue_agent_job(conn, "provision_hosting_account", "hosting_account", account["id"], {"public_host_changed": True}, inline=False)
+                        for account in accounts
+                    ]
+                admin_email = str(body.get("admin_email", get_system_setting(conn, "admin_email", "")) or "").strip()
+                if admin_email and ("@" not in admin_email or "." not in admin_email):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_admin_email")
+                set_system_setting(conn, "admin_email", admin_email)
+
+                auto_updates_enabled_val = body.get("auto_updates_enabled")
+                if auto_updates_enabled_val is not None:
+                    auto_updates_enabled = "1" if auto_updates_enabled_val in {True, "1", 1, "true", "True"} else "0"
+                    set_system_setting(conn, "auto_updates_enabled", auto_updates_enabled)
+                else:
+                    auto_updates_enabled = str(get_system_setting(conn, "auto_updates_enabled", "1"))
+
+                auto_update_frequency = str(body.get("auto_update_frequency", get_system_setting(conn, "auto_update_frequency", "daily")) or "daily").lower()
+                if auto_update_frequency not in {"daily", "weekly", "monthly", "never"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_auto_update_frequency")
+                set_system_setting(conn, "auto_update_frequency", auto_update_frequency)
+
+                auto_update_day_of_week = str(body.get("auto_update_day_of_week", get_system_setting(conn, "auto_update_day_of_week", "1")) or "1").strip()
+                set_system_setting(conn, "auto_update_day_of_week", auto_update_day_of_week)
+
+                auto_update_day_of_month = str(body.get("auto_update_day_of_month", get_system_setting(conn, "auto_update_day_of_month", "1")) or "1").strip()
+                set_system_setting(conn, "auto_update_day_of_month", auto_update_day_of_month)
+
+                auto_update_time = str(body.get("auto_update_time", get_system_setting(conn, "auto_update_time", "04:00")) or "04:00").strip()
+                if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", auto_update_time):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_auto_update_time")
+                set_system_setting(conn, "auto_update_time", auto_update_time)
+
+                update_email_notify_val = body.get("update_email_notify")
+                if update_email_notify_val is not None:
+                    update_email_notify = "1" if update_email_notify_val in {True, "1", 1, "true", "True"} else "0"
+                    set_system_setting(conn, "update_email_notify", update_email_notify)
+                else:
+                    update_email_notify = str(get_system_setting(conn, "update_email_notify", "1"))
+
+                sync_auto_update_cron(conn)
+                apply_system_timezone(conn)
+                edge_proxy_refreshed = False
+                if public_host_changed and CONFIG.agent_mode == "docker" and CONFIG.env != "development":
+                    # Recreate the label-only panel route with the new host.
+                    # Caddy observes the label change and starts ACME issuance.
+                    start_edge_proxy(public_host)
+                    edge_proxy_refreshed = True
+                log_audit(conn, "admin", actor["id"], "update_configuration", "system_settings", 0, metadata={"backup_time": backup_time, "timezone": timezone_name, "auto_updates_enabled": auto_updates_enabled})
+                return self.json_response({
+                    "configuration": {
+                        "backup_time": backup_time,
+                        "resource_scan_time": resource_scan_time,
+                        "timezone": timezone_name,
+                        "modsecurity_ruleset": ruleset,
+                        "ssh_motd": motd,
+                        "public_host": public_host,
+                        "server_ip": get_host_public_ip(conn, self.headers.get("Host")),
+                        "admin_email": admin_email,
+                        "auto_updates_enabled": auto_updates_enabled in {"1", "true", "True"},
+                        "auto_update_frequency": auto_update_frequency,
+                        "auto_update_day_of_week": auto_update_day_of_week,
+                        "auto_update_day_of_month": auto_update_day_of_month,
+                        "auto_update_time": auto_update_time,
+                        "update_email_notify": update_email_notify in {"1", "true", "True"},
+                        "current_commit": get_current_commit(),
+                    },
+                    "ssh_motd_job_id": motd_job_id,
+                    "public_host_job_ids": public_host_job_ids,
+                    "edge_proxy_refreshed": edge_proxy_refreshed,
+                })
+            # Reseller Plans API
+            if path == "/api/admin/reseller-plans" and method == "GET":
+                plans = rows_to_dicts(conn.execute("SELECT * FROM reseller_plans ORDER BY id DESC").fetchall())
+                return self.json_response({"reseller_plans": plans})
+
+            if path == "/api/admin/reseller-plans" and method == "POST":
+                require_admin_permission(actor, "plans.manage")
+                body = self.read_json()
+                name = clean_text(body.get("name"), "Reseller Plan")
+                if conn.execute("SELECT id FROM reseller_plans WHERE name = ?", (name,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "reseller_plan_name_already_exists")
+                max_storage_mb = int(body.get("max_storage_mb", 50000))
+                max_clients = int(body.get("max_clients", 10))
+                max_hosting_accounts = int(body.get("max_hosting_accounts", 20))
+                max_ram_mb = int(body.get("max_ram_mb", 8192))
+                max_websites = int(body.get("max_websites", 50))
+                max_databases = int(body.get("max_databases", 50))
+                max_subplans = int(body.get("max_subplans", 10))
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO reseller_plans(
+                      name, max_storage_mb, max_clients, max_hosting_accounts, max_ram_mb,
+                      max_websites, max_databases, max_subplans
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (name, max_storage_mb, max_clients, max_hosting_accounts, max_ram_mb, max_websites, max_databases, max_subplans),
+                )
+                conn.commit()
+                created = conn.execute("SELECT * FROM reseller_plans WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"reseller_plan": row_to_dict(created)}, HTTPStatus.CREATED)
+
+            match_rp_id = re.match(r"^/api/admin/reseller-plans/(\d+)$", path)
+            if match_rp_id and method == "PATCH":
+                require_admin_permission(actor, "plans.manage")
+                rp_id = int(match_rp_id.group(1))
+                rp = conn.execute("SELECT * FROM reseller_plans WHERE id = ?", (rp_id,)).fetchone()
+                if not rp:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "reseller_plan_not_found")
+                body = self.read_json()
+                name = clean_text(body.get("name"), rp["name"])
+                max_storage_mb = int(body.get("max_storage_mb", rp["max_storage_mb"]))
+                max_clients = int(body.get("max_clients", rp["max_clients"]))
+                max_hosting_accounts = int(body.get("max_hosting_accounts", rp["max_hosting_accounts"]))
+                max_ram_mb = int(body.get("max_ram_mb", rp["max_ram_mb"]))
+                max_websites = int(body.get("max_websites", rp["max_websites"]))
+                max_databases = int(body.get("max_databases", rp["max_databases"]))
+                max_subplans = int(body.get("max_subplans", rp["max_subplans"]))
+
+                conn.execute(
+                    """
+                    UPDATE reseller_plans
+                    SET name = ?, max_storage_mb = ?, max_clients = ?, max_hosting_accounts = ?,
+                        max_ram_mb = ?, max_websites = ?, max_databases = ?, max_subplans = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (name, max_storage_mb, max_clients, max_hosting_accounts, max_ram_mb, max_websites, max_databases, max_subplans, rp_id),
+                )
+                conn.commit()
+                updated = conn.execute("SELECT * FROM reseller_plans WHERE id = ?", (rp_id,)).fetchone()
+                return self.json_response({"reseller_plan": row_to_dict(updated)})
+
+            if match_rp_id and method == "DELETE":
+                require_admin_permission(actor, "plans.manage")
+                rp_id = int(match_rp_id.group(1))
+                conn.execute("DELETE FROM reseller_plans WHERE id = ?", (rp_id,))
+                conn.commit()
+                return self.json_response({"deleted": True})
+
+            # Reseller Users API
+            if path == "/api/admin/reseller-users" and method == "GET":
+                users = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT u.id, u.email, u.full_name, u.status, u.is_reseller, u.reseller_plan_id, u.created_at,
+                               rp.name AS reseller_plan_name, rp.max_storage_mb, rp.max_clients
+                        FROM users u
+                        LEFT JOIN reseller_plans rp ON rp.id = u.reseller_plan_id
+                        WHERE u.is_reseller = 1 OR u.reseller_plan_id IS NOT NULL
+                        ORDER BY u.id DESC
+                        """
+                    ).fetchall()
+                )
+                return self.json_response({"reseller_users": users})
+
+            if path == "/api/admin/reseller-users" and method == "POST":
+                require_admin_permission(actor, "users.manage")
+                body = self.read_json()
+                email = clean_text(body.get("email"), "").lower()
+                password = body.get("password", "").strip()
+                full_name = clean_text(body.get("full_name"), email.split("@")[0] if "@" in email else "Reseller")
+                reseller_plan_id = optional_positive_int(body.get("reseller_plan_id"))
+
+                if not email or "@" not in email:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_email")
+                if len(password) < 8:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "password_too_short")
+                if reseller_plan_id:
+                    rp_check = conn.execute("SELECT id FROM reseller_plans WHERE id = ?", (reseller_plan_id,)).fetchone()
+                    if not rp_check:
+                        reseller_plan_id = None
+                if not reseller_plan_id:
+                    rp_first = conn.execute("SELECT id FROM reseller_plans ORDER BY id LIMIT 1").fetchone()
+                    if rp_first:
+                        reseller_plan_id = rp_first["id"]
+                    else:
+                        reseller_plan_id = None
+
+                if conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "user_email_already_registered")
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO users(email, password_hash, full_name, is_reseller, reseller_plan_id, status)
+                    VALUES (?, ?, ?, 1, ?, 'active')
+                    """,
+                    (email, hash_password(password), full_name, reseller_plan_id),
+                )
+                conn.commit()
+                created = conn.execute(
+                    """
+                    SELECT u.id, u.email, u.full_name, u.status, u.is_reseller, u.reseller_plan_id, u.created_at,
+                           rp.name AS reseller_plan_name
+                    FROM users u
+                    LEFT JOIN reseller_plans rp ON rp.id = u.reseller_plan_id
+                    WHERE u.id = ?
+                    """,
+                    (cur.lastrowid,),
+                ).fetchone()
+                return self.json_response({"reseller_user": row_to_dict(created)}, HTTPStatus.CREATED)
+
+            match_ru_id = re.match(r"^/api/admin/reseller-users/(\d+)$", path)
+            if match_ru_id and method == "PATCH":
+                require_admin_permission(actor, "users.manage")
+                ru_id = int(match_ru_id.group(1))
+                ru = conn.execute("SELECT * FROM users WHERE id = ? AND (is_reseller = 1 OR reseller_plan_id IS NOT NULL)", (ru_id,)).fetchone()
+                if not ru:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "reseller_user_not_found")
+                body = self.read_json()
+                status = body.get("status", ru["status"])
+                full_name = clean_text(body.get("full_name"), ru["full_name"])
+                reseller_plan_id = optional_positive_int(body.get("reseller_plan_id")) or ru["reseller_plan_id"]
+
+                conn.execute(
+                    "UPDATE users SET status = ?, full_name = ?, reseller_plan_id = ?, is_reseller = 1 WHERE id = ?",
+                    (status, full_name, reseller_plan_id, ru_id),
+                )
+                conn.commit()
+                updated = conn.execute(
+                    """
+                    SELECT u.id, u.email, u.full_name, u.status, u.is_reseller, u.reseller_plan_id, u.created_at,
+                           rp.name AS reseller_plan_name
+                    FROM users u
+                    LEFT JOIN reseller_plans rp ON rp.id = u.reseller_plan_id
+                    WHERE u.id = ?
+                    """,
+                    (ru_id,),
+                ).fetchone()
+                return self.json_response({"reseller_user": row_to_dict(updated)})
+
+            if match_ru_id and method == "DELETE":
+                require_admin_permission(actor, "users.manage")
+                ru_id = int(match_ru_id.group(1))
+                conn.execute("DELETE FROM users WHERE id = ?", (ru_id,))
+                conn.commit()
+                return self.json_response({"deleted": True})
+
+            # Reseller Users — Login As
+            login_as_reseller_match = re.match(r"^/api/admin/reseller-users/(\d+)/login-as$", path)
+            if login_as_reseller_match and method == "POST":
+                require_admin_permission(actor, "impersonate")
+                ru_id = int(login_as_reseller_match.group(1))
+                ru = conn.execute(
+                    "SELECT id, email, status, is_reseller FROM users WHERE id = ? AND (is_reseller = 1 OR reseller_plan_id IS NOT NULL)",
+                    (ru_id,),
+                ).fetchone()
+                if not ru:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "reseller_user_not_found")
+                if ru["status"] != "active":
+                    raise ApiError(HTTPStatus.CONFLICT, "reseller_user_not_active")
+                token_id = secrets.token_urlsafe(16)
+                imp_token = create_jwt(
+                    {"sub": ru_id, "actor_type": "user", "purpose": "impersonation_exchange", "admin_id": actor["id"], "jti": token_id},
+                    CONFIG.jwt_secret,
+                    60,
+                )
+                token_hash = hashlib.sha256(imp_token.encode("utf-8")).hexdigest()
+                conn.execute(
+                    "INSERT INTO impersonation_tokens(token_hash, user_id, admin_id, expires_at) VALUES (?, ?, ?, ?)",
+                    (token_hash, ru_id, actor["id"], int(time.time()) + 300),
+                )
+                log_audit(conn, "admin", actor["id"], "login_as_reseller", "user", ru_id, self.client_address[0], {"email": ru["email"]})
+                forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
+                scheme = forwarded_proto if forwarded_proto in {"http", "https"} else "http"
+                request_host = self.headers.get("X-Forwarded-Host", "").split(",")[0].strip() or self.headers.get("Host", "")
+                hostname = request_host.split(":", 1)[0].strip() if request_host else ""
+                if not hostname or hostname in {"0.0.0.0", ""}:
+                    hostname = CONFIG.public_host or "127.0.0.1"
+                if CONFIG.reseller_port in (80, 443):
+                    hostname_with_port = hostname
+                else:
+                    hostname_with_port = f"{hostname}:{CONFIG.reseller_port}"
+                reseller_url = f"{scheme}://{hostname_with_port}/reseller#mp_impersonation_token={imp_token}"
+                return self.json_response({"reseller_url": reseller_url})
+
+            if path == "/api/admin/storage/df" and method == "GET":
+                return self.json_response(get_df_storage())
+            if path == "/api/admin/storage/live" and method == "GET":
+                return self.json_response(get_live_disk_io(conn))
+            if path == "/api/admin/storage/live/stream" and method == "GET":
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    for _ in range(120):
+                        data = get_live_disk_io(conn)
+                        msg = f"data: {json.dumps(data)}\n\n"
+                        self.wfile.write(msg.encode("utf-8"))
+                        self.wfile.flush()
+                        time.sleep(1.0)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                return
+            if path == "/api/admin/storage/quotas" and method == "GET":
+                return self.json_response(get_account_storage_quotas(conn))
+            if path == "/api/admin/storage/paths" and method == "GET":
+                return self.json_response(get_path_size_breakdown())
+            if path == "/api/admin/storage/cleanup" and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                body = self.read_json() if self.headers.get("Content-Length") else {}
+                return self.json_response(run_storage_cleanup(
+                    clean_docker=body.get("clean_docker", True),
+                    clean_logs=body.get("clean_logs", True),
+                    clean_tmp=body.get("clean_tmp", True),
+                ))
+            if path == "/api/admin/storage/alerts" and method == "GET":
+                return self.json_response(get_storage_alert_settings(conn))
+            if path == "/api/admin/storage/alerts" and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                body = self.read_json()
+                return self.json_response(save_storage_alert_settings(conn, body))
+            if path == "/api/admin/network/overview" and method == "GET":
+                return self.json_response(get_network_overview(conn))
+            if path == "/api/admin/network/live" and method == "GET":
+                return self.json_response(get_live_network_io(conn))
+            if path == "/api/admin/traffic" and method == "GET":
+                return self.json_response(admin_traffic_payload(conn))
+            if path == "/api/admin/network/live/stream" and method == "GET":
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    for _ in range(120):
+                        data = get_live_network_io(conn)
+                        msg = f"data: {json.dumps(data)}\n\n"
+                        self.wfile.write(msg.encode("utf-8"))
+                        self.wfile.flush()
+                        time.sleep(1.0)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                return
+            if path == "/api/admin/network/ips" and method == "GET":
+                return self.json_response({"server_ips": get_server_ips(conn)})
+            if path == "/api/admin/network/ips" and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                body = self.read_json()
+                return self.json_response(add_server_ip(conn, body), HTTPStatus.CREATED)
+            
+            ip_match = re.match(r"^/api/admin/network/ips/(\d+)$", path)
+            if ip_match:
+                ip_id = int(ip_match.group(1))
+                if method == "PUT":
+                    require_admin_permission(actor, "system.manage")
+                    body = self.read_json()
+                    return self.json_response(update_server_ip(conn, ip_id, body))
+                if method == "DELETE":
+                    require_admin_permission(actor, "system.manage")
+                    return self.json_response(delete_server_ip(conn, ip_id))
+
+            if path == "/api/admin/network/assign-account-ip" and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                body = self.read_json()
+                account_id = int(body.get("account_id", 0))
+                ip_id = int(body.get("ip_id", 0)) if body.get("ip_id") else None
+                return self.json_response(assign_account_ip(conn, account_id, ip_id))
+
+            # Live CPU Analytics
+            if path == "/api/admin/cpu/live" and method == "GET":
+                return self.json_response(get_live_cpu_io(conn))
+            if path == "/api/admin/cpu/history" and method == "GET":
+                range_str = (query.get("range") or ["72h"])[0]
+                return self.json_response(get_system_cpu_history(conn, range_str))
+            if path == "/api/admin/cpu/live/stream" and method == "GET":
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    for _ in range(120):
+                        data = get_live_cpu_io(conn)
+                        msg = f"data: {json.dumps(data)}\n\n"
+                        self.wfile.write(msg.encode("utf-8"))
+                        self.wfile.flush()
+                        time.sleep(1.0)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                return
+
+            # Live RAM Analytics
+            if path == "/api/admin/ram/live" and method == "GET":
+                return self.json_response(get_live_ram_io(conn))
+            if path == "/api/admin/ram/history" and method == "GET":
+                range_str = (query.get("range") or ["72h"])[0]
+                return self.json_response(get_system_ram_history(conn, range_str))
+            if path == "/api/admin/ram/live/stream" and method == "GET":
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    for _ in range(120):
+                        data = get_live_ram_io(conn)
+                        msg = f"data: {json.dumps(data)}\n\n"
+                        self.wfile.write(msg.encode("utf-8"))
+                        self.wfile.flush()
+                        time.sleep(1.0)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                return
+
+            if path == "/api/admin/dashboard" and method == "GET":
+                return self.json_response(admin_dashboard(conn))
+            if path == "/api/admin/alerts" and method == "GET":
+                return self.json_response({"alerts": rows_to_dicts(conn.execute("SELECT * FROM admin_alerts WHERE status = 'open' ORDER BY id DESC LIMIT 25").fetchall())})
+            alert_match = re.match(r"^/api/admin/alerts/(\d+)/acknowledge$", path)
+            if alert_match and method == "POST":
+                require_admin_permission(actor, "system.manage")
+                alert_id = int(alert_match.group(1))
+                cur = conn.execute(
+                    "UPDATE admin_alerts SET status = 'acknowledged', acknowledged_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'open'",
+                    (alert_id,),
+                )
+                if not cur.rowcount:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "alert_not_found")
+                log_audit(conn, "admin", actor["id"], "acknowledge_admin_alert", "admin_alert", alert_id)
+                return self.json_response({"id": alert_id, "status": "acknowledged"})
+            if path == "/api/admin/security/audit" and method == "GET":
+                return self.json_response({"security": run_server_security_audit(conn)})
+            if path == "/api/admin/users" and method == "GET":
+                return self.json_response({"users": rows_to_dicts(conn.execute("SELECT id, email, full_name, status, created_at FROM users ORDER BY id").fetchall())})
+            if path == "/api/admin/admins" and method == "GET":
+                rows = conn.execute(
+                    """
+                    SELECT id, email, full_name, role, status, created_at,
+                           CASE WHEN COALESCE(totp_secret, '') <> '' THEN 1 ELSE 0 END AS totp_enabled
+                    FROM admins
+                    ORDER BY id
+                    """
+                ).fetchall()
+                return self.json_response({"admins": rows_to_dicts(rows)})
+            if path == "/api/admin/admins" and method == "POST":
+                require_admin_permission(actor, "admins.manage")
+                body = self.read_json()
+                email = normalize_email(body.get("email"))
+                full_name = clean_text(body.get("full_name"), "Admin")
+                password = validate_password(body.get("password", ""))
+                role = body.get("role", "support_admin")
+                if role not in {"support_admin", "system_admin", "super_admin"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_role")
+                if conn.execute("SELECT id FROM admins WHERE email = ?", (email,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "admin_email_already_registered")
+                totp_secret = generate_totp_secret()
+                cur = conn.execute(
+                    """
+                    INSERT INTO admins(email, password_hash, full_name, role, totp_secret)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (email, hash_password(password), full_name, role, totp_secret),
+                )
+                log_audit(conn, "admin", actor["id"], "create_admin", "admin", cur.lastrowid, metadata={"email": email, "role": role})
+                return self.json_response(
+                    {
+                        "admin": {"id": cur.lastrowid, "email": email, "full_name": full_name, "role": role},
+                        "totp_secret": totp_secret,
+                        "totp_uri": otpauth_uri("ZeroPanel Admin", email, totp_secret),
+                    },
+                    HTTPStatus.CREATED,
+                )
+            recover_match = re.match(r"^/api/admin/admins/(\d+)/(reset-password|disable-2fa|enable-2fa)$", path)
+            if recover_match and method == "POST":
+                require_admin_permission(actor, "admins.manage")
+                admin_id = int(recover_match.group(1))
+                action = recover_match.group(2)
+                target = conn.execute("SELECT id, email, role, status FROM admins WHERE id = ?", (admin_id,)).fetchone()
+                if not target:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "admin_not_found")
+                if target["role"] == "super_admin" and actor["id"] != target["id"]:
+                    super_count = conn.execute("SELECT COUNT(*) AS c FROM admins WHERE role = 'super_admin' AND status = 'active'").fetchone()["c"]
+                    if super_count <= 1 and action in {"disable-2fa", "reset-password"}:
+                        raise ApiError(HTTPStatus.CONFLICT, "cannot_modify_last_super_admin")
+                if action == "disable-2fa":
+                    conn.execute("UPDATE admins SET totp_secret = '' WHERE id = ?", (admin_id,))
+                    log_audit(conn, "admin", actor["id"], "disable_admin_2fa", "admin", admin_id, metadata={"email": target["email"]})
+                    return self.json_response({"admin": {"id": admin_id, "email": target["email"], "status": target["status"], "totp_enabled": False}})
+                if action == "enable-2fa":
+                    secret = generate_totp_secret()
+                    conn.execute("UPDATE admins SET totp_secret = ? WHERE id = ?", (secret, admin_id))
+                    log_audit(conn, "admin", actor["id"], "enable_admin_2fa", "admin", admin_id, metadata={"email": target["email"]})
+                    return self.json_response(
+                        {
+                            "admin": {"id": admin_id, "email": target["email"], "status": target["status"], "totp_enabled": True},
+                            "totp_secret": secret,
+                            "totp_uri": otpauth_uri("ZeroPanel Admin", target["email"], secret),
+                        }
+                    )
+                body = self.read_json()
+                password = validate_password(body.get("password", ""))
+                log_audit(conn, "admin", actor["id"], "reset_admin_password", "admin", admin_id, metadata={"email": target["email"]})
+                return self.json_response({"admin": {"id": admin_id, "email": target["email"], "status": target["status"]}})
+
+            if path == "/api/admin/api-tokens" and method == "GET":
+                rows = conn.execute(
+                    "SELECT id, name, permissions_json, expires_at, last_used_at, created_at FROM admin_api_tokens WHERE admin_id = ? ORDER BY id DESC",
+                    (actor["id"],),
+                ).fetchall()
+                tokens = []
+                for r in rows:
+                    td = row_to_dict(r)
+                    td["permissions"] = parse_json_field(r["permissions_json"], ["*"])
+                    tokens.append(td)
+                return self.json_response({"api_tokens": tokens})
+
+            if path == "/api/admin/api-tokens" and method == "POST":
+                require_admin_permission(actor, "admins.manage")
+                body = self.read_json()
+                name = body.get("name", "").strip()
+                if not name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "name_required")
+                raw_perms = body.get("permissions", ["*"])
+                if isinstance(raw_perms, str):
+                    perms = [p.strip() for p in raw_perms.split(",") if p.strip()]
+                elif isinstance(raw_perms, list):
+                    perms = [str(p).strip() for p in raw_perms if str(p).strip()]
+                else:
+                    perms = ["*"]
+                if not perms:
+                    perms = ["*"]
+
+                raw_token = secrets.token_hex(32)
+                token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+
+                cursor = conn.execute(
+                    "INSERT INTO admin_api_tokens (admin_id, name, token_hash, permissions_json) VALUES (?, ?, ?, ?)",
+                    (actor["id"], name, token_hash, json.dumps(perms)),
+                )
+                log_audit(conn, "admin", actor["id"], "create_admin_api_token", "admin_api_token", cursor.lastrowid, metadata={"name": name})
+                return self.json_response({
+                    "id": cursor.lastrowid,
+                    "name": name,
+                    "token": f"mp_admin_{raw_token}",
+                    "permissions": perms,
+                }, HTTPStatus.CREATED)
+
+            match_admin_token = re.match(r"^/api/admin/api-tokens/(\d+)$", path)
+            if match_admin_token and method == "DELETE":
+                require_admin_permission(actor, "admins.manage")
+                token_id = int(match_admin_token.group(1))
+                r = conn.execute("SELECT * FROM admin_api_tokens WHERE id = ? AND admin_id = ?", (token_id, actor["id"])).fetchone()
+                if not r:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "token_not_found")
+                conn.execute("DELETE FROM admin_api_tokens WHERE id = ?", (token_id,))
+                log_audit(conn, "admin", actor["id"], "delete_admin_api_token", "admin_api_token", token_id)
+                return self.json_response({"deleted": True})
+
+            if path == "/api/admin/clients" and method == "GET":
+                raw_page = (query.get("page") or ["1"])[0]
+                raw_page_size = (query.get("page_size") or ["25"])[0]
+                try:
+                    page = max(1, int(raw_page))
+                    page_size = min(100, max(10, int(raw_page_size)))
+                except (TypeError, ValueError):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_client_pagination")
+                search = str((query.get("search") or [""])[0]).strip()
+                return self.json_response(admin_clients_page_payload(conn, search, page, page_size))
+            if path == "/api/admin/clients" and method == "POST":
+                require_admin_permission(actor, "clients.manage")
+                body = self.read_json()
+                email = normalize_email(body.get("email"))
+                full_name = clean_text(body.get("full_name"), "Customer")
+                password = validate_password(body.get("password", ""))
+                if conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "client_email_already_exists")
+                totp_secret = generate_totp_secret()
+                cur = conn.execute(
+                    """
+                    INSERT INTO users(email, password_hash, full_name, totp_secret)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (email, hash_password(password), full_name, totp_secret),
+                )
+                user_id = cur.lastrowid
+                log_audit(conn, "admin", actor["id"], "create_client", "user", user_id, metadata={"email": email})
+                log_activity(conn, user_id, "client_created_by_admin", {"email": email, "admin_id": actor["id"]})
+                return self.json_response(
+                    {
+                        "client": admin_client_payload(conn, user_id),
+                        "totp_secret": totp_secret,
+                        "totp_uri": otpauth_uri("ZeroPanel", email, totp_secret),
+                    },
+                    HTTPStatus.CREATED,
+                )
+            login_as_match = re.match(r"^/api/admin/clients/(\d+)/login-as$", path)
+            if login_as_match and method == "POST":
+                require_admin_permission(actor, "impersonate")
+                user_id = int(login_as_match.group(1))
+                user = conn.execute("SELECT id, email, status FROM users WHERE id = ?", (user_id,)).fetchone()
+                if not user:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "client_not_found")
+                if user["status"] != "active":
+                    raise ApiError(HTTPStatus.CONFLICT, "client_is_not_active")
+                token_id = secrets.token_urlsafe(16)
+                imp_token = create_jwt(
+                    {"sub": user_id, "actor_type": "user", "purpose": "impersonation_exchange", "admin_id": actor["id"], "jti": token_id},
+                    CONFIG.jwt_secret,
+                    60,
+                )
+                token_hash = hashlib.sha256(imp_token.encode("utf-8")).hexdigest()
+                conn.execute(
+                    "INSERT INTO impersonation_tokens(token_hash, user_id, admin_id, expires_at) VALUES (?, ?, ?, ?)",
+                    (token_hash, user_id, actor["id"], int(time.time()) + 300),
+                )
+                log_audit(
+                    conn,
+                    "admin",
+                    actor["id"],
+                    "login_as_client",
+                    "user",
+                    user_id,
+                    self.client_address[0],
+                    {"email": user["email"]},
+                )
+                forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
+                scheme = forwarded_proto if forwarded_proto in {"http", "https"} else "http"
+                request_host = self.headers.get("X-Forwarded-Host", "").split(",")[0].strip() or self.headers.get("Host", "")
+                hostname = request_host.split(":", 1)[0].strip() if request_host else ""
+                if not hostname or hostname in {"0.0.0.0", ""}:
+                    hostname = CONFIG.public_host or "127.0.0.1"
+                if CONFIG.client_port in (80, 443):
+                    hostname_with_port = hostname
+                else:
+                    hostname_with_port = f"{hostname}:{CONFIG.client_port}"
+                client_url = f"{scheme}://{hostname_with_port}/client#mp_impersonation_token={imp_token}"
+                return self.json_response({"client_url": client_url})
+
+            profile_match = re.match(r"^/api/admin/clients/(\d+)/(profile|password|2fa)$", path)
+            if profile_match:
+                require_admin_permission(actor, "clients.manage")
+                user_id = int(profile_match.group(1))
+                action = profile_match.group(2)
+                target = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+                if not target:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "client_not_found")
+                if method == "GET" and action == "profile":
+                    return self.json_response({"profile": user_profile_payload(conn, user_id)})
+                if method != "POST" and not (method == "PATCH" and action == "profile"):
+                    raise ApiError(HTTPStatus.NOT_FOUND, "unknown_profile_method")
+                body = self.read_json()
+                verify_admin_sensitive_change(actor, body)
+                if action == "profile":
+                    email = normalize_email(body.get("email", target["email"]))
+                    duplicate = conn.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND id != ?", (email, user_id)).fetchone()
+                    if duplicate:
+                        raise ApiError(HTTPStatus.CONFLICT, "client_email_already_exists")
+                    full_name = clean_text(body.get("full_name", target["full_name"]), target["full_name"])
+                    status = body.get("status", target["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_client_status")
+                    current = user_profile_payload(conn, user_id)
+                    billing = profile_billing_payload(body.get("billing") or body, current["billing"])
+                    conn.execute("UPDATE users SET email = ?, full_name = ?, status = ? WHERE id = ?", (email, full_name, status, user_id))
+                    save_user_profile(conn, user_id, billing)
+                    if email != target["email"] or status != target["status"]:
+                        revoke_user_sessions(conn, user_id)
+                    accounts = conn.execute("SELECT * FROM hosting_accounts WHERE user_id = ?", (user_id,)).fetchall()
+                    for account_row in accounts:
+                        if status == "suspended":
+                            enqueue_agent_job(conn, "suspend_account", "hosting_account", account_row["id"], {"client_status": status})
+                            sync_account_suspension_marker(account_row, True)
+                        elif target["status"] == "suspended":
+                            enqueue_agent_job(conn, "unsuspend_account", "hosting_account", account_row["id"], {"client_status": status})
+                            sync_account_suspension_marker(account_row, False)
+                    log_audit(conn, "admin", actor["id"], "update_client_profile", "user", user_id, self.client_address[0], {"email_changed": email != target["email"], "status": status})
+                    return self.json_response({"profile": user_profile_payload(conn, user_id), "client": admin_client_payload(conn, user_id)})
+                if action == "password":
+                    password = validate_password(body.get("password", ""))
+                    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), user_id))
+                    revoke_user_sessions(conn, user_id)
+                    log_audit(conn, "admin", actor["id"], "reset_client_password", "user", user_id, self.client_address[0], {"email": target["email"]})
+                    return self.json_response({"success": True, "reauth_required": True})
+                totp_action = str(body.get("action") or "").strip().lower()
+                if totp_action not in {"enable", "disable", "rotate"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_2fa_action")
+                if totp_action == "disable":
+                    conn.execute("UPDATE users SET totp_secret = NULL WHERE id = ?", (user_id,))
+                    response = {"enabled": False}
+                else:
+                    secret = generate_totp_secret()
+                    conn.execute("UPDATE users SET totp_secret = ? WHERE id = ?", (secret, user_id))
+                    response = {"enabled": True, "totp_secret": secret, "totp_uri": otpauth_uri("ZeroPanel", target["email"], secret)}
+                revoke_user_sessions(conn, user_id)
+                log_audit(conn, "admin", actor["id"], f"{totp_action}_client_2fa", "user", user_id, self.client_address[0], {"email": target["email"]})
+                response["reauth_required"] = True
+                return self.json_response(response)
+
+            if path.startswith("/api/admin/clients/"):
+                user_id = int(path.split("/")[-1])
+                user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+                if not user:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "client_not_found")
+                if method == "PATCH":
+                    require_admin_permission(actor, "clients.manage")
+                    body = self.read_json()
+                    verify_admin_sensitive_change(actor, body)
+                    email = normalize_email(body.get("email", user["email"]))
+                    full_name = clean_text(body.get("full_name", user["full_name"]), user["full_name"])
+                    status = body.get("status", user["status"])
+                    if status not in {"active", "suspended"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_client_status")
+                    existing = conn.execute("SELECT id FROM users WHERE email = ? AND id != ?", (email, user_id)).fetchone()
+                    if existing:
+                        raise ApiError(HTTPStatus.CONFLICT, "client_email_already_exists")
+                    conn.execute(
+                        "UPDATE users SET email = ?, full_name = ?, status = ? WHERE id = ?",
+                        (email, full_name, status, user_id),
+                    )
+                    if email != user["email"] or status != user["status"]:
+                        revoke_user_sessions(conn, user_id)
+                    account_rows = conn.execute("SELECT * FROM hosting_accounts WHERE user_id = ?", (user_id,)).fetchall()
+                    for account_row in account_rows:
+                        if status == "suspended":
+                            enqueue_agent_job(conn, "suspend_account", "hosting_account", account_row["id"], {"client_status": status})
+                            sync_account_suspension_marker(account_row, True)
+                        elif user["status"] == "suspended":
+                            enqueue_agent_job(conn, "unsuspend_account", "hosting_account", account_row["id"], {"client_status": status})
+                            sync_account_suspension_marker(account_row, False)
+                    log_audit(conn, "admin", actor["id"], "update_client", "user", user_id, metadata={"email": email, "status": status})
+                    return self.json_response({"client": admin_client_payload(conn, user_id)})
+                if method == "DELETE":
+                    deleted = delete_client(conn, user_id)
+                    log_audit(conn, "admin", actor["id"], "delete_client", "user", user_id, metadata=deleted)
+                    return self.json_response({"deleted": deleted})
+                raise ApiError(HTTPStatus.NOT_FOUND, "unknown_client_admin_route")
+            if path == "/api/admin/system/default-page" and method == "GET":
+                custom_val = get_system_setting(conn, "default_page_content")
+                content = custom_val if custom_val is not None else DEFAULT_PAGE_CONTENT
+                return self.json_response({
+                    "default_page_content": content,
+                    "is_customized": custom_val is not None,
+                    "default_content": DEFAULT_PAGE_CONTENT,
+                })
+            if path == "/api/admin/system/default-page" and method in {"POST", "PUT"}:
+                body = self.read_json()
+                content = body.get("default_page_content")
+                if content is None:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "default_page_content_required")
+                set_system_setting(conn, "default_page_content", content)
+                log_audit(conn, "admin", actor["id"], "update_default_page_content", "system_settings", 0)
+                return self.json_response({
+                    "default_page_content": content,
+                    "is_customized": True,
+                    "message": "Default page content updated successfully",
+                })
+            if path == "/api/admin/system/default-page/reset" and method == "POST":
+                conn.execute("DELETE FROM system_settings WHERE key = 'default_page_content'")
+                log_audit(conn, "admin", actor["id"], "reset_default_page_content", "system_settings", 0)
+                return self.json_response({
+                    "default_page_content": DEFAULT_PAGE_CONTENT,
+                    "is_customized": False,
+                    "message": "Default page content reset to system default",
+                })
+            if path == "/api/admin/dns-settings" and method == "GET":
+                return self.json_response({"dns_settings": dns_settings_payload(conn)})
+            if path == "/api/admin/dns-settings" and method == "PATCH":
+                current = dns_settings_payload(conn)
+                body = self.read_json()
+                settings = validate_dns_settings_payload(body, current)
+                local_provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+                if not local_provider:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "local_dns_provider_missing")
+                conn.execute(
+                    """
+                    UPDATE dns_providers
+                    SET config_json = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (json.dumps(settings["local"], sort_keys=True), local_provider["id"]),
+                )
+                update_global_dns_assignment(conn, settings["global_mode"], settings["policy"])
+                log_audit(conn, "admin", actor["id"], "update_dns_settings", "dns_provider", local_provider["id"], metadata={"global_mode": settings["global_mode"]})
+                return self.json_response({"dns_settings": dns_settings_payload(conn)})
+            if path == "/api/admin/registrar-dashboard" and method == "GET":
+                return self.json_response(registrar_dashboard_payload(conn, query))
+            if path == "/api/admin/registrar-accounts" and method == "POST":
+                require_admin_permission(actor, "clients.manage")
+                body = self.read_json()
+                provider_key = clean_text(body.get("provider_key"), "").lower()
+                provider = conn.execute("SELECT * FROM registrar_providers WHERE key = ?", (provider_key,)).fetchone()
+                if not provider:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "registrar_provider_not_found")
+                label = clean_text(body.get("label") or provider["display_name"], "")
+                if not label:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "registrar_account_label_required")
+                identifier = clean_text(body.get("account_identifier"), "")
+                settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+                secret = str(body.get("api_key") or body.get("api_token") or "").strip()
+                linked_dns_account_id = body.get("dns_provider_account_id")
+                if linked_dns_account_id not in (None, ""):
+                    try:
+                        linked_dns_account_id = positive_int(linked_dns_account_id, "invalid_dns_provider_account_id")
+                    except ApiError:
+                        raise
+                    linked = conn.execute(
+                        """SELECT a.id FROM dns_provider_accounts a JOIN dns_providers p ON p.id = a.provider_id
+                           WHERE a.id = ? AND p.key = 'cloudflare' AND a.status = 'active'""",
+                        (linked_dns_account_id,),
+                    ).fetchone()
+                    if provider_key != "cloudflare" or not linked:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cloudflare_dns_account_link")
+                    # The registrar account reuses the DNS account's encrypted
+                    # token; do not require or duplicate the secret in the form.
+                    secret = ""
+                existing = conn.execute("SELECT id FROM registrar_accounts WHERE provider_id = ? AND label = ?", (provider["id"], label)).fetchone()
+                if existing:
+                    raise ApiError(HTTPStatus.CONFLICT, "registrar_account_exists")
+                cur = conn.execute(
+                    """INSERT INTO registrar_accounts(provider_id,label,account_identifier,settings_json,encrypted_secret,secret_label,status,dns_provider_account_id)
+                       VALUES (?,?,?,?,?,?, 'active', ?)""",
+                    (provider["id"], label, identifier, json.dumps(settings, sort_keys=True), encrypt_secret(secret, CONFIG.jwt_secret) if secret else "", "..." + secret[-4:] if secret else "", linked_dns_account_id),
+                )
+                log_audit(conn, "admin", actor["id"], "create_registrar_account", "registrar_account", cur.lastrowid, metadata={"provider": provider_key, "label": label})
+                return self.json_response({"account_id": cur.lastrowid}, HTTPStatus.CREATED)
+            if path.startswith("/api/admin/registrar-accounts/") and method == "PATCH":
+                require_admin_permission(actor, "clients.manage")
+                body = self.read_json()
+                verify_admin_sensitive_change(actor, body)
+                account_id = positive_int(path.split("/")[-1], "invalid_registrar_account_id")
+                account = conn.execute(
+                    "SELECT ra.*, rp.key AS provider_key FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id WHERE ra.id = ?",
+                    (account_id,),
+                ).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "registrar_account_not_found")
+                label = clean_text(body.get("label", account["label"]), "")
+                identifier = clean_text(body.get("account_identifier", account["account_identifier"]), "")
+                if not label:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "registrar_account_label_required")
+                settings = parse_json_field(account["settings_json"], {})
+                incoming_settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+                for key in ("api_base", "client_ip"):
+                    if key in incoming_settings:
+                        settings[key] = clean_text(incoming_settings.get(key), "")
+                linked_dns_account_id = body.get("dns_provider_account_id", account["dns_provider_account_id"])
+                if linked_dns_account_id in (None, ""):
+                    linked_dns_account_id = None
+                else:
+                    linked_dns_account_id = positive_int(linked_dns_account_id, "invalid_dns_provider_account_id")
+                    linked = conn.execute(
+                        """SELECT a.id FROM dns_provider_accounts a JOIN dns_providers p ON p.id = a.provider_id
+                           WHERE a.id = ? AND p.key = 'cloudflare' AND a.status = 'active'""",
+                        (linked_dns_account_id,),
+                    ).fetchone()
+                    if account["provider_key"] != "cloudflare" or not linked:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cloudflare_dns_account_link")
+                secret = str(body.get("api_key") or body.get("api_token") or "").strip()
+                encrypted_secret = account["encrypted_secret"]
+                secret_label = account["secret_label"]
+                if account["provider_key"] == "cloudflare" and linked_dns_account_id:
+                    linked = conn.execute("SELECT encrypted_secret FROM dns_provider_credentials WHERE provider_account_id = ?", (linked_dns_account_id,)).fetchone()
+                    if not linked or not linked["encrypted_secret"]:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_dns_account_credentials_missing")
+                    encrypted_secret = ""
+                    secret_label = ""
+                elif secret:
+                    encrypted_secret = encrypt_secret(secret, CONFIG.jwt_secret)
+                    secret_label = "..." + secret[-4:]
+                conn.execute(
+                    """UPDATE registrar_accounts
+                       SET label = ?, account_identifier = ?, settings_json = ?, encrypted_secret = ?, secret_label = ?,
+                           dns_provider_account_id = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (label, identifier, json.dumps(settings, sort_keys=True), encrypted_secret, secret_label, linked_dns_account_id, account_id),
+                )
+                log_audit(conn, "admin", actor["id"], "update_registrar_account", "registrar_account", account_id, metadata={"provider": account["provider_key"], "label": label})
+                return self.json_response({"updated": True, "account_id": account_id})
+            if path.startswith("/api/admin/registrar-accounts/") and method == "DELETE":
+                require_admin_permission(actor, "clients.manage")
+                account_id = int(path.split("/")[-1])
+                account = conn.execute("SELECT * FROM registrar_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "registrar_account_not_found")
+                delete_records = str((query.get("delete_records") or ["false"])[0]).lower() in {"1", "true", "yes", "on"}
+                if delete_records:
+                    conn.execute("UPDATE domains SET registrar_account_id = NULL, registrar_provider_id = NULL WHERE registrar_account_id = ?", (account_id,))
+                    conn.execute("DELETE FROM registrar_domain_records WHERE registrar_account_id = ?", (account_id,))
+                    conn.execute("DELETE FROM registrar_accounts WHERE id = ?", (account_id,))
+                    action = "delete_registrar_account_and_records"
+                else:
+                    # Keep the locally imported inventory, but remove all
+                    # credentials and hide the account from active cards.
+                    conn.execute(
+                        """UPDATE registrar_accounts
+                           SET label = ?, account_identifier = '', encrypted_secret = '', secret_label = '',
+                               status = 'deleted', last_error = 'Registrar account deleted; local records retained',
+                               updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        ("Deleted · " + str(account["label"]), account_id),
+                    )
+                    action = "delete_registrar_account_keep_records"
+                log_audit(conn, "admin", actor["id"], action, "registrar_account", account_id)
+                return self.json_response({"deleted": True, "records_deleted": delete_records})
+            if path.startswith("/api/admin/registrar-accounts/") and path.endswith("/sync") and method == "POST":
+                account_id = int(path.split("/")[-2])
+                account = conn.execute("SELECT ra.*, rp.key AS provider_key FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id WHERE ra.id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "registrar_account_not_found")
+                # Provider-specific inventory implementations can be added
+                # independently; this endpoint always records the attempted
+                # sync locally and returns a useful status to the control panel.
+                try:
+                    adapter = registrar_for(account["provider_key"], registrar_account_settings(conn, account))
+                    result = adapter.list_domains()
+                    provider_result = result if isinstance(result, dict) else {}
+                    inventory = provider_result.get("domains", []) if isinstance(result, dict) else (result or [])
+                    imported = 0
+                    synced_names = set()
+                    for item in inventory:
+                        name = clean_text(item.get("domain") or item.get("domain_name"), "").lower()
+                        if not name:
+                            continue
+                        synced_names.add(name)
+                        local_domain = conn.execute("SELECT id FROM domains WHERE lower(name) = ?", (name,)).fetchone()
+                        conn.execute(
+                            """INSERT INTO registrar_domain_records(registrar_account_id,domain_id,registrar_domain_id,domain_name,status,expiry_at,registered_at,auto_renew,transfer_lock,auth_code_available,nameservers_json,whois_json,metadata_json,synced_at)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                               ON CONFLICT(registrar_account_id,domain_name) DO UPDATE SET registrar_domain_id=excluded.registrar_domain_id,status=excluded.status,expiry_at=excluded.expiry_at,registered_at=excluded.registered_at,auto_renew=excluded.auto_renew,transfer_lock=excluded.transfer_lock,auth_code_available=excluded.auth_code_available,nameservers_json=excluded.nameservers_json,whois_json=excluded.whois_json,metadata_json=excluded.metadata_json,synced_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP""",
+                            (account_id, local_domain["id"] if local_domain else None, str(item.get("id") or ""), name, str(item.get("status") or "active"), item.get("expiry_at"), item.get("registered_at"), int(bool(item.get("auto_renew"))), int(bool(item.get("transfer_lock"))), int(bool(item.get("auth_code_available"))), json.dumps(item.get("nameservers") or []), json.dumps(item.get("whois") or {}), json.dumps(item, sort_keys=True)),
+                        )
+                        imported += 1
+                    if account["provider_key"] == "cloudflare":
+                        if synced_names:
+                            placeholders = ",".join("?" for _ in synced_names)
+                            conn.execute("DELETE FROM registrar_domain_records WHERE registrar_account_id = ? AND domain_name NOT IN (" + placeholders + ")", [account_id, *sorted(synced_names)])
+                        else:
+                            conn.execute("DELETE FROM registrar_domain_records WHERE registrar_account_id = ?", (account_id,))
+                    balances = provider_result.get("balances") if isinstance(provider_result.get("balances"), list) else []
+                    conn.execute("UPDATE registrar_accounts SET balance = ?, currency = ?, balances_json = ?, last_sync_at = CURRENT_TIMESTAMP, last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (provider_result.get("balance"), provider_result.get("currency", ""), json.dumps(balances, sort_keys=True), account_id))
+                    return self.json_response({"synced": True, "imported": imported, "result": provider_result})
+                except (RegistrarError, AttributeError) as exc:
+                    conn.execute("UPDATE registrar_accounts SET last_sync_at = CURRENT_TIMESTAMP, last_error = ? WHERE id = ?", (str(exc)[:500], account_id))
+                    raise ApiError(HTTPStatus.BAD_GATEWAY, "registrar_sync_failed: " + str(exc)[:180])
+            if path.startswith("/api/admin/registrar-domain-records/") and path.endswith("/manage") and method == "POST":
+                record_id = int(path.split("/")[-2])
+                record = conn.execute("SELECT * FROM registrar_domain_records WHERE id = ?", (record_id,)).fetchone()
+                if not record:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "registrar_domain_not_found")
+                body = self.read_json()
+                client_user_id = optional_positive_int(body.get("user_id"))
+                if client_user_id and not conn.execute("SELECT id FROM users WHERE id = ? AND status = 'active'", (client_user_id,)).fetchone():
+                    raise ApiError(HTTPStatus.NOT_FOUND, "assigned_client_not_found")
+                nameservers = [str(value).strip().rstrip(".").lower() for value in (body.get("nameservers") or []) if str(value).strip()]
+                if len(nameservers) < 2 or len(nameservers) > 4:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "two_to_four_nameservers_required")
+                registrar_account = conn.execute(
+                    "SELECT ra.*, rp.key AS provider_key FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id WHERE ra.id = ? AND ra.status = 'active'",
+                    (record["registrar_account_id"],),
+                ).fetchone()
+                if not registrar_account:
+                    raise ApiError(HTTPStatus.BAD_GATEWAY, "registrar_account_unavailable")
+                try:
+                    provider_result = registrar_for(
+                        registrar_account["provider_key"],
+                        registrar_account_settings(conn, registrar_account),
+                    ).update_nameservers(record["domain_name"], nameservers, record["registrar_domain_id"])
+                except (RegistrarError, NotImplementedError) as exc:
+                    conn.execute(
+                        "UPDATE registrar_accounts SET last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (str(exc)[:500], registrar_account["id"]),
+                    )
+                    raise ApiError(HTTPStatus.BAD_GATEWAY, "registrar_nameserver_update_failed: " + str(exc)[:180]) from exc
+                conn.execute("UPDATE registrar_domain_records SET client_user_id = ?, domain_id = NULL, nameservers_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (client_user_id, json.dumps(nameservers), record_id))
+                conn.execute(
+                    "UPDATE registrar_accounts SET last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (registrar_account["id"],),
+                )
+                return self.json_response({"updated": True, "record_id": record_id, "provider_result": provider_result})
+            if path == "/api/admin/registrar-domain-records/bulk-manage" and method == "POST":
+                body = self.read_json()
+                ids = [optional_positive_int(value) for value in (body.get("ids") or [])]
+                ids = [value for value in ids if value]
+                if not ids:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "registrar_domain_ids_required")
+                action = str(body.get("action") or "").lower()
+                placeholders = ",".join("?" for _ in ids)
+                if action == "assign":
+                    client_user_id = optional_positive_int(body.get("user_id"))
+                    if not client_user_id or not conn.execute("SELECT id FROM users WHERE id = ? AND status = 'active'", (client_user_id,)).fetchone():
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "active_client_required")
+                    conn.execute("UPDATE registrar_domain_records SET client_user_id = ?, domain_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id IN (" + placeholders + ")", [client_user_id, *ids])
+                elif action == "unassign":
+                    conn.execute("UPDATE registrar_domain_records SET client_user_id = NULL, domain_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id IN (" + placeholders + ")", ids)
+                elif action == "delete_local":
+                    conn.execute("DELETE FROM registrar_domain_records WHERE id IN (" + placeholders + ")", ids)
+                else:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "unsupported_registrar_bulk_action")
+                return self.json_response({"updated": True, "count": len(ids), "action": action})
+            if path == "/api/admin/domains" and method == "POST":
+                body = self.read_json()
+                user_id = optional_positive_int(body.get("user_id"))
+                account_id = optional_positive_int(body.get("account_id"))
+                domain_name = sanitize_domain(body.get("domain") or body.get("name") or "")
+                if not user_id or not domain_name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "user_and_domain_required")
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ? AND user_id = ?", (account_id, user_id)).fetchone() if account_id else conn.execute("SELECT * FROM hosting_accounts WHERE user_id = ? ORDER BY id LIMIT 1", (user_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "hosting_account_required_for_domain")
+                existing = conn.execute("SELECT id FROM domains WHERE name = ?", (domain_name,)).fetchone()
+                if existing:
+                    raise ApiError(HTTPStatus.CONFLICT, "domain_already_exists")
+                registrar_id = optional_positive_int(body.get("registrar_provider_id"))
+                nameservers = [str(v).strip().rstrip(".").lower() for v in (body.get("nameservers") or []) if str(v).strip()]
+                cur = conn.execute("INSERT INTO domains(account_id, name, kind, status, registrar_provider_id, registrar_status, nameservers_json, nameserver_source) VALUES (?, ?, ?, 'active', ?, ?, ?, ?)", (account["id"], domain_name, "registered" if body.get("register") else "external", registrar_id, "pending" if body.get("register") else "external", json.dumps(nameservers), "custom" if nameservers else "default"))
+                domain_id = cur.lastrowid
+                if body.get("register"):
+                    try:
+                        registrar_result = register_domain_with_provider(conn, conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone(), nameservers or default_registrar_nameservers(conn))
+                    except RegistrarError as exc:
+                        conn.execute("UPDATE domains SET registrar_status = 'failed', registrar_state_json = ? WHERE id = ?", (json.dumps({"last_error": str(exc)}), domain_id))
+                        raise ApiError(HTTPStatus.BAD_GATEWAY, "domain_registration_failed")
+                    conn.execute("UPDATE domains SET registrar_status = 'registered', registrar_state_json = ? WHERE id = ?", (json.dumps(registrar_result), domain_id))
+                log_audit(conn, "admin", actor["id"], "add_domain_for_client", "domain", domain_id, metadata={"domain": domain_name, "user_id": user_id})
+                return self.json_response({"domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone())}, HTTPStatus.CREATED)
+            if path == "/api/admin/domains" and method == "GET":
+                rows = conn.execute(
+                    """
+                    SELECT d.*, ha.username, u.email AS owner_email
+                    FROM domains d
+                    JOIN hosting_accounts ha ON ha.id = d.account_id
+                    JOIN users u ON u.id = ha.user_id
+                    ORDER BY d.name
+                    """
+                ).fetchall()
+                domains = []
+                for row in rows:
+                    item = decorate_domain(row)
+                    item["username"] = row["username"]
+                    item["owner_email"] = row["owner_email"]
+                    latest_job = conn.execute(
+                        """
+                        SELECT id, type, status, attempts, result, updated_at, completed_at
+                        FROM jobs
+                        WHERE type = 'sync_dns_zone' AND target_type = 'domain' AND target_id = ?
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (row["id"],),
+                    ).fetchone()
+                    item["latest_dns_job"] = row_to_dict(latest_job) if latest_job else None
+                    if item["latest_dns_job"]:
+                        item["latest_dns_job"]["result"] = parse_json_field(item["latest_dns_job"].get("result"), {})
+                    domains.append(item)
+                return self.json_response({"domains": domains})
+            if path == "/api/admin/registrars" and method == "GET":
+                rows = conn.execute("SELECT p.*, c.secret_label, c.status AS credential_status FROM registrar_providers p LEFT JOIN registrar_credentials c ON c.provider_id = p.id ORDER BY p.id").fetchall()
+                payload = []
+                for row in rows:
+                    item = row_to_dict(row)
+                    item["settings"] = parse_json_field(item.pop("settings_json"), {})
+                    item["secret_configured"] = bool(item.pop("secret_label", ""))
+                    payload.append(item)
+                return self.json_response({"registrars": payload})
+            if path.startswith("/api/admin/registrars/") and method in {"POST", "PATCH"}:
+                key = path.rsplit("/", 1)[-1]
+                body = self.read_json()
+                provider = conn.execute("SELECT * FROM registrar_providers WHERE key = ?", (key,)).fetchone()
+                if not provider:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "registrar_not_found")
+                settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+                secret = str(body.get("api_key") or body.get("api_token") or "").strip()
+                if key == "resellerclub":
+                    settings["reseller_id"] = str(body.get("reseller_id") or settings.get("reseller_id") or "").strip()
+                    if not settings["reseller_id"]:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "reseller_id_required")
+                conn.execute("UPDATE registrar_providers SET settings_json = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(settings, sort_keys=True), provider["id"]))
+                if secret:
+                    conn.execute("INSERT INTO registrar_credentials(provider_id, encrypted_secret, secret_label, status) VALUES (?, ?, ?, 'stored') ON CONFLICT(provider_id) DO UPDATE SET encrypted_secret=excluded.encrypted_secret, secret_label=excluded.secret_label, status='stored', updated_at=CURRENT_TIMESTAMP", (provider["id"], encrypt_secret(secret, CONFIG.jwt_secret), "..." + secret[-4:]))
+                log_audit(conn, "admin", actor["id"], "save_registrar_provider", "registrar_provider", provider["id"], metadata={"provider": key})
+                return self.json_response({"registrars": True})
+            if path.startswith("/api/admin/domains/") and path.endswith("/registrar-nameservers") and method == "POST":
+                domain_id = int(path.split("/")[-2])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                nameservers = [str(value).strip().rstrip(".").lower() for value in (self.read_json().get("nameservers") or []) if str(value).strip()]
+                if len(nameservers) < 2 or len(nameservers) > 4:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "two_to_four_nameservers_required")
+                result = update_domain_registrar_nameservers(conn, domain, nameservers)
+                log_audit(conn, "admin", actor["id"], "update_registrar_nameservers", "domain", domain_id, metadata={"nameservers": nameservers})
+                return self.json_response({"domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()), "result": result})
+            if path == "/api/admin/dns-providers/cloudflare/accounts" and method == "POST":
+                body = self.read_json()
+                provider = dns_provider_by_key(conn, DNS_PROVIDER_CLOUDFLARE)
+                if not provider:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_provider_missing")
+                display_name = clean_text(body.get("display_name") or body.get("account_name"), "")
+                account_name = clean_text(body.get("account_name", display_name), "")
+                external_account_id = clean_text(body.get("external_account_id", ""), "")
+                api_token = str(body.get("api_token") or body.get("api_key") or "").strip()
+                if not display_name or not api_token:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_account_and_token_required")
+
+                remote_zone_count = 0
+                try:
+                    cf_provider = CloudflareDNSProvider(api_token, account_id=external_account_id or None, api_base=CONFIG.cloudflare_api_base)
+                    zones = cf_provider.list_zones()
+                    remote_zone_count = len(zones)
+                except Exception as exc:
+                    logging.warning("Failed to fetch zone count from Cloudflare during account creation: %s", exc)
+
+                metadata_json = json.dumps({
+                    "phase": "foundation",
+                    "validation": "pending",
+                    "remote_zone_count": remote_zone_count,
+                    "zone_count": remote_zone_count,
+                }, sort_keys=True)
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO dns_provider_accounts(provider_id, display_name, account_name, external_account_id, status, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        provider["id"],
+                        display_name,
+                        account_name,
+                        external_account_id,
+                        "active",
+                        metadata_json,
+                    ),
+                )
+                created_acc_id = cur.lastrowid
+                secret_label = "token:..." + api_token[-4:]
+                conn.execute(
+                    """
+                    INSERT INTO dns_provider_credentials(provider_account_id, credential_kind, secret_label, encrypted_secret, status, validation_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        created_acc_id,
+                        "api_token",
+                        secret_label,
+                        encrypt_secret(api_token, CONFIG.jwt_secret),
+                        "stored",
+                        json.dumps({"phase": "foundation", "validated": False}, sort_keys=True),
+                    ),
+                )
+                conn.execute("UPDATE dns_providers SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (provider["id"],))
+                conn.commit()
+                log_audit(conn, "admin", actor["id"], "create_dns_provider_account", "dns_provider_account", created_acc_id, metadata={"provider": DNS_PROVIDER_CLOUDFLARE, "display_name": display_name})
+                return self.json_response({"dns_settings": dns_settings_payload(conn), "account_id": created_acc_id}, HTTPStatus.CREATED)
+            if path == "/api/admin/dns/sync-cloudflare-rules" and method == "POST":
+                require_admin_permission(actor, "dns.manage")
+                body = self.read_json() if self.headers.get("content-length") else {}
+                website_id = optional_positive_int(body.get("website_id"))
+                account_id = optional_positive_int(body.get("account_id"))
+                results = sync_cloudflare_acme_rules(conn, CONFIG, website_id=website_id, account_id=account_id)
+                log_audit(conn, "admin", actor["id"], "sync_cloudflare_acme_rules", "dns", 0, metadata={"website_id": website_id, "account_id": account_id, "count": len(results)})
+                return self.json_response({"success": True, "results": results})
+            if path.startswith("/api/admin/dns-providers/cloudflare/accounts/"):
+                account_id = path_int_id(path, "/api/admin/dns-providers/cloudflare/accounts/")
+                account = conn.execute(
+                    """
+                    SELECT a.*, p.key AS provider_key
+                    FROM dns_provider_accounts a
+                    JOIN dns_providers p ON p.id = a.provider_id
+                    WHERE a.id = ? AND p.key = ?
+                    """,
+                    (account_id, DNS_PROVIDER_CLOUDFLARE),
+                ).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "cloudflare_account_not_found")
+                if path.endswith("/migrate-local") and method == "POST":
+                    rows = conn.execute(
+                        """
+                        SELECT *
+                        FROM domains
+                        WHERE dns_provider = ? AND dns_provider_account_id = ?
+                        ORDER BY id
+                        """,
+                        (DNS_PROVIDER_CLOUDFLARE, account_id),
+                    ).fetchall()
+                    jobs = []
+                    for domain in rows:
+                        jobs.append(
+                            {
+                                "domain_id": domain["id"],
+                                "job_id": migrate_domain_dns_provider(
+                                    conn,
+                                    domain,
+                                    DNS_PROVIDER_LOCAL_POWERDNS,
+                                    None,
+                                    "admin:{}".format(actor["id"]),
+                                ),
+                            }
+                        )
+                    log_audit(
+                        conn,
+                        "admin",
+                        actor["id"],
+                        "migrate_cloudflare_account_domains_to_local",
+                        "dns_provider_account",
+                        account_id,
+                        metadata={"provider": DNS_PROVIDER_CLOUDFLARE, "migrated_domains": len(jobs)},
+                    )
+                    return self.json_response({"migrated": len(jobs), "jobs": jobs, "dns_settings": dns_settings_payload(conn)})
+                if method == "PATCH":
+                    body = self.read_json()
+                    display_name = clean_text(body.get("display_name", account["display_name"]), account["display_name"])
+                    account_name = clean_text(body.get("account_name", account["account_name"]), account["account_name"])
+                    external_account_id = clean_text(body.get("external_account_id", account["external_account_id"]), account["external_account_id"])
+                    status = body.get("status", account["status"])
+                    if status not in {"active", "disabled"}:
+                        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider_account_status")
+                    conn.execute(
+                        """
+                        UPDATE dns_provider_accounts
+                        SET display_name = ?, account_name = ?, external_account_id = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (display_name, account_name, external_account_id, status, account_id),
+                    )
+                    api_token = str(body.get("api_token") or body.get("api_key") or "").strip()
+                    if api_token:
+                        conn.execute(
+                            """
+                            INSERT INTO dns_provider_credentials(provider_account_id, credential_kind, secret_label, encrypted_secret, status, validation_json, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            ON CONFLICT(provider_account_id) DO UPDATE SET
+                              secret_label = excluded.secret_label,
+                              encrypted_secret = excluded.encrypted_secret,
+                              status = excluded.status,
+                              validation_json = excluded.validation_json,
+                              updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (
+                                account_id,
+                                "api_token",
+                                "token:..." + api_token[-4:],
+                                encrypt_secret(api_token, CONFIG.jwt_secret),
+                                "stored",
+                                json.dumps({"phase": "foundation", "validated": False}, sort_keys=True),
+                            ),
+                        )
+                    log_audit(conn, "admin", actor["id"], "update_dns_provider_account", "dns_provider_account", account_id, metadata={"provider": DNS_PROVIDER_CLOUDFLARE, "status": status})
+                    return self.json_response({"dns_settings": dns_settings_payload(conn)})
+                if method == "DELETE":
+                    in_use = conn.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM plans
+                        WHERE dns_default_provider_account_id = ?
+                        """,
+                        (account_id,),
+                    ).fetchone()["count"]
+                    if in_use:
+                        raise ApiError(HTTPStatus.CONFLICT, "dns_provider_account_in_use")
+                    conn.execute("DELETE FROM dns_provider_credentials WHERE provider_account_id = ?", (account_id,))
+                    conn.execute("DELETE FROM dns_provider_accounts WHERE id = ?", (account_id,))
+                    log_audit(conn, "admin", actor["id"], "delete_dns_provider_account", "dns_provider_account", account_id, metadata={"provider": DNS_PROVIDER_CLOUDFLARE})
+                    return self.json_response({"deleted": True, "dns_settings": dns_settings_payload(conn)})
+                raise ApiError(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+            if path.startswith("/api/admin/dns-providers/") and path.endswith("/test") and method == "POST":
+                provider_id = int(path.split("/")[-2])
+                provider = conn.execute("SELECT * FROM dns_providers WHERE id = ?", (provider_id,)).fetchone()
+                if not provider:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "dns_provider_not_found")
+                body = self.read_json()
+                account_id = optional_positive_int(body.get("provider_account_id") or "")
+                credential = None
+                external_account_id = None
+                if account_id:
+                    account_row = conn.execute(
+                        """
+                        SELECT a.*, p.key AS provider_key
+                        FROM dns_provider_accounts a
+                        JOIN dns_providers p ON p.id = a.provider_id
+                        WHERE a.id = ?
+                        """,
+                        (account_id,),
+                    ).fetchone()
+                    if account_row:
+                        external_account_id = account_row["external_account_id"] or None
+                    credential = conn.execute("SELECT * FROM dns_provider_credentials WHERE provider_account_id = ?", (account_id,)).fetchone()
+                elif provider["key"] == DNS_PROVIDER_CLOUDFLARE:
+                    account_row = conn.execute(
+                        """
+                        SELECT a.*, p.key AS provider_key
+                        FROM dns_provider_accounts a
+                        JOIN dns_providers p ON p.id = a.provider_id
+                        WHERE p.key = ? AND a.status = 'active'
+                        ORDER BY a.id ASC
+                        LIMIT 1
+                        """,
+                        (DNS_PROVIDER_CLOUDFLARE,),
+                    ).fetchone()
+                    if account_row:
+                        account_id = account_row["id"]
+                        external_account_id = account_row["external_account_id"] or None
+                        credential = conn.execute("SELECT * FROM dns_provider_credentials WHERE provider_account_id = ?", (account_id,)).fetchone()
+                try:
+                    if provider["key"] == DNS_PROVIDER_LOCAL_POWERDNS:
+                        local_provider = conn.execute("SELECT * FROM dns_providers WHERE key = ?", (DNS_PROVIDER_LOCAL_POWERDNS,)).fetchone()
+                        config = parse_json_field(local_provider["config_json"], {}) if local_provider else {}
+                        nameservers = config.get("nameservers") or ["ns1.mango.test", "ns2.mango.test"]
+                        api_url = CONFIG.powerdns_api_url or "http://127.0.0.1:8081"
+                        api_key = CONFIG.powerdns_api_key or "pdns_test_key"
+                        dns_provider = PowerDNSProvider(
+                            api_url,
+                            api_key,
+                            server_id=CONFIG.powerdns_server_id,
+                            nameservers=nameservers,
+                        )
+                        validation = dns_provider.validate()
+                        status = "configured"
+                        message = validation["message"]
+
+                    elif provider["key"] == DNS_PROVIDER_CLOUDFLARE:
+                        if not credential:
+                            status = "missing_credentials"
+                            message = "Cloudflare account credentials are missing."
+                            validation = {"provider": DNS_PROVIDER_CLOUDFLARE, "error": message}
+                        else:
+                            api_token = decrypt_secret(credential["encrypted_secret"], CONFIG.jwt_secret)
+                            dns_provider = CloudflareDNSProvider(api_token, account_id=external_account_id, api_base=CONFIG.cloudflare_api_base)
+                            validation = dns_provider.validate()
+                            status = "configured"
+                            message = validation["message"]
+                            if account_id:
+                                try:
+                                    zones = dns_provider.list_zones()
+                                    zone_cnt = len(zones)
+                                    acc_row = conn.execute("SELECT external_account_id, metadata_json FROM dns_provider_accounts WHERE id = ?", (account_id,)).fetchone()
+                                    meta = parse_json_field(acc_row["metadata_json"], {}) if acc_row else {}
+                                    meta["remote_zone_count"] = zone_cnt
+                                    meta["zone_count"] = zone_cnt
+                                    real_ext_id = dns_provider.account_id or (acc_row["external_account_id"] if acc_row else external_account_id)
+                                    conn.execute("UPDATE dns_provider_accounts SET external_account_id = ?, metadata_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (real_ext_id, json.dumps(meta, sort_keys=True), account_id))
+                                    conn.commit()
+                                    message = f"Cloudflare API token verified ({zone_cnt} zone(s) found)."
+                                except Exception as z_err:
+                                    logging.warning("Could not update remote zone count during test: %s", z_err)
+                    else:
+                        dns_provider = LocalDNSProvider()
+                        validation = dns_provider.validate()
+                        status = validation["status"]
+                        message = validation["message"]
+                except DNSProviderError as exc:
+                    status = "missing_credentials" if provider["key"] == DNS_PROVIDER_LOCAL_POWERDNS and (not CONFIG.powerdns_api_url or not CONFIG.powerdns_api_key) else "provider_failed"
+                    message = str(exc)
+                    validation = {"provider": provider["key"], "error": message}
+                except Exception as exc:
+                    status = "provider_failed"
+                    message = str(exc)
+                    validation = {"provider": provider["key"], "error": message, "exception": exc.__class__.__name__}
+                cur = conn.execute(
+                    """
+                    INSERT INTO dns_provider_health_checks(provider_id, provider_account_id, status, message, details_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        provider_id,
+                        account_id,
+                        status,
+                        message,
+                        json.dumps({"phase": "foundation", "live_validation": True, "validation": validation}, sort_keys=True),
+                    ),
+                )
+                log_audit(conn, "admin", actor["id"], "test_dns_provider", "dns_provider", provider_id, metadata={"status": status, "provider_account_id": account_id})
+                return self.json_response({"health_check_id": cur.lastrowid, "status": status, "message": message, "dns_settings": dns_settings_payload(conn)})
+            if path.startswith("/api/admin/domains/") and path.endswith("/dns/rebuild") and method == "POST":
+                domain_id = int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                ensure_no_active_dns_sync(conn, domain_id)
+                job_id = enqueue_agent_job(conn, "sync_dns_zone", "domain", domain_id, {"reason": "admin_rebuild"})
+                log_audit(conn, "admin", actor["id"], "rebuild_dns_zone", "domain", domain_id)
+                return self.json_response({"job_id": job_id, "domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone())})
+            if path.startswith("/api/admin/domains/") and path.endswith("/dns/verify-nameservers") and method == "POST":
+                domain_id = int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                verification = verify_domain_nameservers(conn, domain)
+                log_audit(conn, "admin", actor["id"], "verify_dns_nameservers", "domain", domain_id, metadata={"status": verification["status"]})
+                return self.json_response({"verification": verification, "domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone())})
+            if path.startswith("/api/admin/domains/") and path.endswith("/dns/export") and method == "GET":
+                domain_id = int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                export = create_dns_zone_export(conn, domain, "admin:{}".format(actor["id"]))
+                log_audit(conn, "admin", actor["id"], "export_dns_zone", "domain", domain_id)
+                return self.json_response({"dns_zone_export": export})
+            if (path.startswith("/api/admin/domains/") and path.endswith("/dns/migrate-provider")) or (match := re.match(r"^/api/admin/domains/(\d+)/dns/migrate-provider/?$", path)) and method == "POST":
+                domain_id = int(match.group(1)) if (match := re.match(r"^/api/admin/domains/(\d+)/dns/migrate-provider/?$", path)) else int(path.split("/")[-3])
+                domain = conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()
+                if not domain:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "domain_not_found")
+                body = self.read_json()
+                provider_key = str(body.get("dns_provider") or body.get("provider") or "").strip()
+                provider_account_id = body.get("dns_provider_account_id") or body.get("provider_account_id")
+                if provider_account_id in ("", None):
+                    provider_account_id = None
+                else:
+                    provider_account_id = positive_int(provider_account_id, "invalid_dns_provider_account_id")
+                job_id = migrate_domain_dns_provider(conn, domain, provider_key, provider_account_id, "admin:{}".format(actor["id"]))
+                log_audit(conn, "admin", actor["id"], "migrate_dns_provider", "domain", domain_id, metadata={"to": provider_key, "provider_account_id": provider_account_id})
+                return self.json_response({"job_id": job_id, "domain": decorate_domain(conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone())})
+            if path == "/api/admin/domains/dns/bulk-migrate-provider" and method == "POST":
+                body = self.read_json()
+                domain_ids = [positive_int(item, "invalid_domain_id") for item in (body.get("domain_ids") or [])]
+                if not domain_ids or body.get("all"):
+                    domain_ids = [row["id"] for row in conn.execute("SELECT id FROM domains ORDER BY id").fetchall()]
+                if not domain_ids:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "domain_ids_required")
+                provider_key = str(body.get("dns_provider") or body.get("provider") or "").strip()
+                provider_account_id = body.get("dns_provider_account_id") or body.get("provider_account_id")
+                if provider_account_id in ("", None):
+                    provider_account_id = None
+                else:
+                    provider_account_id = positive_int(provider_account_id, "invalid_dns_provider_account_id")
+                jobs = []
+                for domain_id in domain_ids:
+                    domain = conn.execute("SELECT * FROM domains WHERE id = ?", (domain_id,)).fetchone()
+                    if not domain:
+                        continue
+                    jobs.append({"domain_id": domain_id, "job_id": migrate_domain_dns_provider(conn, domain, provider_key, provider_account_id, "admin:{}".format(actor["id"]))})
+                log_audit(conn, "admin", actor["id"], "bulk_migrate_dns_provider", "domain", None, metadata={"count": len(jobs), "to": provider_key})
+                return self.json_response({"jobs": jobs, "domains": [decorate_domain(row) for row in conn.execute("SELECT * FROM domains ORDER BY name").fetchall()]})
+            if path in {"/api/admin/plans/recalculate_usage", "/api/admin/recalculate_usage"} and method == "POST":
+                body = self.read_json() if self.headers.get("Content-Length") else {}
+                plan_id = optional_positive_int(body.get("plan_id"))
+                job_id = enqueue_agent_job(conn, "recalculate_usage", "plan" if plan_id else "all", plan_id, body)
+                log_audit(conn, "admin", actor["id"], "recalculate_usage", "plan" if plan_id else "all", plan_id, metadata={"job_id": job_id})
+                return self.json_response({"ok": True, "job_id": job_id, "message": "Usage recalculation job queued."})
+
+            if path.startswith("/api/admin/plans/") and path.endswith("/recalculate_usage") and method == "POST":
+                parts = path.split("/")
+                try:
+                    plan_id = int(parts[-2])
+                except (ValueError, IndexError):
+                    raise ApiError(HTTPStatus.NOT_FOUND, "plan_not_found")
+                job_id = enqueue_agent_job(conn, "recalculate_usage", "plan", plan_id, {"plan_id": plan_id})
+                log_audit(conn, "admin", actor["id"], "recalculate_usage", "plan", plan_id, metadata={"job_id": job_id})
+                return self.json_response({"ok": True, "job_id": job_id, "message": f"Usage recalculation job queued for plan #{plan_id}."})
+            if path == "/api/admin/plans" and method == "GET":
+                return self.json_response({"plans": rows_to_dicts(conn.execute("SELECT * FROM plans ORDER BY id").fetchall())})
+            if path == "/api/admin/plans" and method == "POST":
+                body = self.read_json()
+                plan = validate_plan_payload(body)
+                validate_plan_dns_accounts(conn, plan)
+                if conn.execute("SELECT id FROM plans WHERE name = ?", (plan["name"],)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "plan_name_already_exists")
+                cur = conn.execute(
+                    """
+                    INSERT INTO plans(
+                      name, cpu_limit, service_cpu_limit, total_cpu_limit, memory_mb, storage_mb, inode_limit, max_websites, max_subdomains,
+                      max_databases, max_mailboxes, max_cron_jobs, daily_email_limit, backup_retention_days, backup_schedule,
+                      max_processes, php_workers, php_timeout, bandwidth_mb, nameserver_1, nameserver_2, backup_location,
+                      frontend_frameworks, backend_frameworks, nodejs_versions, package_managers,
+                      dns_default_provider, dns_allowed_providers_json, dns_allowed_provider_accounts_json, dns_default_provider_account_id,
+                      dns_customer_editable, dns_max_records_per_domain, dns_allowed_record_types_json,
+                      dns_min_ttl, dns_wildcard_records_allowed, dns_cloudflare_proxy_allowed,
+                      dns_dnssec_allowed, dns_dnssec_required, allow_api_access, analytics_mode,
+                      is_reseller, max_clients, max_reseller_subplans
+                    ) VALUES (
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        plan["name"],
+                        plan["cpu_limit"],
+                        plan["service_cpu_limit"],
+                        plan["total_cpu_limit"],
+                        plan["memory_mb"],
+                        plan["storage_mb"],
+                        plan["inode_limit"],
+                        plan["max_websites"],
+                        plan["max_subdomains"],
+                        plan["max_databases"],
+                        plan["max_mailboxes"],
+                        plan["max_cron_jobs"],
+                        plan["daily_email_limit"],
+                        plan["backup_retention_days"],
+                        plan["backup_schedule"],
+                        plan["max_processes"],
+                        plan["php_workers"],
+                        plan["php_timeout"],
+                        plan["bandwidth_mb"],
+                        plan["nameserver_1"],
+                        plan["nameserver_2"],
+                        plan["backup_location"],
+                        plan["frontend_frameworks"],
+                        plan["backend_frameworks"],
+                        plan["nodejs_versions"],
+                        plan["package_managers"],
+                        plan["dns_default_provider"],
+                        plan["dns_allowed_providers_json"],
+                        plan["dns_allowed_provider_accounts_json"],
+                        plan["dns_default_provider_account_id"],
+                        plan["dns_customer_editable"],
+                        plan["dns_max_records_per_domain"],
+                        plan["dns_allowed_record_types_json"],
+                        plan["dns_min_ttl"],
+                        plan["dns_wildcard_records_allowed"],
+                        plan["dns_cloudflare_proxy_allowed"],
+                        plan["dns_dnssec_allowed"],
+                        plan["dns_dnssec_required"],
+                        plan["allow_api_access"],
+                        plan["analytics_mode"],
+                        plan["is_reseller"],
+                        plan["max_clients"],
+                        plan["max_reseller_subplans"],
+                    ),
+                )
+                conn.commit()
+                log_audit(conn, "admin", actor["id"], "create_plan", "plan", cur.lastrowid, metadata={"name": plan["name"]})
+                created = conn.execute("SELECT * FROM plans WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"plan": row_to_dict(created)}, HTTPStatus.CREATED)
+            if path.startswith("/api/admin/plans/") and method == "PATCH":
+                try:
+                    plan_id = int(path.rsplit("/", 1)[-1])
+                except ValueError:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "plan_not_found")
+                existing = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+                if not existing:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "plan_not_found")
+                body = self.read_json()
+                if "analytics_mode" not in body:
+                    body["analytics_mode"] = existing["analytics_mode"] if "analytics_mode" in existing.keys() else "on"
+                plan = validate_plan_payload(body)
+                validate_plan_dns_accounts(conn, plan)
+                duplicate = conn.execute("SELECT id FROM plans WHERE name = ? AND id != ?", (plan["name"], plan_id)).fetchone()
+                if duplicate:
+                    raise ApiError(HTTPStatus.CONFLICT, "plan_name_already_exists")
+                conn.execute(
+                    """
+                    UPDATE plans SET
+                      name = ?, cpu_limit = ?, service_cpu_limit = ?, total_cpu_limit = ?, memory_mb = ?, storage_mb = ?, inode_limit = ?, max_websites = ?, max_subdomains = ?,
+                      max_databases = ?, max_mailboxes = ?, max_cron_jobs = ?, daily_email_limit = ?, backup_retention_days = ?, backup_schedule = ?,
+                      max_processes = ?, php_workers = ?, php_timeout = ?, bandwidth_mb = ?, nameserver_1 = ?, nameserver_2 = ?, backup_location = ?,
+                      frontend_frameworks = ?, backend_frameworks = ?, nodejs_versions = ?, package_managers = ?,
+                      dns_default_provider = ?, dns_allowed_providers_json = ?, dns_allowed_provider_accounts_json = ?, dns_default_provider_account_id = ?,
+                      dns_customer_editable = ?, dns_max_records_per_domain = ?, dns_allowed_record_types_json = ?,
+                      dns_min_ttl = ?, dns_wildcard_records_allowed = ?, dns_cloudflare_proxy_allowed = ?,
+                      dns_dnssec_allowed = ?, dns_dnssec_required = ?, allow_api_access = ?, analytics_mode = ?,
+                      is_reseller = ?, max_clients = ?, max_reseller_subplans = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        plan["name"], plan["cpu_limit"], plan["service_cpu_limit"], plan["total_cpu_limit"], plan["memory_mb"], plan["storage_mb"], plan["inode_limit"], plan["max_websites"], plan["max_subdomains"],
+                        plan["max_databases"], plan["max_mailboxes"], plan["max_cron_jobs"], plan["daily_email_limit"], plan["backup_retention_days"],
+                        plan["backup_schedule"],
+                        plan["max_processes"], plan["php_workers"], plan["php_timeout"], plan["bandwidth_mb"], plan["nameserver_1"], plan["nameserver_2"], plan["backup_location"],
+                        plan["frontend_frameworks"], plan["backend_frameworks"], plan["nodejs_versions"], plan["package_managers"],
+                        plan["dns_default_provider"], plan["dns_allowed_providers_json"], plan["dns_allowed_provider_accounts_json"], plan["dns_default_provider_account_id"],
+                        plan["dns_customer_editable"], plan["dns_max_records_per_domain"], plan["dns_allowed_record_types_json"],
+                        plan["dns_min_ttl"], plan["dns_wildcard_records_allowed"], plan["dns_cloudflare_proxy_allowed"],
+                        plan["dns_dnssec_allowed"], plan["dns_dnssec_required"], plan["allow_api_access"],
+                        plan["analytics_mode"],
+                        plan["is_reseller"], plan["max_clients"], plan["max_reseller_subplans"], plan_id,
+                    ),
+                )
+                conn.commit()
+                apply_to_accounts = bool(body.get("apply_to_existing_accounts", False))
+                migrate_existing_domains = bool(body.get("migrate_existing_domains", False))
+                job_ids = []
+                migrated_domain_count = 0
+                if apply_to_accounts:
+                    accounts = conn.execute("SELECT id FROM hosting_accounts WHERE plan_id = ? ORDER BY id", (plan_id,)).fetchall()
+                    for account in accounts:
+                        job_ids.append(enqueue_agent_job(conn, "provision_hosting_account", "hosting_account", account["id"], {"plan_update": True, "plan_id": plan_id}))
+                if migrate_existing_domains:
+                    domains = conn.execute(
+                        """
+                        SELECT d.*
+                        FROM domains d
+                        JOIN hosting_accounts ha ON ha.id = d.account_id
+                        WHERE ha.plan_id = ?
+                        ORDER BY d.id
+                        """,
+                        (plan_id,),
+                    ).fetchall()
+                    target_provider = plan["dns_default_provider"]
+                    target_account_id = plan["dns_default_provider_account_id"]
+                    for d in domains:
+                        if d["dns_provider"] != target_provider:
+                            job_id = migrate_domain_dns_provider(conn, d, target_provider, target_account_id, "admin:{}".format(actor["id"]))
+                            job_ids.append(job_id)
+                            migrated_domain_count += 1
+                if plan["analytics_mode"] == "disabled":
+                    affected_sites = conn.execute(
+                        """
+                        SELECT w.id FROM websites w
+                        JOIN hosting_accounts ha ON ha.id = w.account_id
+                        WHERE ha.plan_id = ? AND COALESCE(w.analytics_enabled, 1) != 0
+                        """,
+                        (plan_id,),
+                    ).fetchall()
+                    if affected_sites:
+                        conn.execute(
+                            "UPDATE websites SET analytics_enabled = 0 WHERE account_id IN (SELECT id FROM hosting_accounts WHERE plan_id = ?)",
+                            (plan_id,),
+                        )
+                        for site in affected_sites:
+                            job_ids.append(enqueue_agent_job(conn, "sync_website_analytics", "website", site["id"], {"plan_policy": "disabled"}))
+                log_audit(conn, "admin", actor["id"], "update_plan", "plan", plan_id, metadata={"name": plan["name"], "apply_to_existing_accounts": apply_to_accounts, "migrate_existing_domains": migrate_existing_domains, "migrated_domains": migrated_domain_count})
+                updated = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+                return self.json_response({"plan": row_to_dict(updated), "updated_account_count": len(job_ids), "migrated_domain_count": migrated_domain_count, "job_ids": job_ids})
+            if path == "/api/admin/nodes" and method == "GET":
+                return self.json_response({"nodes": rows_to_dicts(conn.execute("SELECT * FROM nodes ORDER BY id").fetchall())})
+            if path == "/api/admin/hosting-accounts" and method == "GET":
+                rows = conn.execute(
+                    """
+                    SELECT ha.*, u.email AS user_email, p.name AS plan_name, n.name AS node_name
+                    FROM hosting_accounts ha
+                    JOIN users u ON u.id = ha.user_id
+                    JOIN plans p ON p.id = ha.plan_id
+                    JOIN nodes n ON n.id = ha.node_id
+                    ORDER BY ha.id
+                    """
+                ).fetchall()
+                return self.json_response({"hosting_accounts": rows_to_dicts(rows)})
+            account_databases_match = re.match(r"^/api/admin/hosting-accounts/(\d+)/databases$", path)
+            if account_databases_match and method == "GET":
+                require_admin_permission(actor, "hosting.manage")
+                account_id = int(account_databases_match.group(1))
+                account = conn.execute(
+                    "SELECT id, username, status FROM hosting_accounts WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                databases = rows_to_dicts(
+                    conn.execute(
+                        """
+                        SELECT d.id, d.account_id, d.name, d.username, d.status, d.size_mb,
+                               d.created_by_user_id, d.created_at,
+                               u.email AS created_by_email, u.full_name AS created_by_name
+                        FROM databases d
+                        LEFT JOIN users u ON u.id = d.created_by_user_id
+                        WHERE d.account_id = ?
+                        ORDER BY d.id
+                        """,
+                        (account_id,),
+                    ).fetchall()
+                )
+                return self.json_response({"hosting_account": row_to_dict(account), "databases": databases})
+
+            account_delete_match = re.match(r"^/api/admin/hosting-accounts/(\d+)$", path)
+            if account_delete_match and method == "DELETE":
+                require_admin_permission(actor, "hosting.manage")
+                account_id = int(account_delete_match.group(1))
+                account = conn.execute("SELECT id, user_id, username FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                deleted = delete_hosting_account(conn, account_id)
+                log_audit(conn, "admin", actor["id"], "delete_hosting_account", "hosting_account", account_id, metadata=deleted)
+                return self.json_response({"deleted": True, "hosting_account_id": account_id, "user_id": account["user_id"], "username": account["username"]})
+
+            database_delete_match = re.match(r"^/api/admin/databases/(\d+)$", path)
+            if database_delete_match and method == "DELETE":
+                require_admin_permission(actor, "hosting.manage")
+                database_id = int(database_delete_match.group(1))
+                database = conn.execute("SELECT * FROM databases WHERE id = ?", (database_id,)).fetchone()
+                if not database:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "database_not_found")
+                conn.execute("DELETE FROM database_grants WHERE database_id = ?", (database_id,))
+                conn.execute("UPDATE wordpress_installs SET database_id = NULL WHERE database_id = ?", (database_id,))
+                conn.execute("UPDATE script_installs SET database_id = NULL WHERE database_id = ?", (database_id,))
+                conn.execute("DELETE FROM databases WHERE id = ?", (database_id,))
+                job_id = enqueue_agent_job(
+                    conn, "delete_database", "database", database_id,
+                    {"name": database["name"], "account_id": database["account_id"]},
+                )
+                log_audit(
+                    conn, "admin", actor["id"], "delete_database", "database", database_id,
+                    metadata={"name": database["name"], "account_id": database["account_id"]},
+                )
+                return self.json_response({"deleted": True, "database_id": database_id, "job_id": job_id})
+            if path.endswith("/suspend") and path.startswith("/api/admin/hosting-accounts/") and method == "POST":
+                account_id = int(path.split("/")[-2])
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                conn.execute("UPDATE hosting_accounts SET status = 'suspended' WHERE id = ?", (account_id,))
+                job_id = enqueue_agent_job(conn, "suspend_account", "hosting_account", account_id, {})
+                sync_account_suspension_marker(account, True)
+                log_audit(conn, "admin", actor["id"], "suspend_account", "hosting_account", account_id)
+                account = conn.execute("SELECT status FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                return self.json_response({"status": account["status"], "job_id": job_id})
+            if path.endswith("/hard-suspend") and path.startswith("/api/admin/hosting-accounts/") and method == "POST":
+                account_id = int(path.split("/")[-2])
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                # Fail closed immediately. The agent then stops the account's compose stack.
+                conn.execute("UPDATE hosting_accounts SET status = 'hard_suspended' WHERE id = ?", (account_id,))
+                sync_account_suspension_marker(account, True)
+                job_id = enqueue_agent_job(conn, "hard_suspend_account", "hosting_account", account_id, {})
+                log_audit(conn, "admin", actor["id"], "hard_suspend_account", "hosting_account", account_id)
+                account = conn.execute("SELECT status FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                return self.json_response({"status": account["status"], "job_id": job_id})
+            if path.endswith("/unsuspend") and path.startswith("/api/admin/hosting-accounts/") and method == "POST":
+                account_id = int(path.split("/")[-2])
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                job_id = enqueue_agent_job(conn, "unsuspend_account", "hosting_account", account_id, {})
+                log_audit(conn, "admin", actor["id"], "unsuspend_account", "hosting_account", account_id)
+                account = conn.execute("SELECT status FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                return self.json_response({"status": account["status"], "job_id": job_id})
+            if path.endswith("/stack/rebuild") and path.startswith("/api/admin/hosting-accounts/") and method == "POST":
+                require_admin_permission(actor, "hosting.manage")
+                account_id = int(path.split("/")[-3])
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                if account["status"] in {"deleted", "hard_suspended"}:
+                    raise ApiError(HTTPStatus.CONFLICT, "account_must_be_active_before_stack_rebuild")
+                if account["status"] in {"provisioning", "rebuilding"}:
+                    raise ApiError(HTTPStatus.CONFLICT, "account_stack_operation_in_progress")
+                stack = conn.execute("SELECT id FROM account_stacks WHERE account_id = ?", (account_id,)).fetchone()
+                if not stack:
+                    raise ApiError(HTTPStatus.CONFLICT, "account_stack_not_found_use_provisioning")
+                active_job = conn.execute(
+                    """
+                    SELECT id FROM jobs
+                    WHERE type = 'rebuild_stack' AND target_type = 'hosting_account'
+                      AND target_id = ? AND status IN ('queued', 'running')
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (account_id,),
+                ).fetchone()
+                if active_job:
+                    raise ApiError(HTTPStatus.CONFLICT, "account_stack_operation_in_progress")
+                previous_status = account["status"]
+                conn.execute("UPDATE hosting_accounts SET status = 'rebuilding' WHERE id = ?", (account_id,))
+                conn.execute("UPDATE account_stacks SET status = 'rebuilding', last_error = NULL WHERE account_id = ?", (account_id,))
+                job_id = enqueue_agent_job(
+                    conn,
+                    "rebuild_stack",
+                    "hosting_account",
+                    account_id,
+                    {"preserve_data": True, "previous_status": previous_status, "reason": "admin_requested"},
+                )
+                log_audit(conn, "admin", actor["id"], "rebuild_account_stack", "hosting_account", account_id, metadata={"job_id": job_id, "preserve_data": True})
+                return self.json_response({"job_id": job_id, "account_id": account_id, "status": "rebuilding", "preserve_data": True})
+            if path.endswith("/plan") and path.startswith("/api/admin/hosting-accounts/") and method == "PATCH":
+                account_id = int(path.split("/")[-2])
+                body = self.read_json()
+                plan_id = int(body.get("plan_id", 0))
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                plan = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+                if not plan:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "plan_not_found")
+                conn.execute("UPDATE hosting_accounts SET plan_id = ? WHERE id = ?", (plan_id, account_id))
+                job_id = enqueue_agent_job(conn, "provision_hosting_account", "hosting_account", account_id, {"plan_change": True, "plan_id": plan_id})
+                log_audit(conn, "admin", actor["id"], "update_account_plan", "hosting_account", account_id, metadata={"plan_id": plan_id})
+                updated = conn.execute(
+                    """
+                    SELECT ha.*, p.name AS plan_name, n.name AS node_name
+                    FROM hosting_accounts ha
+                    JOIN plans p ON p.id = ha.plan_id
+                    JOIN nodes n ON n.id = ha.node_id
+                    WHERE ha.id = ?
+                    """,
+                    (account_id,),
+                ).fetchone()
+                return self.json_response({"hosting_account": row_to_dict(updated), "job_id": job_id})
+            if path.endswith("/dns-provider") and path.startswith("/api/admin/hosting-accounts/") and method == "PATCH":
+                require_admin_permission(actor, "hosting.manage")
+                account_id = int(path.split("/")[-2])
+                body = self.read_json()
+                account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+                if not account:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+                dns_provider = str(body.get("dns_provider") or "").strip()
+                if dns_provider in ("", "inherit", "default", "global", "none", "null"):
+                    dns_provider = None
+                raw_acc_id = body.get("dns_provider_account_id")
+                dns_provider_account_id = int(raw_acc_id) if raw_acc_id not in (None, "", "null") else None
+                if not dns_provider:
+                    dns_provider = None
+                    dns_provider_account_id = None
+                conn.execute(
+                    "UPDATE hosting_accounts SET dns_provider = ?, dns_provider_account_id = ? WHERE id = ?",
+                    (dns_provider, dns_provider_account_id, account_id),
+                )
+                conn.commit()
+                log_audit(conn, "admin", actor["id"], "update_account_dns_provider", "hosting_account", account_id, metadata={
+                    "dns_provider": dns_provider, "dns_provider_account_id": dns_provider_account_id
+                })
+                dns_pol = account_dns_policy(conn, account_id)
+                return self.json_response({
+                    "hosting_account_id": account_id,
+                    "dns_provider": dns_provider,
+                    "dns_provider_account_id": dns_provider_account_id,
+                    "dns_policy": dns_pol,
+                })
+            if path == "/api/admin/jobs" and method == "GET":
+                return self.json_response({"jobs": rows_to_dicts(conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 100").fetchall())})
+            if path == "/api/admin/job-events" and method == "GET":
+                return self.json_response({"job_events": rows_to_dicts(conn.execute("SELECT * FROM job_events ORDER BY id DESC LIMIT 100").fetchall())})
+            if path == "/api/admin/account-stacks" and method == "GET":
+                rows = conn.execute(
+                    """
+                    SELECT s.*, ha.username, ha.status AS account_status
+                    FROM account_stacks s
+                    JOIN hosting_accounts ha ON ha.id = s.account_id
+                    ORDER BY s.id
+                    """
+                ).fetchall()
+                stacks = rows_to_dicts(rows)
+                for stack in stacks:
+                    # Use the same canonicalized runtime exposed by client
+                    # tool launches; raw persisted JSON may be from a legacy
+                    # stack and can contain dotted/localhost file URLs.
+                    stack["runtime"] = account_runtime(conn, stack["account_id"])
+                    stack["services"] = parse_json_field(stack.get("services_json"), [])
+                return self.json_response({"account_stacks": stacks})
+            if path == "/api/admin/agent/run-once" and method == "POST":
+                result = Agent(CONFIG).run_once()
+                return self.json_response({"result": result})
+            if path == "/api/admin/agent/run-all" and method == "POST":
+                result = Agent(CONFIG).run_all()
+                return self.json_response({"results": result})
+            if path == "/api/admin/audit-logs" and method == "GET":
+                raw_page = (query.get("page") or ["1"])[0]
+                raw_page_size = (query.get("page_size") or ["25"])[0]
+                try:
+                    page = max(1, int(raw_page))
+                    page_size = min(100, max(10, int(raw_page_size)))
+                except (TypeError, ValueError):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_audit_log_pagination")
+                action = str((query.get("action") or [""])[0]).strip()
+                actor_type = str((query.get("actor_type") or [""])[0]).strip().lower()
+                search = str((query.get("search") or [""])[0]).strip()
+                if actor_type and actor_type not in {"admin", "user", "system", "public"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_audit_log_actor_type")
+                where = []
+                params = []
+                if action:
+                    where.append("action = ?")
+                    params.append(action)
+                if actor_type:
+                    where.append("actor_type = ?")
+                    params.append(actor_type)
+                if search:
+                    term = f"%{search}%"
+                    where.append("(action LIKE ? OR target_type LIKE ? OR metadata LIKE ? OR ip_address LIKE ?)")
+                    params.extend([term, term, term, term])
+                where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+                total = conn.execute(f"SELECT COUNT(*) AS total FROM audit_logs {where_sql}", params).fetchone()["total"]
+                total_pages = max(1, (total + page_size - 1) // page_size)
+                page = min(page, total_pages)
+                rows = conn.execute(
+                    f"SELECT id, actor_type, actor_id, action, target_type, target_id, ip_address, metadata, created_at "
+                    f"FROM audit_logs {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+                    [*params, page_size, (page - 1) * page_size],
+                ).fetchall()
+                return self.json_response({
+                    "audit_logs": rows_to_dicts(rows),
+                    "pagination": {"page": page, "page_size": page_size, "total": total, "total_pages": total_pages},
+                    "filters": {"action": action, "actor_type": actor_type, "search": search},
+                })
+            if path == "/api/admin/status" and method == "GET":
+                return self.public_status_payload(conn, include_admin=True)
+            if path == "/api/admin/status/incidents" and method == "POST":
+                body = self.read_json()
+                cur = conn.execute(
+                    "INSERT INTO status_incidents(title, severity, state, published) VALUES (?, ?, ?, ?)",
+                    (body.get("title"), body.get("severity", "minor"), body.get("state", "investigating"), 1 if body.get("published", True) else 0),
+                )
+                conn.execute(
+                    "INSERT INTO status_incident_updates(incident_id, state, message) VALUES (?, ?, ?)",
+                    (cur.lastrowid, body.get("state", "investigating"), body.get("message", "Incident opened.")),
+                )
+                log_audit(conn, "admin", actor["id"], "create_status_incident", "status_incident", cur.lastrowid)
+                return self.json_response({"incident_id": cur.lastrowid}, HTTPStatus.CREATED)
+            if path.startswith("/api/admin/status/incidents/") and path.endswith("/updates") and method == "POST":
+                incident_id = int(path.split("/")[-2])
+                body = self.read_json()
+                state = body.get("state", "identified")
+                conn.execute(
+                    "INSERT INTO status_incident_updates(incident_id, state, message) VALUES (?, ?, ?)",
+                    (incident_id, state, body.get("message", "")),
+                )
+                if state == "resolved":
+                    conn.execute("UPDATE status_incidents SET state = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE id = ?", (incident_id,))
+                else:
+                    conn.execute("UPDATE status_incidents SET state = ? WHERE id = ?", (state, incident_id))
+                return self.json_response({"status": "updated"})
+
+            if path == "/api/admin/status/incidents" and method == "GET":
+                incidents = rows_to_dicts(
+                    conn.execute("SELECT * FROM status_incidents ORDER BY id DESC").fetchall()
+                )
+                for inc in incidents:
+                    updates = rows_to_dicts(
+                        conn.execute("SELECT * FROM status_incident_updates WHERE incident_id = ? ORDER BY id ASC", (inc["id"],)).fetchall()
+                    )
+                    inc["updates"] = updates
+                return self.json_response({"incidents": incidents})
+
+            match_inc_del = re.match(r"^/api/admin/status/incidents/(\d+)$", path)
+            if match_inc_del and method == "DELETE":
+                inc_id = int(match_inc_del.group(1))
+                conn.execute("DELETE FROM status_incident_updates WHERE incident_id = ?", (inc_id,))
+                conn.execute("DELETE FROM status_incidents WHERE id = ?", (inc_id,))
+                log_audit(conn, "admin", actor["id"], "delete_status_incident", "status_incident", inc_id)
+                return self.json_response({"deleted": True})
+
+            match_inc_patch = re.match(r"^/api/admin/status/incidents/(\d+)$", path)
+            if match_inc_patch and method == "PATCH":
+                inc_id = int(match_inc_patch.group(1))
+                body = self.read_json()
+                inc = conn.execute("SELECT * FROM status_incidents WHERE id = ?", (inc_id,)).fetchone()
+                if not inc:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "incident_not_found")
+                title = body.get("title", inc["title"])
+                severity = body.get("severity", inc["severity"])
+                state = body.get("state", inc["state"])
+                published = 1 if body.get("published", inc["published"]) else 0
+                
+                resolved_at = inc["resolved_at"]
+                if state == "resolved" and inc["state"] != "resolved":
+                    resolved_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
+                
+                conn.execute(
+                    "UPDATE status_incidents SET title = ?, severity = ?, state = ?, published = ?, resolved_at = ? WHERE id = ?",
+                    (title, severity, state, published, resolved_at, inc_id)
+                )
+                log_audit(conn, "admin", actor["id"], "update_status_incident", "status_incident", inc_id)
+                return self.json_response({"updated": True})
+            if path == "/api/admin/status/maintenance" and method == "POST":
+                body = self.read_json()
+                cur = conn.execute(
+                    """
+                    INSERT INTO status_maintenances(title, state, starts_at, ends_at, message, published)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        body.get("title"),
+                        body.get("state", "scheduled"),
+                        body.get("starts_at"),
+                        body.get("ends_at"),
+                        body.get("message", ""),
+                        1 if body.get("published", True) else 0,
+                    ),
+                )
+                return self.json_response({"maintenance_id": cur.lastrowid}, HTTPStatus.CREATED)
+            if path.startswith("/api/admin/status/maintenance/") and method == "PATCH":
+                maintenance_id = int(path.split("/")[-1])
+                body = self.read_json()
+                state = body.get("state")
+                valid_states = {"scheduled", "in_progress", "verifying", "completed"}
+                if state and state not in valid_states:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_maintenance_state")
+                update_fields = []
+                params = []
+                if state:
+                    update_fields.append("state = ?")
+                    params.append(state)
+                if body.get("message") is not None:
+                    update_fields.append("message = ?")
+                    params.append(body.get("message"))
+                if update_fields:
+                    params.append(maintenance_id)
+                    conn.execute(
+                        "UPDATE status_maintenances SET {} WHERE id = ?".format(", ".join(update_fields)),
+                        tuple(params),
+                    )
+                log_audit(conn, "admin", actor["id"], "update_status_maintenance", "status_maintenance", maintenance_id)
+                updated = conn.execute("SELECT * FROM status_maintenances WHERE id = ?", (maintenance_id,)).fetchone()
+                return self.json_response({"maintenance": row_to_dict(updated)})
+            if path == "/api/admin/status/components" and method == "POST":
+                body = self.read_json()
+                name = clean_text(body.get("name"), "")
+                if not name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_component_name")
+                group_name = clean_text(body.get("group_name"), "Platform")
+                status = body.get("status", "operational")
+                sort_order = int(body.get("sort_order", 0))
+                cur = conn.execute(
+                    "INSERT INTO status_components(name, group_name, status, sort_order) VALUES (?, ?, ?, ?)",
+                    (name, group_name, status, sort_order),
+                )
+                log_audit(conn, "admin", actor["id"], "create_status_component", "status_component", cur.lastrowid)
+                created = conn.execute("SELECT * FROM status_components WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"component": row_to_dict(created)}, HTTPStatus.CREATED)
+            if path.startswith("/api/admin/status/components/") and method == "PATCH":
+                component_id_raw = path.split("/")[-1]
+                body = self.read_json()
+                valid_statuses = {"operational", "degraded", "partial_outage", "major_outage", "maintenance", "unknown"}
+                new_status = body.get("status")
+                if not new_status or new_status not in valid_statuses:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_component_status")
+
+                if component_id_raw == "queue-worker":
+                    conn.execute(
+                        "INSERT INTO system_settings(key, value) VALUES ('status_override_queue_worker', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (new_status,),
+                    )
+                    log_audit(conn, "admin", actor["id"], "update_status_component", "status_component", 0, metadata={"component_id": "queue-worker", "status": new_status})
+                    return self.json_response({"component": {"id": "queue-worker", "name": "Queue Worker", "group_name": "Operations", "status": new_status}})
+
+                try:
+                    component_id = int(component_id_raw)
+                except ValueError:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_component_id")
+
+                component = conn.execute("SELECT * FROM status_components WHERE id = ?", (component_id,)).fetchone()
+                if not component:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "status_component_not_found")
+                conn.execute(
+                    "UPDATE status_components SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (new_status, component_id),
+                )
+                log_audit(conn, "admin", actor["id"], "update_status_component", "status_component", component_id, metadata={"status": new_status})
+                updated = conn.execute("SELECT * FROM status_components WHERE id = ?", (component_id,)).fetchone()
+                return self.json_response({"component": row_to_dict(updated)})
+            if path.startswith("/api/admin/status/checks/") and path.endswith("/run") and method == "POST":
+                check_id = int(path.split("/")[-2])
+                check = conn.execute("SELECT * FROM status_checks WHERE id = ?", (check_id,)).fetchone()
+                if not check:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "status_check_not_found")
+                # In production the agent would perform the real HTTP/SMTP/DNS probe.
+                # For MVP simulate a successful check result.
+                conn.execute(
+                    "INSERT INTO status_check_results(check_id, status, latency_ms, message) VALUES (?, ?, ?, ?)",
+                    (check_id, "up", 10, "Manual check triggered from admin panel"),
+                )
+                return self.json_response({"check_id": check_id, "status": "up"})
+            if path == "/api/admin/nodes" and method == "POST":
+                body = self.read_json()
+                name = clean_text(body.get("name"), "")
+                if not name:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_node_name")
+                hostname = clean_text(body.get("hostname"), "")
+                if not hostname:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_node_hostname")
+                if conn.execute("SELECT id FROM nodes WHERE name = ?", (name,)).fetchone():
+                    raise ApiError(HTTPStatus.CONFLICT, "node_name_already_exists")
+                quota_backend = body.get("quota_backend", "dev-simulator")
+                cur = conn.execute(
+                    "INSERT INTO nodes(name, hostname, status, quota_backend) VALUES (?, ?, ?, ?)",
+                    (name, hostname, "online", quota_backend),
+                )
+                log_audit(conn, "admin", actor["id"], "register_node", "node", cur.lastrowid, metadata={"name": name, "hostname": hostname})
+                created = conn.execute("SELECT * FROM nodes WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return self.json_response({"node": row_to_dict(created)}, HTTPStatus.CREATED)
+            if path == "/api/admin/hosting-accounts" and method == "POST":
+                body = self.read_json()
+                user_id = int(body.get("user_id", 0))
+                plan_id = int(body.get("plan_id", 0))
+                node_id = int(body.get("node_id", 0))
+                user = conn.execute("SELECT * FROM users WHERE id = ? AND status = 'active'", (user_id,)).fetchone()
+                if not user:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "user_not_found")
+                plan = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+                if not plan:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "plan_not_found")
+                node = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+                if not node:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "node_not_found")
+                existing_count = conn.execute(
+                    "SELECT COUNT(*) AS count FROM hosting_accounts WHERE user_id = ?", (user_id,)
+                ).fetchone()["count"]
+                username = "u{:06d}".format(user_id) if existing_count == 0 else "u{:06d}x{}".format(user_id, existing_count)
+                base_path = str(CONFIG.account_root / username)
+                cur = conn.execute(
+                    """
+                    INSERT INTO hosting_accounts(
+                      user_id, plan_id, node_id, username, base_path, status,
+                      opcache_enabled, object_cache_enabled, reverse_proxy_cache_enabled,
+                      litespeed_cache_enabled, cloudflare_cache_enabled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, plan_id, node_id, username, base_path, "provisioning", 1, 0, 0, 1, 1),
+                )
+                account_id = cur.lastrowid
+                domain = get_provisioning_test_domain(username, request_headers=self.headers)
+                document_root = str(CONFIG.account_root / username / "domains" / domain / "public_html")
+                website_id = conn.execute(
+                    """
+                    INSERT INTO websites(account_id, domain, document_root, php_version, ssl_status, status, analytics_enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (account_id, domain, document_root, "8.3", "missing", "active", default_analytics_enabled(conn, account_id)),
+                ).lastrowid
+                dns_assignment = default_domain_dns_assignment(conn, account_id)
+                domain_id = conn.execute(
+                    """
+                    INSERT INTO domains(
+                      account_id, name, kind, status, linked_website_id, dns_provider,
+                      dns_provider_account_id, nameservers_json, dns_status, provider_state_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        domain,
+                        "managed",
+                        "active",
+                        website_id,
+                        dns_assignment["dns_provider"],
+                        dns_assignment["dns_provider_account_id"],
+                        json.dumps(dns_assignment["nameservers"]),
+                        dns_assignment["dns_status"],
+                        json.dumps(dns_assignment["provider_state"], sort_keys=True),
+                    ),
+                ).lastrowid
+                dkim_material = generate_dkim_material("mango")
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO mail_domains(
+                      account_id, domain_id, spf_policy, dkim_private_key, dkim_public_key, dkim_selector,
+                      dmarc_policy, catch_all_enabled, catch_all_destination, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        domain_id,
+                        recommended_spf_record(),
+                        dkim_material["private_key"],
+                        dkim_material["public_key"],
+                        dkim_material["selector"],
+                        recommended_dmarc_record(domain),
+                        0,
+                        "",
+                        "active",
+                    ),
+                )
+                website_mail_host = mail_dns_target_for_account(username)
+                seed_website_dns_records(conn, domain_id, domain, website_mail_host, dkim_material)
+                job_id = enqueue_agent_job(conn, "provision_hosting_account", "hosting_account", account_id, {"admin_create": True})
+                log_audit(conn, "admin", actor["id"], "create_hosting_account", "hosting_account", account_id, metadata={"user_id": user_id, "plan_id": plan_id})
+                created = conn.execute(
+                    """
+                    SELECT ha.*, u.email AS user_email, p.name AS plan_name, n.name AS node_name
+                    FROM hosting_accounts ha
+                    JOIN users u ON u.id = ha.user_id
+                    JOIN plans p ON p.id = ha.plan_id
+                    JOIN nodes n ON n.id = ha.node_id
+                    WHERE ha.id = ?
+                    """,
+                    (account_id,),
+                ).fetchone()
+                return self.json_response({"hosting_account": row_to_dict(created), "job_id": job_id}, HTTPStatus.CREATED)
+            if path.startswith("/api/admin/jobs/") and path.endswith("/retry") and method == "POST":
+                job_id = int(path.split("/")[-2])
+                job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                if not job:
+                    raise ApiError(HTTPStatus.NOT_FOUND, "job_not_found")
+                if job["status"] not in {"failed", "queued"}:
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "job_not_retryable")
+                conn.execute(
+                    "UPDATE jobs SET status = 'queued', result = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (job_id,),
+                )
+                log_audit(conn, "admin", actor["id"], "retry_job", "job", job_id)
+                return self.json_response({"job_id": job_id, "status": "queued"})
+
+        raise ApiError(HTTPStatus.NOT_FOUND, "unknown_admin_route")
+
+    def public_status(self, path):
+        with connect(CONFIG.db_path) as conn:
+            if path in {"/api/public/status", "/api/public/status/components", "/api/public/status/incidents", "/api/public/status/maintenance", "/api/public/status/history"}:
+                return self.public_status_payload(conn)
+            if path == "/api/public/status/feed.atom":
+                payload = build_status_payload(conn)
+                body = build_atom_feed(payload)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/atom+xml; charset=utf-8")
+                self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+                self.end_headers()
+                self.wfile.write(body.encode("utf-8"))
+                return None
+        raise ApiError(HTTPStatus.NOT_FOUND, "unknown_public_status_route")
+
+    def public_status_payload(self, conn, include_admin=False):
+        payload = build_status_payload(conn)
+        if include_admin:
+            payload["checks"] = rows_to_dicts(conn.execute("SELECT * FROM status_checks ORDER BY id").fetchall())
+        return self.json_response(payload)
+
+    def svg_response(self, svg_text, status=HTTPStatus.OK):
+        body = svg_text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.record_access_log(status, len(body))
+
+    def read_json(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (ValueError, TypeError):
+            length = 0
+        if length == 0:
+            return {}
+        try:
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_json")
+
+    def json_response(self, payload, status=HTTPStatus.OK, headers=None):
+        body = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        if isinstance(payload, dict) and "access_token" in payload:
+            token = payload["access_token"]
+            for cookie_header in auth_cookie_headers(token, self.headers.get("Host", "localhost")):
+                self.send_header("Set-Cookie", cookie_header)
+        for name, value in headers or []:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+        self.record_access_log(status, len(body))
+
+    def bytes_response(self, body, content_type, filename, status=HTTPStatus.OK):
+        safe_name = Path(str(filename or "download")).name
+        fallback = safe_name.encode("ascii", "ignore").decode("ascii") or "download"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(safe_name, safe='')}")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.record_access_log(status, len(body))
+
+    def file_response(self, path, content_type, status=HTTPStatus.OK):
+        size = path.stat().st_size
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                self.wfile.write(chunk)
+        self.record_access_log(status, size)
+
+    def serve_file(self, path):
+        if not path.exists() or not path.is_file():
+            return self.json_response({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        suffix = path.suffix.lower()
+        content_type = {
+            ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".svg": "image/svg+xml",
+        }.get(suffix, "application/octet-stream")
+        data = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache, must-revalidate")
+        self.end_headers()
+        self.wfile.write(data)
+        self.record_access_log(HTTPStatus.OK, len(data))
+
+    def record_access_log(self, status, bytes_sent):
+        # Panel pages and API polling are not hosted-site traffic. Recording
+        # every admin response here creates a SQLite write transaction for
+        # each dashboard request and can contend with worker/backups.
+        if getattr(self.server, "panel", "combined") in {"admin", "client", "reseller"}:
+            return
+        domain = request_domain(self.headers)
+        if not domain:
+            return
+        try:
+            website = panel_access_log_website(domain)
+            if not website:
+                return
+            log_path = Path(website["document_root"]).parent / "logs" / "Zeropanel-access.jsonl"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "account_id": int(website["account_id"]),
+                "website_id": int(website["id"]),
+                "domain": website["domain"],
+                "method": self.command[:16],
+                "path": self.path[:2048],
+                "status_code": int(status),
+                "bytes_sent": int(bytes_sent or 0),
+                "ip_address": client_ip(self)[:80],
+                "country": request_country(self.headers, client_ip(self)),
+                "user_agent": self.headers.get("User-Agent", "")[:512],
+                "referer": self.headers.get("Referer", "")[:1024],
+            }
+            with log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+        except Exception as exc:
+            print(f"analytics log failed: {exc}")
+
+
+def require_account(account):
+    if not account:
+        raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_required")
+
+
+def registrar_settings(conn, provider):
+    settings = parse_json_field(provider["settings_json"], {})
+    credential = conn.execute("SELECT encrypted_secret FROM registrar_credentials WHERE provider_id = ?", (provider["id"],)).fetchone()
+    if credential and credential["encrypted_secret"]:
+        settings["api_key"] = decrypt_secret(credential["encrypted_secret"], CONFIG.jwt_secret)
+        settings["api_token"] = settings["api_key"]
+    return settings
+
+
+def registrar_account_settings(conn, account):
+    """Build adapter settings for a first-class registrar account."""
+    settings = parse_json_field(account["settings_json"], {}) if "settings_json" in account.keys() else {}
+    encrypted_secret = account["encrypted_secret"]
+    if account["dns_provider_account_id"]:
+        linked = conn.execute(
+            "SELECT c.encrypted_secret, a.external_account_id FROM dns_provider_credentials c JOIN dns_provider_accounts a ON a.id = c.provider_account_id JOIN dns_providers p ON p.id = a.provider_id WHERE a.id = ? AND p.key = 'cloudflare'",
+            (account["dns_provider_account_id"],),
+        ).fetchone()
+        encrypted_secret = linked["encrypted_secret"] if linked else ""
+        if linked and linked["external_account_id"]:
+            settings["cloudflare_account_id"] = linked["external_account_id"]
+    if encrypted_secret:
+        secret = decrypt_secret(encrypted_secret, CONFIG.jwt_secret)
+        settings["api_key"] = secret
+        settings["api_token"] = secret
+    if account["account_identifier"]:
+        settings.setdefault("reseller_id", account["account_identifier"])
+        settings.setdefault("username", account["account_identifier"])
+    return settings
+
+
+def registrar_account_payload(row):
+    item = row_to_dict(row)
+    item["settings"] = parse_json_field(item.pop("settings_json", "{}"), {})
+    item.pop("encrypted_secret", None)
+    item["secret_configured"] = bool(item.pop("secret_label", ""))
+    item["balance"] = float(item["balance"]) if item.get("balance") is not None else None
+    balances = parse_json_field(item.pop("balances_json", "[]"), [])
+    item["balances"] = [
+        {"balance": float(entry.get("balance")), "currency": str(entry.get("currency") or "")}
+        for entry in balances
+        if isinstance(entry, dict) and entry.get("balance") not in (None, "")
+    ]
+    return item
+
+
+def registrar_dashboard_payload(conn, query=None):
+    query = query or {}
+    search = str((query.get("search") or [""])[0]).strip().lower()
+    provider_filter = str((query.get("provider") or [""])[0]).strip().lower()
+    sort = str((query.get("sort") or ["expiry"])[0]).strip().lower()
+    direction = str((query.get("direction") or ["asc"])[0]).strip().lower()
+    accounts_rows = conn.execute(
+        """
+        SELECT ra.*, rp.key AS provider_key, rp.display_name AS provider_name,
+               da.display_name AS linked_dns_account_name
+        FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id
+        LEFT JOIN dns_provider_accounts da ON da.id = ra.dns_provider_account_id
+        WHERE ra.status != 'deleted'
+        ORDER BY rp.display_name, ra.label
+        """
+    ).fetchall()
+    accounts = [registrar_account_payload(row) for row in accounts_rows]
+    for item, row in zip(accounts, accounts_rows):
+        item["provider_key"] = row["provider_key"]
+        item["provider_name"] = row["provider_name"]
+
+    domain_rows = conn.execute(
+        """
+        SELECT r.*, ra.label AS account_label, ra.account_identifier,
+               rp.key AS provider_key, rp.display_name AS provider_name,
+               d.id AS local_domain_id, d.registrar_status AS local_status,
+               u.email AS owner_email, ha.username,
+               cu.id AS client_user_id, cu.email AS client_email, cu.full_name AS client_name
+        FROM registrar_domain_records r
+        JOIN registrar_accounts ra ON ra.id = r.registrar_account_id
+        JOIN registrar_providers rp ON rp.id = ra.provider_id
+        LEFT JOIN domains d ON d.id = r.domain_id
+        LEFT JOIN hosting_accounts ha ON ha.id = d.account_id
+        LEFT JOIN users u ON u.id = ha.user_id
+        LEFT JOIN users cu ON cu.id = r.client_user_id
+        ORDER BY r.domain_name COLLATE NOCASE
+        """
+    ).fetchall()
+    seen = set()
+    domains = []
+    for row in domain_rows:
+        item = row_to_dict(row)
+        item["nameservers"] = parse_json_field(item.pop("nameservers_json", "[]"), [])
+        item["whois"] = parse_json_field(item.pop("whois_json", "{}"), {})
+        item["metadata"] = parse_json_field(item.pop("metadata_json", "{}"), {})
+        item["auto_renew"] = bool(item.get("auto_renew"))
+        item["transfer_lock"] = bool(item.get("transfer_lock"))
+        item["auth_code_available"] = bool(item.get("auth_code_available"))
+        item["client_user_id"] = item.get("client_user_id")
+        item["owner_email"] = item.get("client_email") or item.get("owner_email")
+        item["client_name"] = item.get("client_name") or ""
+        domains.append(item)
+        seen.add((str(item["domain_name"]).lower(), item["registrar_account_id"]))
+
+    # Domains assigned before the inventory table was introduced remain
+    # visible in the control panel until their registrar is synchronized.
+    legacy_rows = conn.execute(
+        """
+        SELECT d.*, rp.key AS provider_key, rp.display_name AS provider_name,
+               u.email AS owner_email, ha.username
+        FROM domains d JOIN registrar_providers rp ON rp.id = d.registrar_provider_id
+        JOIN hosting_accounts ha ON ha.id = d.account_id JOIN users u ON u.id = ha.user_id
+        WHERE d.registrar_provider_id IS NOT NULL
+        """
+    ).fetchall()
+    for row in legacy_rows:
+        key = (str(row["name"]).lower(), row["registrar_account_id"] if "registrar_account_id" in row.keys() else None)
+        if any(str(item["domain_name"]).lower() == str(row["name"]).lower() for item in domains):
+            continue
+        domains.append({
+            "id": None, "domain_name": row["name"], "provider_key": row["provider_key"],
+            "provider_name": row["provider_name"], "account_label": "Unassigned legacy account",
+            "status": row["registrar_status"], "local_domain_id": row["id"],
+            "owner_email": row["owner_email"], "username": row["username"],
+            "expiry_at": None, "registered_at": row["created_at"], "auto_renew": False,
+            "transfer_lock": False, "auth_code_available": False, "nameservers": parse_json_field(row["nameservers_json"], []),
+            "synced_at": row["last_registrar_sync_at"],
+        })
+
+    if provider_filter:
+        domains = [item for item in domains if str(item.get("provider_key", "")).lower() == provider_filter]
+    if search:
+        domains = [item for item in domains if search in str(item.get("domain_name", "")).lower() or search in str(item.get("owner_email", "")).lower() or search in str(item.get("account_label", "")).lower()]
+    today = datetime.now(timezone.utc).date()
+    expiring = 0
+    for item in domains:
+        try:
+            expiry_value = str(item.get("expiry_at") or "").strip()
+            slash_date = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})", expiry_value)
+            if slash_date:
+                expiry = datetime.strptime(slash_date.group(0), "%m/%d/%Y").date()
+            elif re.match(r"^\d{9,13}(?:\.\d+)?$", expiry_value):
+                timestamp = float(expiry_value)
+                if timestamp > 100000000000:
+                    timestamp /= 1000
+                expiry = datetime.fromtimestamp(timestamp, timezone.utc).date()
+            else:
+                expiry = datetime.fromisoformat(expiry_value.replace("Z", "+00:00")).date()
+            item["days_to_expiry"] = (expiry - today).days
+            if 0 <= item["days_to_expiry"] <= 30:
+                expiring += 1
+        except (TypeError, ValueError):
+            item["days_to_expiry"] = None
+
+    reverse = direction == "desc"
+    if sort == "domain":
+        domains.sort(key=lambda item: str(item.get("domain_name", "")).lower(), reverse=reverse)
+    elif sort == "provider":
+        domains.sort(key=lambda item: (str(item.get("provider_name", "")).lower(), str(item.get("domain_name", "")).lower()), reverse=reverse)
+    else:
+        # Keep domains without an expiry date at the end in both directions.
+        sortable = [item for item in domains if item.get("days_to_expiry") is not None]
+        missing_expiry = [item for item in domains if item.get("days_to_expiry") is None]
+        sortable.sort(key=lambda item: (item.get("days_to_expiry"), str(item.get("domain_name", "")).lower()), reverse=reverse)
+        domains = sortable + missing_expiry
+    # Balances are not additive across currencies. Keep each currency as an
+    # independent total instead of presenting a misleading grand total.
+    balance_totals = {}
+    for account in accounts:
+        account_balances = account.get("balances") or []
+        if not account_balances and account.get("balance") is not None:
+            account_balances = [{"balance": account["balance"], "currency": account.get("currency") or "Unknown"}]
+        for balance in account_balances:
+            currency = str(balance.get("currency") or "Unknown").upper()
+            try:
+                amount = float(balance.get("balance"))
+            except (TypeError, ValueError):
+                continue
+            balance_totals[currency] = round(balance_totals.get(currency, 0) + amount, 2)
+    balances = [{"currency": currency, "balance": amount} for currency, amount in sorted(balance_totals.items())]
+    return {
+        "stats": {"managed_domains": len(domains), "expiring_30_days": expiring, "registrar_accounts": len(accounts), "configured_providers": sum(1 for item in accounts if item["secret_configured"]), "balances": balances, "total_balance": None},
+        "accounts": accounts,
+        "domains": domains,
+        "providers": [row_to_dict(row) for row in conn.execute("SELECT id,key,display_name,status FROM registrar_providers ORDER BY display_name").fetchall()],
+    }
+
+
+def default_registrar_nameservers(conn):
+    provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+    config = parse_json_field(provider["config_json"], {}) if provider else {}
+    return config.get("nameservers") or ["ns1.mango.test", "ns2.mango.test"]
+
+
+def update_domain_registrar_nameservers(conn, domain, nameservers, source="custom"):
+    result = {"status": "updated_locally", "nameservers": nameservers}
+    registrar_account_id = domain["registrar_account_id"] if "registrar_account_id" in domain.keys() else None
+    if registrar_account_id:
+        account = conn.execute(
+            "SELECT ra.*, rp.key AS provider_key FROM registrar_accounts ra JOIN registrar_providers rp ON rp.id = ra.provider_id WHERE ra.id = ? AND ra.status = 'active'",
+            (registrar_account_id,),
+        ).fetchone()
+        if not account:
+            raise ApiError(HTTPStatus.BAD_GATEWAY, "registrar_account_unavailable")
+        try:
+            order_id = domain["registrar_domain_id"] if "registrar_domain_id" in domain.keys() else None
+            result = registrar_for(account["provider_key"], registrar_account_settings(conn, account)).update_nameservers(domain["name"], nameservers, order_id)
+        except (RegistrarError, NotImplementedError) as exc:
+            raise ApiError(HTTPStatus.BAD_GATEWAY, "registrar_nameserver_update_failed: " + str(exc)[:180]) from exc
+        conn.execute("UPDATE domains SET nameservers_json = ?, nameserver_source = ?, registrar_state_json = ?, last_registrar_sync_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(nameservers), source, json.dumps(result), domain["id"]))
+        return result
+    reg_id = domain["registrar_provider_id"] if "registrar_provider_id" in domain.keys() else None
+    if reg_id:
+        provider = conn.execute("SELECT * FROM registrar_providers WHERE id = ? AND status = 'active'", (reg_id,)).fetchone()
+        if provider:
+            try:
+                order_id = domain["registrar_domain_id"] if "registrar_domain_id" in domain.keys() else None
+                result = registrar_for(provider["key"], registrar_settings(conn, provider)).update_nameservers(domain["name"], nameservers, order_id)
+            except RegistrarError as exc:
+                raise ApiError(HTTPStatus.BAD_GATEWAY, "registrar_nameserver_update_failed: " + str(exc)[:180])
+    conn.execute("UPDATE domains SET nameservers_json = ?, nameserver_source = ?, registrar_state_json = ?, last_registrar_sync_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(nameservers), source, json.dumps(result), domain["id"]))
+    return result
+
+
+def register_domain_with_provider(conn, domain, nameservers):
+    provider = conn.execute("SELECT * FROM registrar_providers WHERE id = ? AND status = 'active'", (domain["registrar_provider_id"],)).fetchone()
+    if not provider:
+        raise RegistrarError("registrar_provider_not_found")
+    return registrar_for(provider["key"], registrar_settings(conn, provider)).register(domain["name"], nameservers)
+
+
+def require_active_account(account):
+    require_account(account)
+    if account["status"] in {"suspended", "hard_suspended"}:
+        message = "hosting_account_hard_suspended" if account["status"] == "hard_suspended" else "hosting_account_suspended"
+        raise ApiError(HTTPStatus.FORBIDDEN, message)
+    if account["status"] in {"provisioning", "rebuilding"}:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "account_maintenance_in_progress")
+
+
+def account_analytics_policy(conn, account_id):
+    plan = conn.execute(
+        "SELECT COALESCE(analytics_mode, 'on') AS analytics_mode FROM hosting_accounts ha JOIN plans p ON p.id = ha.plan_id WHERE ha.id = ?",
+        (account_id,),
+    ).fetchone()
+    mode = str(plan["analytics_mode"] if plan else "on").lower()
+    if mode not in {"off", "on", "disabled"}:
+        mode = "on"
+    return mode, mode != "disabled"
+
+
+def default_analytics_enabled(conn, account_id):
+    mode, _available = account_analytics_policy(conn, account_id)
+    return 0 if mode in {"off", "disabled"} else 1
+
+
+def require_plan_capacity(conn, account_id, resource_table, plan_column, error):
+    allowed_tables = {
+        "websites": "websites",
+        "databases": "databases",
+        "mailboxes": "mailboxes",
+        "cron_jobs": "cron_jobs",
+        "subdomains": "websites",
+    }
+    allowed_columns = {
+        "max_websites": "max_websites",
+        "max_databases": "max_databases",
+        "max_mailboxes": "max_mailboxes",
+        "max_cron_jobs": "max_cron_jobs",
+        "max_subdomains": "max_subdomains",
+    }
+    table = allowed_tables.get(resource_table)
+    column = allowed_columns.get(plan_column)
+    if not table or not column:
+        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid_plan_limit")
+    row = conn.execute(
+        f"""
+        SELECT p.{column} AS limit_value, COUNT(r.id) AS used
+        FROM hosting_accounts ha
+        JOIN plans p ON p.id = ha.plan_id
+        LEFT JOIN {table} r ON r.account_id = ha.id
+          {"AND r.is_subdomain = 1" if resource_table == "subdomains" else ""}
+        WHERE ha.id = ?
+        GROUP BY ha.id
+        """,
+        (account_id,),
+    ).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+    if int(row["used"]) >= int(row["limit_value"]):
+        raise ApiError(HTTPStatus.FORBIDDEN, error)
+
+
+def require_inode_capacity(conn, account_id):
+    row = conn.execute(
+        """
+        SELECT ha.inodes_used, p.inode_limit
+        FROM hosting_accounts ha
+        JOIN plans p ON p.id = ha.plan_id
+        WHERE ha.id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    if not row:
+        return
+    inodes_used = int(row["inodes_used"] or 0)
+    inode_limit = int(row["inode_limit"] or 0)
+    if inode_limit > 0 and inodes_used >= inode_limit:
+        raise ApiError(HTTPStatus.FORBIDDEN, "inode_quota_exceeded")
+
+
+def parse_json_field(value, fallback):
+    try:
+        return json.loads(value) if value else fallback
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def dns_provider_public(row):
+    item = row_to_dict(row)
+    item["config"] = parse_json_field(item.pop("config_json", None), {})
+    item["capabilities"] = parse_json_field(item.pop("capabilities_json", None), {})
+    return item
+
+
+def dns_provider_account_public(row):
+    item = row_to_dict(row)
+    item["metadata"] = parse_json_field(item.pop("metadata_json", None), {})
+    item["has_secret"] = bool(item.pop("encrypted_secret", ""))
+    item["credential_status"] = item.pop("credential_status", None) or "missing"
+    item["secret_label"] = item.pop("secret_label", "") or ""
+    item["last_validated_at"] = item.pop("last_validated_at", None)
+    item["validation"] = parse_json_field(item.pop("validation_json", None), {})
+    return item
+
+
+def dns_provider_by_key(conn, key):
+    return conn.execute("SELECT * FROM dns_providers WHERE key = ?", (key,)).fetchone()
+
+
+def dns_settings_payload(conn):
+    providers = [dns_provider_public(row) for row in conn.execute("SELECT * FROM dns_providers ORDER BY id").fetchall()]
+    provider_by_id = {item["id"]: item for item in providers}
+    assignment = conn.execute(
+        """
+        SELECT a.*, p.key AS provider_key
+        FROM dns_provider_assignments a
+        JOIN dns_providers p ON p.id = a.provider_id
+        WHERE a.scope_type = 'global' AND a.scope_id = 0
+        """
+    ).fetchone()
+    global_mode = assignment["provider_key"] if assignment else DNS_PROVIDER_LOCAL_POWERDNS
+    policy = parse_json_field(assignment["policy_json"], {}) if assignment else {"mode": global_mode}
+    account_rows = conn.execute(
+        """
+        SELECT a.*, p.key AS provider_key, p.display_name AS provider_name,
+               c.encrypted_secret, c.status AS credential_status, c.secret_label,
+               c.last_validated_at, c.validation_json
+        FROM dns_provider_accounts a
+        JOIN dns_providers p ON p.id = a.provider_id
+        LEFT JOIN dns_provider_credentials c ON c.provider_account_id = a.id
+        ORDER BY p.id, a.display_name
+        """
+    ).fetchall()
+    accounts = [dns_provider_account_public(row) for row in account_rows]
+    all_hosting_accounts = conn.execute("SELECT * FROM hosting_accounts").fetchall()
+    all_domains = conn.execute("SELECT * FROM domains").fetchall()
+    for acct in accounts:
+        ha_count = 0
+        for ha in all_hosting_accounts:
+            pol = account_dns_policy(conn, ha)
+            if pol["dns_provider"] == DNS_PROVIDER_CLOUDFLARE and pol["dns_provider_account_id"] == acct["id"]:
+                ha_count += 1
+        acct["hosting_account_count"] = ha_count
+
+        panel_dom_count = 0
+        for dom_row in all_domains:
+            dom_keys = dom_row.keys() if hasattr(dom_row, "keys") else dom_row
+            dom_provider = dom_row["dns_provider"] if "dns_provider" in dom_keys else None
+            dom_acc_id = dom_row["dns_provider_account_id"] if "dns_provider_account_id" in dom_keys else None
+            if dom_provider == DNS_PROVIDER_CLOUDFLARE and dom_acc_id:
+                if dom_acc_id == acct["id"]:
+                    panel_dom_count += 1
+            else:
+                ha = next((h for h in all_hosting_accounts if h["id"] == dom_row["account_id"]), None)
+                if ha:
+                    pol = account_dns_policy(conn, ha)
+                    if pol["dns_provider"] == DNS_PROVIDER_CLOUDFLARE and pol["dns_provider_account_id"] == acct["id"]:
+                        panel_dom_count += 1
+        acct["panel_domain_count"] = panel_dom_count
+
+        meta = acct.get("metadata") or {}
+        cached_remote_count = meta.get("remote_zone_count") if meta.get("remote_zone_count") is not None else meta.get("zone_count")
+        if cached_remote_count is not None:
+            acct["zone_count"] = int(cached_remote_count)
+            acct["remote_zone_count"] = int(cached_remote_count)
+        else:
+            acct["zone_count"] = panel_dom_count
+            acct["remote_zone_count"] = panel_dom_count
+    local_provider = next((provider for provider in providers if provider["key"] == DNS_PROVIDER_LOCAL_POWERDNS), None)
+    latest_health_rows = conn.execute(
+        """
+        SELECT h.*
+        FROM dns_provider_health_checks h
+        JOIN (
+          SELECT provider_id, COALESCE(provider_account_id, 0) AS account_key, MAX(id) AS max_id
+          FROM dns_provider_health_checks
+          GROUP BY provider_id, COALESCE(provider_account_id, 0)
+        ) latest ON latest.max_id = h.id
+        ORDER BY h.id DESC
+        """
+    ).fetchall()
+    health_checks = []
+    for row in rows_to_dicts(latest_health_rows):
+        row["details"] = parse_json_field(row.pop("details_json", None), {})
+        row["provider_key"] = provider_by_id.get(row["provider_id"], {}).get("key")
+        health_checks.append(row)
+    return {
+        "global_mode": global_mode,
+        "global_policy": policy,
+        "local": local_provider["config"] if local_provider else {},
+        "providers": providers,
+        "accounts": accounts,
+        "health_checks": health_checks,
+    }
+
+
+def update_global_dns_assignment(conn, provider_key, policy):
+    provider = dns_provider_by_key(conn, provider_key)
+    if not provider:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider")
+    conn.execute(
+        """
+        INSERT INTO dns_provider_assignments(scope_type, scope_id, provider_id, status, policy_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+          provider_id = excluded.provider_id,
+          provider_account_id = excluded.provider_account_id,
+          status = excluded.status,
+          policy_json = excluded.policy_json,
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        ("global", 0, provider["id"], "active", json.dumps(policy, sort_keys=True)),
+    )
+
+
+def validate_dns_settings_payload(body, current):
+    mode = str(body.get("global_mode") or body.get("mode") or current.get("global_mode") or DNS_PROVIDER_LOCAL_POWERDNS).strip()
+    if mode not in DNS_PROVIDER_KEYS:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider")
+    local_body = body.get("local") or {}
+    current_local = current.get("local") or {}
+    raw_nameservers = local_body.get("nameservers")
+    if raw_nameservers is None:
+        raw_nameservers = [
+            local_body.get("nameserver_1", (current_local.get("nameservers") or ["ns1.mango.test"])[0]),
+            local_body.get("nameserver_2", (current_local.get("nameservers") or ["ns1.mango.test", "ns2.mango.test"])[1]),
+        ]
+    nameservers = []
+    for value in raw_nameservers:
+        nameservers.append(sanitize_domain(value))
+    if len(nameservers) < 2:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "at_least_two_nameservers_required")
+    public_ipv4 = clean_text(local_body.get("public_ipv4", current_local.get("public_ipv4", "127.0.0.1")), "")
+    public_ipv6 = clean_text(local_body.get("public_ipv6", current_local.get("public_ipv6", "")), "")
+    for value, error in [(public_ipv4, "invalid_public_ipv4"), (public_ipv6, "invalid_public_ipv6")]:
+        if value:
+            try:
+                ipaddress.ip_address(value)
+            except ValueError as exc:
+                raise ApiError(HTTPStatus.BAD_REQUEST, error) from exc
+    default_ttl = positive_int(local_body.get("default_ttl", current_local.get("default_ttl", 300)), "invalid_dns_ttl", minimum=60, maximum=86400)
+    local_config = {
+        "nameservers": nameservers,
+        "public_ipv4": public_ipv4,
+        "public_ipv6": public_ipv6,
+        "soa_email": clean_text(local_body.get("soa_email", current_local.get("soa_email", "hostmaster.mango.test")), "hostmaster.mango.test"),
+        "default_ttl": default_ttl,
+        "glue_record_notes": clean_text(
+            local_body.get("glue_record_notes", current_local.get("glue_record_notes", "")),
+            "Register glue records for the configured nameserver hostnames at the registrar.",
+        ),
+    }
+    return {
+        "global_mode": mode,
+        "local": local_config,
+        "policy": {
+            "mode": mode,
+            "local_nameservers": nameservers,
+            "phase": "foundation",
+        },
+    }
+
+
+def plan_dns_policy(plan):
+    return {
+        "default_provider": plan["dns_default_provider"] if "dns_default_provider" in plan.keys() else DNS_PROVIDER_LOCAL_POWERDNS,
+        "allowed_providers": parse_json_field(plan["dns_allowed_providers_json"] if "dns_allowed_providers_json" in plan.keys() else "", [DNS_PROVIDER_LOCAL_POWERDNS]),
+        "allowed_provider_account_ids": parse_json_field(plan["dns_allowed_provider_accounts_json"] if "dns_allowed_provider_accounts_json" in plan.keys() else "", []),
+        "default_provider_account_id": plan["dns_default_provider_account_id"] if "dns_default_provider_account_id" in plan.keys() else None,
+        "customer_editable": bool(plan["dns_customer_editable"]) if "dns_customer_editable" in plan.keys() else True,
+        "max_records_per_domain": int(plan["dns_max_records_per_domain"]) if "dns_max_records_per_domain" in plan.keys() else 100,
+        "allowed_record_types": parse_json_field(plan["dns_allowed_record_types_json"] if "dns_allowed_record_types_json" in plan.keys() else "", DEFAULT_DNS_RECORD_TYPES),
+        "min_ttl": int(plan["dns_min_ttl"]) if "dns_min_ttl" in plan.keys() else 60,
+        "wildcard_records_allowed": bool(plan["dns_wildcard_records_allowed"]) if "dns_wildcard_records_allowed" in plan.keys() else True,
+        "cloudflare_proxy_allowed": bool(plan["dns_cloudflare_proxy_allowed"]) if "dns_cloudflare_proxy_allowed" in plan.keys() else False,
+        "dnssec_allowed": bool(plan["dns_dnssec_allowed"]) if "dns_dnssec_allowed" in plan.keys() else False,
+        "dnssec_required": bool(plan["dns_dnssec_required"]) if "dns_dnssec_required" in plan.keys() else False,
+    }
+
+
+def dns_provider_options_for_plan(conn, plan):
+    """Return provider/account choices that a plan permits its customers to use."""
+    policy = plan_dns_policy(plan) if plan else {
+        "default_provider": DNS_PROVIDER_LOCAL_POWERDNS,
+        "allowed_providers": [DNS_PROVIDER_LOCAL_POWERDNS],
+        "allowed_provider_account_ids": [],
+        "default_provider_account_id": None,
+    }
+    allowed_keys = [key for key in policy["allowed_providers"] if key in DNS_PROVIDER_KEYS]
+    account_ids = {int(value) for value in policy.get("allowed_provider_account_ids", []) if str(value).isdigit()}
+    providers = []
+    for row in conn.execute("SELECT * FROM dns_providers ORDER BY id").fetchall():
+        item = dns_provider_public(row)
+        if item["key"] in allowed_keys:
+            providers.append(item)
+    accounts = []
+    for row in conn.execute(
+        """
+        SELECT a.*, p.key AS provider_key, p.display_name AS provider_name,
+               c.encrypted_secret, c.status AS credential_status, c.secret_label,
+               c.last_validated_at, c.validation_json
+        FROM dns_provider_accounts a
+        JOIN dns_providers p ON p.id = a.provider_id
+        LEFT JOIN dns_provider_credentials c ON c.provider_account_id = a.id
+        WHERE a.status = 'active'
+        ORDER BY p.id, a.display_name
+        """
+    ).fetchall():
+        if row["provider_key"] != DNS_PROVIDER_CLOUDFLARE:
+            continue
+        if account_ids and row["id"] not in account_ids:
+            continue
+        accounts.append(dns_provider_account_public(row))
+    return {
+        "providers": providers,
+        "accounts": accounts,
+        "default_provider": policy["default_provider"],
+        "default_provider_account_id": policy["default_provider_account_id"],
+        "customer_editable": policy["customer_editable"],
+    }
+
+
+def account_dns_policy(conn, account_or_id):
+    account_id = None
+    if isinstance(account_or_id, (int, str)):
+        account_id = optional_positive_int(account_or_id)
+    elif isinstance(account_or_id, dict):
+        account_id = account_or_id.get("id")
+    elif hasattr(account_or_id, "__getitem__"):
+        try:
+            account_id = account_or_id["id"]
+        except (KeyError, IndexError, TypeError):
+            account_id = None
+
+    if account_id:
+        account = conn.execute(
+            """
+            SELECT ha.*, p.dns_default_provider AS plan_dns_provider,
+                   p.dns_default_provider_account_id AS plan_dns_account_id,
+                   p.dns_allowed_provider_accounts_json AS plan_dns_allowed_accounts
+            FROM hosting_accounts ha
+            LEFT JOIN plans p ON p.id = ha.plan_id
+            WHERE ha.id = ?
+            """,
+            (int(account_id),),
+        ).fetchone()
+    else:
+        account = account_or_id
+
+    if not account:
+        return {
+            "dns_provider": DNS_PROVIDER_LOCAL_POWERDNS,
+            "dns_provider_account_id": None,
+            "source": "global",
+            "display_label": "Local DNS (from global)",
+            "override_provider": "",
+            "override_account_id": None,
+        }
+
+    account_keys = account.keys() if hasattr(account, "keys") else account
+    acct_provider = str(account["dns_provider"] or "").strip() if "dns_provider" in account_keys and account["dns_provider"] else ""
+    if acct_provider in ("inherit", "default", "global", "none", "null"):
+        acct_provider = ""
+    acct_account_id = account["dns_provider_account_id"] if "dns_provider_account_id" in account_keys and account["dns_provider_account_id"] else None
+
+    # 1. Account Level Override (Highest precedence)
+    if acct_provider in (DNS_PROVIDER_CLOUDFLARE, DNS_PROVIDER_LOCAL_POWERDNS, "local-dev-dns"):
+        effective_provider = acct_provider
+        effective_account_id = acct_account_id
+        source = "account"
+    else:
+        # 2. Plan Level Default (Second precedence)
+        plan_provider = ""
+        plan_account_id = None
+        plan_allowed_account_ids = []
+        if "plan_dns_provider" in account_keys:
+            plan_provider = str(account["plan_dns_provider"] or "").strip() if account["plan_dns_provider"] else ""
+            if plan_provider in ("inherit", "default", "global", "none", "null"):
+                plan_provider = ""
+            plan_account_id = account["plan_dns_account_id"] if "plan_dns_account_id" in account_keys and account["plan_dns_account_id"] else None
+            plan_allowed_account_ids = parse_json_field(account["plan_dns_allowed_accounts"] if "plan_dns_allowed_accounts" in account_keys else "", [])
+        else:
+            plan_id = None
+            if isinstance(account, dict):
+                plan_id = account.get("plan_id")
+            elif hasattr(account, "__getitem__") and "plan_id" in account_keys:
+                plan_id = account["plan_id"]
+            if plan_id:
+                plan = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+                if plan:
+                    plan_provider = str(plan["dns_default_provider"] or "").strip() if "dns_default_provider" in plan.keys() and plan["dns_default_provider"] else ""
+                    if plan_provider in ("inherit", "default", "global", "none", "null"):
+                        plan_provider = ""
+                    plan_account_id = plan["dns_default_provider_account_id"] if "dns_default_provider_account_id" in plan.keys() and plan["dns_default_provider_account_id"] else None
+                    plan_allowed_account_ids = parse_json_field(plan["dns_allowed_provider_accounts_json"] if "dns_allowed_provider_accounts_json" in plan.keys() else "", [])
+
+        if plan_provider in (DNS_PROVIDER_CLOUDFLARE, DNS_PROVIDER_LOCAL_POWERDNS, "local-dev-dns"):
+            effective_provider = plan_provider
+            effective_account_id = plan_account_id
+            source = "plan"
+        else:
+            # 3. Global Level Default (Least precedence)
+            global_assignment = conn.execute(
+                """
+                SELECT a.*, p.key AS provider_key
+                FROM dns_provider_assignments a
+                JOIN dns_providers p ON p.id = a.provider_id
+                WHERE a.scope_type = 'global' AND a.scope_id = 0
+                """
+            ).fetchone()
+            effective_provider = global_assignment["provider_key"] if global_assignment and global_assignment["provider_key"] in DNS_PROVIDER_KEYS else DNS_PROVIDER_LOCAL_POWERDNS
+            global_policy = parse_json_field(global_assignment["policy_json"], {}) if global_assignment else {}
+            effective_account_id = global_policy.get("default_provider_account_id") or (global_assignment["provider_account_id"] if global_assignment and "provider_account_id" in global_assignment.keys() else None)
+            source = "global"
+
+    # Cloudflare account fallback if account ID missing
+    if effective_provider == DNS_PROVIDER_CLOUDFLARE and not effective_account_id:
+        fallback_sql = """
+            SELECT a.id
+            FROM dns_provider_accounts a
+            JOIN dns_providers p ON p.id = a.provider_id
+            WHERE p.key = ? AND a.status = 'active'
+        """
+        fallback_params = [DNS_PROVIDER_CLOUDFLARE]
+        if source == "plan" and plan_allowed_account_ids:
+            fallback_sql += " AND a.id IN ({})".format(sql_placeholders(plan_allowed_account_ids))
+            fallback_params.extend(plan_allowed_account_ids)
+        fallback_sql += " ORDER BY a.id ASC LIMIT 1"
+        active_account = conn.execute(fallback_sql, fallback_params).fetchone()
+        if active_account:
+            effective_account_id = active_account["id"]
+
+    cf_acct_name = ""
+    if effective_provider == DNS_PROVIDER_CLOUDFLARE and effective_account_id:
+        cf_row = conn.execute("SELECT display_name FROM dns_provider_accounts WHERE id = ?", (effective_account_id,)).fetchone()
+        if cf_row:
+            cf_acct_name = cf_row["display_name"]
+
+    if effective_provider == DNS_PROVIDER_CLOUDFLARE:
+        prov_label = f"Cloudflare — {cf_acct_name}" if cf_acct_name else "Cloudflare"
+    else:
+        prov_label = "Local DNS"
+
+    display_label = f"{prov_label} (from {source})"
+
+    return {
+        "dns_provider": effective_provider,
+        "dns_provider_account_id": effective_account_id,
+        "source": source,
+        "display_label": display_label,
+        "override_provider": acct_provider,
+        "override_account_id": acct_account_id,
+    }
+
+
+def default_domain_dns_assignment(conn, account_id):
+    policy = account_dns_policy(conn, account_id)
+    provider = policy["dns_provider"]
+    provider_account_id = policy["dns_provider_account_id"]
+    source = policy["source"]
+
+    local_provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+    local_config = parse_json_field(local_provider["config_json"], {}) if local_provider else {}
+    nameservers = local_config.get("nameservers") or ["ns1.mango.test", "ns2.mango.test"]
+    if provider == DNS_PROVIDER_CLOUDFLARE:
+        nameservers = []
+
+    return {
+        "dns_provider": provider,
+        "dns_provider_account_id": provider_account_id,
+        "source": source,
+        "nameservers": nameservers,
+        "dns_status": "pending_provider_sync" if provider == DNS_PROVIDER_CLOUDFLARE else "active",
+        "provider_state": {"assignment_source": source, "phase": "foundation"},
+    }
+
+
+def preview_domain_dns(conn, account, domain_name):
+    domain_name = sanitize_domain(domain_name)
+    dns_assignment = default_domain_dns_assignment(conn, account["id"])
+    provider_key = dns_assignment["dns_provider"]
+    nameservers = list(dns_assignment.get("nameservers") or [])
+
+    if provider_key == DNS_PROVIDER_CLOUDFLARE:
+        if not domain_assigned_to_account(conn, account, domain_name):
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "This domain is not assigned to your hosting account or registered to your user. Verify ownership before managing DNS.",
+            )
+        provider_account_id = dns_assignment.get("dns_provider_account_id")
+        provider_row = conn.execute("SELECT * FROM dns_providers WHERE key = ?", (DNS_PROVIDER_CLOUDFLARE,)).fetchone()
+        if provider_row:
+            acc_row = None
+            if provider_account_id:
+                acc_row = conn.execute("SELECT * FROM dns_provider_accounts WHERE id = ?", (provider_account_id,)).fetchone()
+            if not acc_row:
+                acc_row = conn.execute(
+                    "SELECT * FROM dns_provider_accounts WHERE provider_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+                    (provider_row["id"],),
+                ).fetchone()
+            if acc_row:
+                try:
+                    token = decrypt_secret(acc_row["encrypted_secret"], CONFIG.jwt_secret) if "encrypted_secret" in acc_row.keys() and acc_row["encrypted_secret"] else ""
+                    cf_account_id = acc_row["external_account_id"] if "external_account_id" in acc_row.keys() else None
+                    if token:
+                        cf = CloudflareDNSProvider(token, account_id=cf_account_id, api_base=CONFIG.cloudflare_api_base)
+                        if cf.configured():
+                            zone = cf.ensure_zone(domain_name)
+                            if zone and isinstance(zone, dict):
+                                cf_ns = zone.get("name_servers") or zone.get("nameservers")
+                                if cf_ns and isinstance(cf_ns, list):
+                                    nameservers = [str(ns).strip() for ns in cf_ns if str(ns).strip()]
+                except Exception as exc:
+                    logging.warning("Cloudflare zone creation/preview failed: %s", exc)
+
+    if not nameservers:
+        plan = conn.execute(
+            "SELECT p.* FROM hosting_accounts ha JOIN plans p ON p.id = ha.plan_id WHERE ha.id = ?",
+            (account["id"],),
+        ).fetchone()
+        if plan:
+            ns1 = str(plan["nameserver1"] if "nameserver1" in plan.keys() and plan["nameserver1"] else "").strip()
+            ns2 = str(plan["nameserver2"] if "nameserver2" in plan.keys() and plan["nameserver2"] else "").strip()
+            nameservers = [ns for ns in [ns1, ns2] if ns]
+        if not nameservers:
+            local_provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+            local_config = parse_json_field(local_provider["config_json"], {}) if local_provider else {}
+            nameservers = local_config.get("nameservers") or ["ns1.mango.test", "ns2.mango.test"]
+
+    server_ip = get_host_public_ip(conn)
+    return {
+        "domain": domain_name,
+        "dns_provider": provider_key,
+        "nameservers": nameservers,
+        "server_ip": server_ip,
+    }
+
+
+def get_cloudflare_provider_for_account(conn, account_id):
+    dns_assignment = default_domain_dns_assignment(conn, account_id)
+    if dns_assignment["dns_provider"] == DNS_PROVIDER_CLOUDFLARE:
+        provider_account_id = dns_assignment.get("dns_provider_account_id")
+        provider_row = conn.execute("SELECT * FROM dns_providers WHERE key = ?", (DNS_PROVIDER_CLOUDFLARE,)).fetchone()
+        if provider_row:
+            acc_row = None
+            if provider_account_id:
+                acc_row = conn.execute("SELECT * FROM dns_provider_accounts WHERE id = ?", (provider_account_id,)).fetchone()
+            if not acc_row:
+                acc_row = conn.execute(
+                    "SELECT * FROM dns_provider_accounts WHERE provider_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+                    (provider_row["id"],),
+                ).fetchone()
+            if acc_row:
+                cred = conn.execute("SELECT * FROM dns_provider_credentials WHERE provider_account_id = ?", (acc_row["id"],)).fetchone()
+                token = ""
+                if cred and "encrypted_secret" in cred.keys() and cred["encrypted_secret"]:
+                    token = decrypt_secret(cred["encrypted_secret"], CONFIG.jwt_secret)
+                elif "encrypted_secret" in acc_row.keys() and acc_row["encrypted_secret"]:
+                    token = decrypt_secret(acc_row["encrypted_secret"], CONFIG.jwt_secret)
+                cf_account_id = acc_row["external_account_id"] if "external_account_id" in acc_row.keys() else None
+                if token:
+                    cf = CloudflareDNSProvider(token, account_id=cf_account_id, api_base=CONFIG.cloudflare_api_base)
+                    if cf.configured():
+                        return cf, dns_assignment
+    return None, dns_assignment
+
+
+def domain_assigned_to_account(conn, account, domain):
+    """Return whether a domain is assigned to this account or owned by its user."""
+    normalized = sanitize_domain(domain)
+    assigned = conn.execute(
+        "SELECT id FROM domains WHERE lower(name) = lower(?) AND account_id = ?",
+        (normalized, account["id"]),
+    ).fetchone()
+    if assigned:
+        return True
+
+    account_user_id = account["user_id"] if "user_id" in account.keys() else None
+    if not account_user_id:
+        return False
+    registered = conn.execute(
+        """
+        SELECT r.id
+        FROM registrar_domain_records r
+        JOIN registrar_accounts ra ON ra.id = r.registrar_account_id
+        WHERE lower(r.domain_name) = lower(?)
+          AND r.client_user_id = ?
+          AND ra.status != 'deleted'
+        LIMIT 1
+        """,
+        (normalized, account_user_id),
+    ).fetchone()
+    return bool(registered)
+
+
+def hosted_domain_on_other_account(conn, account_id, domain):
+    """Return whether another account is actively hosting this domain."""
+    normalized = sanitize_domain(domain)
+    return bool(conn.execute(
+        """
+        SELECT w.id
+        FROM websites w
+        WHERE lower(w.domain) = lower(?)
+          AND w.account_id != ?
+          AND lower(COALESCE(w.status, 'active')) NOT IN ('deleted', 'removed')
+        UNION ALL
+        SELECT d.id
+        FROM domains d
+        JOIN websites w ON w.id = d.linked_website_id
+        WHERE lower(d.name) = lower(?)
+          AND d.account_id != ?
+          AND lower(COALESCE(d.status, 'active')) NOT IN ('deleted', 'removed')
+        LIMIT 1
+        """,
+        (normalized, account_id, normalized, account_id),
+    ).fetchone())
+
+
+def check_domain_dns_provider(conn, account, domain_name):
+    domain = sanitize_domain(domain_name)
+    if not domain:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_domain")
+
+    dns_assignment = default_domain_dns_assignment(conn, account["id"])
+    provider_key = dns_assignment["dns_provider"]
+
+    if provider_key == DNS_PROVIDER_CLOUDFLARE:
+        providers_to_check = []
+        eff_cf, _ = get_cloudflare_provider_for_account(conn, account["id"])
+        if eff_cf:
+            eff_acct_id = dns_assignment.get("dns_provider_account_id")
+            providers_to_check.append((eff_cf, eff_acct_id))
+
+        cf_rows = conn.execute(
+            """
+            SELECT a.*, c.encrypted_secret
+            FROM dns_provider_accounts a
+            JOIN dns_providers p ON p.id = a.provider_id
+            LEFT JOIN dns_provider_credentials c ON c.provider_account_id = a.id
+            WHERE p.key = ? AND a.status = 'active'
+            ORDER BY a.id ASC
+            """,
+            (DNS_PROVIDER_CLOUDFLARE,),
+        ).fetchall()
+
+        for row in cf_rows:
+            cred_secret = row["encrypted_secret"] if "encrypted_secret" in row.keys() and row["encrypted_secret"] else ""
+            if cred_secret:
+                token = decrypt_secret(cred_secret, CONFIG.jwt_secret)
+                if token:
+                    ext_id = row["external_account_id"] if "external_account_id" in row.keys() else None
+                    cf_inst = CloudflareDNSProvider(token, account_id=ext_id, api_base=CONFIG.cloudflare_api_base)
+                    if not any(p.api_token == cf_inst.api_token and p.account_id == cf_inst.account_id for p, _ in providers_to_check):
+                        providers_to_check.append((cf_inst, row["id"]))
+
+        for cf, acct_id in providers_to_check:
+            try:
+                zone = cf.get_zone(domain)
+                if zone and isinstance(zone, dict) and zone.get("id"):
+                    if hosted_domain_on_other_account(conn, account["id"], domain):
+                        return {
+                            "exists": True,
+                            "dns_provider": "cloudflare",
+                            "blocked": True,
+                            "alert_message": "This domain already exists in the DNS",
+                            "error_message": "This domain is not assigned to your hosting account or registered to your user. Verify ownership before adding it.",
+                        }
+                    remote_records = cf.get_dns_records(zone["id"])
+                    return {
+                        "exists": True,
+                        "dns_provider": "cloudflare",
+                        "dns_provider_account_id": acct_id,
+                        "alert_message": "This domain already exists in the DNS",
+                        "zone_id": zone["id"],
+                        "remote_records": remote_records,
+                        "choices": [
+                            {
+                                "id": "keep",
+                                "label": "Keep current records and save a copy remote DNS records locally"
+                            },
+                            {
+                                "id": "discard",
+                                "label": "Discard current DNS records"
+                            }
+                        ]
+                    }
+            except Exception as exc:
+                logging.warning("Cloudflare zone check failed for %s on account %s: %s", domain, acct_id, exc)
+        return {
+            "exists": False,
+            "dns_provider": "cloudflare"
+        }
+    else:
+        # Local DNS (PowerDNS or local-dev-dns)
+        existing_in_db = conn.execute(
+            "SELECT id, account_id FROM domains WHERE name = ?", (domain,)
+        ).fetchone()
+
+        existing_in_powerdns = False
+        if provider_key == DNS_PROVIDER_LOCAL_POWERDNS:
+            local_provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+            if local_provider:
+                config = parse_json_field(local_provider["config_json"], {})
+                pdns = PowerDNSProvider(config.get("api_url"), config.get("api_key"), nameservers=config.get("nameservers"))
+                if pdns.configured():
+                    zone = pdns.get_zone(domain)
+                    if zone:
+                        existing_in_powerdns = True
+
+        if existing_in_db or existing_in_powerdns:
+            blocked = hosted_domain_on_other_account(conn, account["id"], domain)
+            return {
+                "exists": True,
+                "dns_provider": provider_key,
+                "blocked": blocked,
+                "alert_message": "This domain already exists in the DNS",
+                **({
+                    "error_message": "This website can't be added to this account because it already exists on another account on this hosting. It must be removed from the other account first. If you think this is an error, please contact support."
+                } if blocked else {}),
+            }
+
+        return {
+            "exists": False,
+            "dns_provider": provider_key
+        }
+
+
+def import_remote_cloudflare_records(conn, domain_id, domain, remote_records):
+    imported_count = 0
+    for record in remote_records or []:
+        rec_type = str(record.get("type", "")).upper()
+        if rec_type not in {"A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"}:
+            continue
+        full_name = str(record.get("name", ""))
+        rel_name = _relative_name(full_name, domain)
+        data = record.get("data") or {}
+        val = record.get("content") or ""
+        ttl = int(record.get("ttl") or 300)
+        priority = record.get("priority")
+        if rec_type == "SRV" and data:
+            val = "{} {} {}".format(data.get("weight", 0), data.get("port", 0), str(data.get("target") or "").rstrip("."))
+            priority = data.get("priority", priority)
+        elif rec_type == "TXT" and len(str(val)) >= 2 and str(val).startswith('"') and str(val).endswith('"'):
+            # Cloudflare may return a single TXT chunk with presentation
+            # quotes. Store the logical TXT value used by the panel; the
+            # provider adapter adds the required wire-format quoting later.
+            val = str(val)[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+        proxied = 1 if record.get("proxied") else 0
+        cf_id = record.get("id")
+        metadata = json.dumps({"cloudflare_id": cf_id}) if cf_id else None
+
+        existing = conn.execute(
+            """
+            SELECT id FROM dns_records
+            WHERE domain_id = ? AND type = ? AND name = ? AND value = ?
+              AND COALESCE(priority, -1) = COALESCE(?, -1)
+            LIMIT 1
+            """,
+            (domain_id, rec_type, rel_name, val, priority),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE dns_records SET ttl = ?, proxied = ?, provider_metadata_json = ? WHERE id = ?",
+                (ttl, proxied, metadata or "{}", existing["id"]),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO dns_records(domain_id, type, name, value, ttl, priority, proxied, provider_metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (domain_id, rec_type, rel_name, val, ttl, priority, proxied, metadata or "{}"),
+            )
+            imported_count += 1
+    return imported_count
+
+
+def pull_cloudflare_domain_records(conn, domain, provider_account_id=None):
+    account_id = provider_account_id or domain["dns_provider_account_id"]
+    account = conn.execute(
+        """
+        SELECT a.*, c.encrypted_secret
+        FROM dns_provider_accounts a
+        JOIN dns_providers p ON p.id = a.provider_id
+        LEFT JOIN dns_provider_credentials c ON c.provider_account_id = a.id
+        WHERE a.id = ? AND p.key = ? AND a.status = 'active'
+        """,
+        (account_id, DNS_PROVIDER_CLOUDFLARE),
+    ).fetchone()
+    if not account:
+        raise DNSProviderError("cloudflare_provider_account_not_found")
+    token = decrypt_secret(account["encrypted_secret"], CONFIG.jwt_secret) if account["encrypted_secret"] else ""
+    if not token:
+        raise DNSProviderError("cloudflare_provider_secret_missing")
+    provider = CloudflareDNSProvider(token, account_id=account["external_account_id"], api_base=CONFIG.cloudflare_api_base)
+    zone = provider.get_zone(domain["name"])
+    if not zone or not zone.get("id"):
+        raise DNSProviderError("cloudflare_zone_not_found")
+    remote_records = provider.get_dns_records(zone["id"])
+    imported_count = import_remote_cloudflare_records(conn, domain["id"], domain["name"], remote_records)
+    nameservers = zone.get("name_servers") or zone.get("original_name_servers") or []
+    if nameservers:
+        conn.execute(
+            "UPDATE domains SET provider_zone_id = ?, nameservers_json = ?, dns_provider_account_id = ? WHERE id = ?",
+            (zone["id"], json.dumps(nameservers), account["id"], domain["id"]),
+        )
+    return zone, remote_records, imported_count
+
+
+def get_host_public_ip(conn=None, request_host=None):
+    if request_host:
+        host_str = str(request_host).split(":")[0].strip()
+        try:
+            ip_obj = ipaddress.ip_address(host_str)
+            if not ip_obj.is_loopback and not ip_obj.is_unspecified:
+                return host_str
+        except ValueError:
+            pass
+
+    if conn:
+        try:
+            primary = conn.execute("SELECT ip_address FROM server_ips WHERE is_primary = 1 AND status = 'active' LIMIT 1").fetchone()
+            if primary and primary["ip_address"] and primary["ip_address"] not in ("127.0.0.1", "0.0.0.0", "localhost", "157.15.203.66"):
+                return primary["ip_address"]
+        except Exception:
+            pass
+
+        try:
+            persisted = get_system_setting(conn, "public_host", "")
+            if persisted and persisted not in ("127.0.0.1", "0.0.0.0", "localhost"):
+                try:
+                    ipaddress.ip_address(persisted)
+                    return persisted
+                except ValueError:
+                    try:
+                        resolved = socket.gethostbyname(persisted)
+                        if resolved and resolved not in ("127.0.0.1", "0.0.0.0"):
+                            return resolved
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            local_provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+            if local_provider:
+                local_config = parse_json_field(local_provider["config_json"], {})
+                configured = str(local_config.get("public_ipv4") or "").strip()
+                if configured and configured not in ("127.0.0.1", "0.0.0.0", "localhost"):
+                    return configured
+        except Exception:
+            pass
+
+    if CONFIG.public_host and CONFIG.public_host not in ("127.0.0.1", "0.0.0.0", "localhost"):
+        try:
+            ipaddress.ip_address(CONFIG.public_host)
+            return CONFIG.public_host
+        except ValueError:
+            try:
+                resolved = socket.gethostbyname(CONFIG.public_host)
+                if resolved and resolved not in ("127.0.0.1", "0.0.0.0"):
+                    return resolved
+            except Exception:
+                pass
+
+    try:
+        req = urllib.request.urlopen("https://api.ipify.org", timeout=3)
+        ip = req.read().decode("utf-8").strip()
+        if ip:
+            ipaddress.ip_address(ip)
+            return ip
+    except Exception:
+        pass
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and ip != "127.0.0.1":
+            return ip
+    except Exception:
+        pass
+
+    if conn:
+        try:
+            primary = conn.execute("SELECT ip_address FROM server_ips WHERE is_primary = 1 LIMIT 1").fetchone()
+            if primary and primary["ip_address"] and primary["ip_address"] not in ("127.0.0.1", "0.0.0.0", "localhost"):
+                return primary["ip_address"]
+        except Exception:
+            pass
+
+    return "127.0.0.1"
+
+
+def seed_website_dns_records(conn, domain_id, domain, mail_host, dkim_material=None):
+    dkim_material = dkim_material or generate_dkim_material("mango")
+    public_ip = get_host_public_ip(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO dns_records(domain_id, type, name, value, ttl, proxied) VALUES (?, ?, ?, ?, ?, ?)",
+        (domain_id, "A", "@", public_ip, 300, 1),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO dns_records(domain_id, type, name, value, ttl, proxied) VALUES (?, ?, ?, ?, ?, ?)",
+        (domain_id, "CNAME", "www", "@", 300, 1),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO dns_records(domain_id, type, name, value, ttl) VALUES (?, ?, ?, ?, ?)",
+        (domain_id, "MX", "@", mail_host, 300),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO dns_records(domain_id, type, name, value, ttl) VALUES (?, ?, ?, ?, ?)",
+        (domain_id, "TXT", "@", recommended_spf_record(mail_host), 300),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO dns_records(domain_id, type, name, value, ttl) VALUES (?, ?, ?, ?, ?)",
+        (domain_id, "TXT", "_dmarc", recommended_dmarc_record(domain), 300),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO dns_records(domain_id, type, name, value, ttl) VALUES (?, ?, ?, ?, ?)",
+        (domain_id, "TXT", "mango._domainkey", dkim_dns_value(dkim_material["public_key"]), 300),
+    )
+    return {
+        "dkim_private_key": dkim_material["private_key"],
+        "dkim_public_key": dkim_material["public_key"],
+        "dkim_selector": dkim_material["selector"],
+    }
+
+
+def ensure_mail_dns_records(conn, domain_row, mail_domain_row, mail_host):
+    """Create/update the records required for hosted mail after explicit consent."""
+    domain_id = domain_row["id"]
+    domain = domain_row["name"]
+    dkim_name = f"{mail_domain_row['dkim_selector'] or 'mango'}._domainkey"
+    desired = [
+        ("MX", "@", mail_host, 10),
+        ("TXT", "@", mail_domain_row["spf_policy"] or recommended_spf_record(mail_host), None),
+        ("TXT", dkim_name, dkim_dns_value(mail_domain_row["dkim_public_key"]), None),
+        ("TXT", "_dmarc", mail_domain_row["dmarc_policy"] or recommended_dmarc_record(domain), None),
+    ]
+    for record_type, name, value, priority in desired:
+        if not value:
+            continue
+        if record_type == "TXT" and name == "@":
+            existing = conn.execute(
+                "SELECT id FROM dns_records WHERE domain_id = ? AND type = 'TXT' AND name = '@' AND LOWER(value) LIKE 'v=spf1%' ORDER BY id LIMIT 1",
+                (domain_id,),
+            ).fetchone()
+        elif record_type == "TXT" and name == "_dmarc":
+            existing = conn.execute(
+                "SELECT id FROM dns_records WHERE domain_id = ? AND type = 'TXT' AND name = '_dmarc' ORDER BY id LIMIT 1",
+                (domain_id,),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT id FROM dns_records WHERE domain_id = ? AND type = ? AND name = ? ORDER BY id LIMIT 1",
+                (domain_id, record_type, name),
+            ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE dns_records SET value = ?, priority = ?, ttl = 300, system_record = 1, locked = 1 WHERE id = ?",
+                (value, priority, existing["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO dns_records(domain_id, type, name, value, ttl, priority, system_record, locked) VALUES (?, ?, ?, ?, 300, ?, 1, 1)",
+                (domain_id, record_type, name, value, priority),
+            )
+
+
+def check_ssh_config():
+    import glob
+    ssh_settings = {
+        "permit_root_login": "unknown",
+        "password_authentication": "unknown",
+        "port": "22",
+    }
+    config_files = ["/etc/ssh/sshd_config"]
+    if os.path.exists("/etc/ssh/sshd_config.d"):
+        for f in glob.glob("/etc/ssh/sshd_config.d/*.conf"):
+            config_files.append(f)
+
+    for path in config_files:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split(None, 1)
+                    if len(parts) == 2:
+                        key, val = parts[0].lower(), parts[1].strip().lower()
+                        if key == "permitrootlogin":
+                            ssh_settings["permit_root_login"] = val
+                        elif key == "passwordauthentication":
+                            ssh_settings["password_authentication"] = val
+                        elif key == "port":
+                            ssh_settings["port"] = val
+        except Exception:
+            pass
+    return ssh_settings
+
+
+def check_firewall_status():
+    status = {"active": False, "type": "none", "details": "No active firewall detected"}
+    try:
+        res = subprocess.run(["ufw", "status"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0 and "Status: active" in res.stdout:
+            return {"active": True, "type": "ufw", "details": "UFW Firewall active and enforcing rules"}
+    except Exception:
+        pass
+
+    try:
+        res = subprocess.run(["iptables", "-L", "-n"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0 and len(res.stdout.strip().splitlines()) > 6:
+            return {"active": True, "type": "iptables", "details": "Iptables filtering rules active"}
+    except Exception:
+        pass
+
+    try:
+        res = subprocess.run(["nft", "list", "ruleset"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0 and res.stdout.strip():
+            return {"active": True, "type": "nftables", "details": "Nftables filtering rules active"}
+    except Exception:
+        pass
+
+    return status
+
+
+def check_unattended_upgrades():
+    if os.path.exists("/etc/apt/apt.conf.d/20auto-upgrades") or os.path.exists("/etc/apt/apt.conf.d/50unattended-upgrades"):
+        return {"enabled": True, "details": "Automatic security updates configured"}
+    return {"enabled": False, "details": "Automatic security updates not configured"}
+
+
+def run_server_security_audit(conn):
+    ssh = check_ssh_config()
+    fw = check_firewall_status()
+    auto_upgrades = check_unattended_upgrades()
+
+    admins = conn.execute("SELECT id, email, totp_secret FROM admins").fetchall()
+    admins_with_2fa = sum(1 for a in admins if a["totp_secret"])
+    total_admins = len(admins)
+
+    items = []
+
+    # 1. SSH Direct Root Login
+    root_login = ssh["permit_root_login"]
+    if root_login in ("no", "prohibit-password", "without-password"):
+        items.append({
+            "category": "SSH & Remote Access",
+            "title": "Direct SSH Root Login",
+            "status": "PASS",
+            "value": f"PermitRootLogin {root_login}",
+            "recommendation": "Direct SSH root login is disabled or restricted to SSH keys.",
+            "impact": "High",
+        })
+    elif root_login == "yes":
+        items.append({
+            "category": "SSH & Remote Access",
+            "title": "Direct SSH Root Login",
+            "status": "WARNING",
+            "value": "PermitRootLogin yes",
+            "recommendation": "Set 'PermitRootLogin no' or 'prohibit-password' in /etc/ssh/sshd_config to prevent direct root login attempts.",
+            "impact": "High",
+        })
+    else:
+        items.append({
+            "category": "SSH & Remote Access",
+            "title": "Direct SSH Root Login",
+            "status": "INFO",
+            "value": f"PermitRootLogin {root_login}",
+            "recommendation": "Review SSH root login policy in /etc/ssh/sshd_config.",
+            "impact": "Medium",
+        })
+
+    # 2. SSH Password Auth
+    pwd_auth = ssh["password_authentication"]
+    if pwd_auth == "no":
+        items.append({
+            "category": "SSH & Remote Access",
+            "title": "SSH Authentication Method",
+            "status": "PASS",
+            "value": "PasswordAuthentication no (Key-based only)",
+            "recommendation": "Password authentication is disabled; SSH keys are required.",
+            "impact": "High",
+        })
+    else:
+        items.append({
+            "category": "SSH & Remote Access",
+            "title": "SSH Authentication Method",
+            "status": "WARNING",
+            "value": f"PasswordAuthentication {pwd_auth if pwd_auth != 'unknown' else 'yes (default)'}",
+            "recommendation": "Disable password authentication in /etc/ssh/sshd_config and enforce SSH public key authentication.",
+            "impact": "High",
+        })
+
+    # 3. SSH Listening Port
+    ssh_port = ssh["port"]
+    items.append({
+        "category": "SSH & Remote Access",
+        "title": "SSH Port Configuration",
+        "status": "PASS" if ssh_port != "22" else "INFO",
+        "value": f"Port {ssh_port}",
+        "recommendation": "Custom SSH port helps reduce automated brute-force attempts." if ssh_port != "22" else "SSH is using standard port 22.",
+        "impact": "Low",
+    })
+
+    # 4. Firewall Status
+    if fw["active"]:
+        items.append({
+            "category": "Firewall & Network",
+            "title": "System Firewall Status",
+            "status": "PASS",
+            "value": f"{fw['type'].upper()} Active",
+            "recommendation": fw["details"],
+            "impact": "High",
+        })
+    else:
+        items.append({
+            "category": "Firewall & Network",
+            "title": "System Firewall Status",
+            "status": "FAIL",
+            "value": "No Active Firewall",
+            "recommendation": "Enable UFW or nftables firewall to restrict unwanted inbound network traffic (ufw enable).",
+            "impact": "High",
+        })
+
+    # 5. Panel SSL/TLS
+    items.append({
+        "category": "Web & Panel Protection",
+        "title": "Panel SSL/TLS Security",
+        "status": "PASS",
+        "value": "Production Security Mode Active",
+        "recommendation": "Panel communications are protected.",
+        "impact": "High",
+    })
+
+    # 6. Admin 2FA
+    if total_admins > 0 and admins_with_2fa == total_admins:
+        items.append({
+            "category": "Account & Access Security",
+            "title": "Admin Two-Factor Authentication (2FA)",
+            "status": "PASS",
+            "value": f"{admins_with_2fa}/{total_admins} Admins Enrolled",
+            "recommendation": "All administrator accounts have 2FA enabled.",
+            "impact": "High",
+        })
+    elif admins_with_2fa > 0:
+        items.append({
+            "category": "Account & Access Security",
+            "title": "Admin Two-Factor Authentication (2FA)",
+            "status": "WARNING",
+            "value": f"{admins_with_2fa}/{total_admins} Admins Enrolled",
+            "recommendation": "Enable 2FA on all administrator accounts.",
+            "impact": "High",
+        })
+    else:
+        items.append({
+            "category": "Account & Access Security",
+            "title": "Admin Two-Factor Authentication (2FA)",
+            "status": "WARNING",
+            "value": "0 Admins Enrolled in 2FA",
+            "recommendation": "Configure 2FA for admin login under Admin Settings.",
+            "impact": "High",
+        })
+
+    # 7. Automatic Security Patching
+    if auto_upgrades["enabled"]:
+        items.append({
+            "category": "System Patching & Updates",
+            "title": "Automatic Security Updates",
+            "status": "PASS",
+            "value": "Enabled",
+            "recommendation": auto_upgrades["details"],
+            "impact": "Medium",
+        })
+    else:
+        items.append({
+            "category": "System Patching & Updates",
+            "title": "Automatic Security Updates",
+            "status": "WARNING",
+            "value": "Disabled / Unconfigured",
+            "recommendation": "Enable unattended-upgrades to automatically apply security patches.",
+            "impact": "Medium",
+        })
+
+    passes = sum(1 for item in items if item["status"] == "PASS")
+    total = len(items)
+    score = int((passes / total) * 100) if total else 100
+
+    return {
+        "score": score,
+        "score_label": "Strong Security" if score >= 80 else ("Moderate Security" if score >= 60 else "Needs Attention"),
+        "total_checks": total,
+        "pass_count": passes,
+        "warning_count": sum(1 for item in items if item["status"] == "WARNING"),
+        "fail_count": sum(1 for item in items if item["status"] == "FAIL"),
+        "items": items,
+        "scanned_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+
+
+def verify_domain_nameservers(conn, domain):
+    expected = parse_json_field(domain["nameservers_json"] if "nameservers_json" in domain.keys() else "", [])
+    expected_normalized = sorted({str(item).strip().rstrip(".").lower() for item in expected if str(item).strip()})
+    observed = []
+    status = "unknown"
+    message = "nameserver lookup tool unavailable"
+    dig = shutil.which("dig")
+    if dig:
+        try:
+            result = subprocess.run(
+                [dig, "+short", "NS", domain["name"]],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            observed = sorted({line.strip().rstrip(".").lower() for line in result.stdout.splitlines() if line.strip()})
+            if result.returncode == 0:
+                if expected_normalized and set(expected_normalized).issubset(set(observed)):
+                    status = "active"
+                    message = "domain is delegated to the expected nameservers"
+                elif observed:
+                    status = "pending_nameserver"
+                    message = "domain is delegated to different nameservers"
+                else:
+                    status = "pending_nameserver"
+                    message = "no authoritative nameservers observed"
+            else:
+                status = "unknown"
+                message = (result.stderr or "nameserver lookup failed").strip()[:240]
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            status = "unknown"
+            message = str(exc)[:240]
+    conn.execute(
+        """
+        UPDATE domains
+        SET dns_status = ?, last_nameserver_check_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, domain["id"]),
+    )
+    if status == "active":
+        migration_state = parse_json_field(domain["dns_migration_state_json"] if "dns_migration_state_json" in domain.keys() else "", {})
+        if migration_state:
+            migration_state["status"] = "verified"
+            migration_state["verified_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            migration_state["delete_old_provider_zone"] = False
+            conn.execute(
+                "UPDATE domains SET dns_migration_state_json = ? WHERE id = ?",
+                (json.dumps(migration_state, sort_keys=True), domain["id"]),
+            )
+    conn.execute(
+        """
+        UPDATE dns_zones
+        SET dns_status = ?, last_nameserver_check_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE domain_id = ?
+        """,
+        (status, domain["id"]),
+    )
+    return {
+        "domain_id": domain["id"],
+        "domain": domain["name"],
+        "status": status,
+        "message": message,
+        "expected_nameservers": expected_normalized,
+        "observed_nameservers": observed,
+    }
+
+
+def decorate_dns_zone(row):
+    item = row_to_dict(row)
+    item["nameservers"] = parse_json_field(item.get("nameservers_json"), [])
+    item["provider_state"] = parse_json_field(item.get("provider_state_json"), {})
+    item["warnings"] = dns_state_warnings(item)
+    return item
+
+
+def decorate_domain(row):
+    item = row_to_dict(row)
+    nameservers = parse_json_field(item.get("nameservers_json"), [])
+    if not nameservers and item.get("zone_nameservers_json"):
+        nameservers = parse_json_field(item.get("zone_nameservers_json"), [])
+    item["nameservers"] = nameservers
+    item["provider_state"] = parse_json_field(item.get("provider_state_json"), {})
+    item["dns_migration_state"] = parse_json_field(item.get("dns_migration_state_json"), {})
+    item["dns_provider_label"] = "Cloudflare" if item.get("dns_provider") == DNS_PROVIDER_CLOUDFLARE else "Local DNS"
+    item["dns_warnings"] = dns_state_warnings(item)
+    return item
+
+
+def dns_state_warnings(item):
+    warnings = []
+    status = str(item.get("dns_status") or item.get("status") or "").lower()
+    nameservers = parse_json_field(item.get("nameservers_json"), []) if isinstance(item.get("nameservers_json"), str) else item.get("nameservers", [])
+    if not nameservers and item.get("zone_nameservers_json"):
+        nameservers = parse_json_field(item.get("zone_nameservers_json"), [])
+    provider_state = parse_json_field(item.get("provider_state_json"), {}) if isinstance(item.get("provider_state_json"), str) else item.get("provider_state", {})
+    last_error = str(provider_state.get("last_error") or "")
+    if status in {"provider_failed", "failed"}:
+        lower_err = last_error.lower()
+        is_zone_permission_error = (
+            ("zone creation permission" in lower_err)
+            or ("zone:zone:edit" in lower_err)
+            or ("zone (dns)" in lower_err)
+            or ("permission" in lower_err and "zone" in lower_err)
+            or ("cloudflare" in lower_err and "zones" in lower_err)
+            or ("com.cloudflare.api.account.zone.create" in lower_err)
+        )
+        if is_zone_permission_error:
+            warnings.append({
+                "code": "provider_failed",
+                "message": "Cloudflare can reach the account, but this token cannot create zones. In Cloudflare → My Profile → API Tokens, edit the token and add 'Zone:Zone:Edit' and 'Zone:DNS:Edit' permissions.",
+            })
+        else:
+            warnings.append({"code": "provider_failed", "message": last_error or "DNS provider sync failed."})
+    if status in {"pending_nameserver", "pending_provider_sync"}:
+        warnings.append({"code": status, "message": "Nameserver delegation is not verified yet."})
+    if not nameservers:
+        warnings.append({"code": "missing_nameservers", "message": "No effective nameservers are saved for this domain."})
+    if last_error:
+        warnings.append({"code": "provider_error_snapshot", "message": last_error[:240]})
+    return warnings
+
+
+def decorated_dns_records(rows):
+    records = []
+    for row in rows:
+        item = row_to_dict(row)
+        item["proxied"] = bool(item.get("proxied", 0))
+        item["system_record"] = bool(item.get("system_record", 0))
+        item["locked"] = bool(item.get("locked", 0))
+        item["provider_metadata"] = parse_json_field(item.get("provider_metadata_json"), {})
+        records.append(item)
+    return records
+
+
+def dns_zone_export_payload(conn, domain):
+    zone = conn.execute("SELECT * FROM dns_zones WHERE domain_id = ?", (domain["id"],)).fetchone()
+    records = conn.execute("SELECT * FROM dns_records WHERE domain_id = ? ORDER BY type, name, id", (domain["id"],)).fetchall()
+    return {
+        "domain": decorate_domain(domain),
+        "zone": decorate_dns_zone(zone) if zone else None,
+        "records": decorated_dns_records(records),
+        "exported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+
+
+def create_dns_zone_export(conn, domain, created_by):
+    payload = dns_zone_export_payload(conn, domain)
+    conn.execute(
+        """
+        INSERT INTO dns_zone_exports(domain_id, account_id, zone_name, provider, export_json, created_by)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            domain["id"],
+            domain["account_id"],
+            domain["name"],
+            domain["dns_provider"] if "dns_provider" in domain.keys() else "",
+            json.dumps(payload, sort_keys=True),
+            created_by,
+        ),
+    )
+    return payload
+
+
+def ensure_no_active_dns_sync(conn, domain_id):
+    record_ids = [row["id"] for row in conn.execute("SELECT id FROM dns_records WHERE domain_id = ?", (domain_id,)).fetchall()]
+    params = [domain_id]
+    record_clause = ""
+    if record_ids:
+        record_clause = " OR (type = 'sync_dns_record' AND target_type = 'dns_record' AND target_id IN ({}))".format(sql_placeholders(record_ids))
+        params.extend(record_ids)
+    active = conn.execute(
+        """
+        SELECT id FROM jobs
+        WHERE status IN ('queued', 'running')
+          AND (
+            (type = 'sync_dns_zone' AND target_type = 'domain' AND target_id = ?)
+            {}
+          )
+        LIMIT 1
+        """.format(record_clause),
+        params,
+    ).fetchone()
+    if active:
+        raise ApiError(HTTPStatus.CONFLICT, "dns_sync_already_in_progress")
+
+
+def ensure_dns_record_mutable(record):
+    record_type = str(record["type"] or "").upper()
+    record_name = str(record["name"] or "@").strip()
+    if int(record["locked"] if "locked" in record.keys() and record["locked"] is not None else 0):
+        raise ApiError(HTTPStatus.FORBIDDEN, "dns_record_locked")
+    if int(record["system_record"] if "system_record" in record.keys() and record["system_record"] is not None else 0):
+        raise ApiError(HTTPStatus.FORBIDDEN, "dns_system_record_locked")
+    if record_type == "SOA" or (record_type == "NS" and record_name in {"@", ""}):
+        raise ApiError(HTTPStatus.FORBIDDEN, "dns_root_authority_record_locked")
+
+
+def ensure_dns_record_conflicts(conn, domain_id, record_payload, exclude_record_id=None):
+    record_type = record_payload["type"]
+    name = record_payload["name"]
+    params = [domain_id, name]
+    exclude_clause = ""
+    if exclude_record_id:
+        exclude_clause = " AND id != ?"
+        params.append(exclude_record_id)
+    rows = conn.execute(
+        "SELECT * FROM dns_records WHERE domain_id = ? AND name = ?{} ORDER BY id".format(exclude_clause),
+        params,
+    ).fetchall()
+    if record_type == "CNAME" and rows:
+        raise ApiError(HTTPStatus.CONFLICT, "dns_cname_conflicts_with_existing_records")
+    if record_type != "CNAME" and any(str(row["type"]).upper() == "CNAME" for row in rows):
+        raise ApiError(HTTPStatus.CONFLICT, "dns_record_conflicts_with_existing_cname")
+
+
+def dns_provider_account_active(conn, account_id, provider_key):
+    if not account_id:
+        return None
+    return conn.execute(
+        """
+        SELECT a.*
+        FROM dns_provider_accounts a
+        JOIN dns_providers p ON p.id = a.provider_id
+        WHERE a.id = ? AND p.key = ? AND a.status = 'active'
+        """,
+        (account_id, provider_key),
+    ).fetchone()
+
+
+def migrate_domain_dns_provider(conn, domain, provider_key, provider_account_id, actor_label):
+    if provider_key not in DNS_PROVIDER_KEYS:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider")
+    if provider_key == DNS_PROVIDER_CLOUDFLARE:
+        if not provider_account_id:
+            active_account = conn.execute(
+                """
+                SELECT a.id
+                FROM dns_provider_accounts a
+                JOIN dns_providers p ON p.id = a.provider_id
+                WHERE p.key = ? AND a.status = 'active'
+                ORDER BY a.id ASC
+                LIMIT 1
+                """,
+                (DNS_PROVIDER_CLOUDFLARE,),
+            ).fetchone()
+            if active_account:
+                provider_account_id = active_account["id"]
+        if not dns_provider_account_active(conn, provider_account_id, DNS_PROVIDER_CLOUDFLARE):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "cloudflare_account_required")
+        # Adopt records already present in the selected Cloudflare account
+        # before the migration sync publishes the panel's complete zone.
+        try:
+            pull_cloudflare_domain_records(conn, domain, provider_account_id=provider_account_id)
+        except DNSProviderError as exc:
+            logging.warning("Could not pull existing Cloudflare records for %s during provider migration: %s", domain["name"], exc)
+    else:
+        provider_account_id = None
+    ensure_no_active_dns_sync(conn, domain["id"])
+    previous_state = {
+        "provider": domain["dns_provider"] if "dns_provider" in domain.keys() else DNS_PROVIDER_LOCAL_POWERDNS,
+        "provider_account_id": domain["dns_provider_account_id"] if "dns_provider_account_id" in domain.keys() else None,
+        "provider_zone_id": domain["provider_zone_id"] if "provider_zone_id" in domain.keys() else None,
+        "nameservers": parse_json_field(domain["nameservers_json"] if "nameservers_json" in domain.keys() else "", []),
+        "provider_state": parse_json_field(domain["provider_state_json"] if "provider_state_json" in domain.keys() else "", {}),
+    }
+    migration_state = {
+        "from": previous_state,
+        "to": {"provider": provider_key, "provider_account_id": provider_account_id},
+        "status": "pending_provider_sync",
+        "delete_old_provider_zone": False,
+        "started_by": actor_label,
+        "started_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    local_provider = dns_provider_by_key(conn, DNS_PROVIDER_LOCAL_POWERDNS)
+    local_config = parse_json_field(local_provider["config_json"], {}) if local_provider else {}
+    nameservers = [] if provider_key == DNS_PROVIDER_CLOUDFLARE else (local_config.get("nameservers") or ["ns1.mango.test", "ns2.mango.test"])
+    conn.execute(
+        """
+        UPDATE domains
+        SET previous_dns_provider = dns_provider,
+            previous_dns_provider_account_id = dns_provider_account_id,
+            previous_provider_zone_id = provider_zone_id,
+            dns_provider = ?,
+            dns_provider_account_id = ?,
+            nameservers_json = ?,
+            dns_status = 'pending_provider_sync',
+            dns_migration_state_json = ?,
+            provider_state_json = ?
+        WHERE id = ?
+        """,
+        (
+            provider_key,
+            provider_account_id,
+            json.dumps(nameservers),
+            json.dumps(migration_state, sort_keys=True),
+            json.dumps({"migration": migration_state, "previous": previous_state}, sort_keys=True),
+            domain["id"],
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE dns_zones
+        SET provider = ?, provider_account_id = ?, dns_status = 'pending_provider_sync',
+            status = 'pending_provider_sync', nameservers_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE domain_id = ?
+        """,
+        (provider_key, provider_account_id, json.dumps(nameservers), domain["id"]),
+    )
+    return enqueue_agent_job(conn, "sync_dns_zone", "domain", domain["id"], {"reason": "provider_migration", "from": previous_state["provider"], "to": provider_key})
+
+
+def account_runtime(conn, account_id):
+    row = conn.execute("SELECT runtime_json FROM account_stacks WHERE account_id = ?", (account_id,)).fetchone()
+    runtime = parse_json_field(row["runtime_json"], {}) if row else {}
+    # Runtime JSON is persisted across account rebuilds.  Older stacks stored
+    # the file browser host as files.<account>.<panel-domain>, while the edge
+    # certificate/route uses files-<account>.<panel-domain>.  Normalize at the
+    # read boundary so existing accounts cannot launch the legacy hostname.
+    account_row = conn.execute("SELECT username FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+    public_host = (runtime.get("public_host") or "").strip()
+    if public_host in {"127.0.0.1", "localhost", "0.0.0.0", "::1", ""}:
+        persisted = get_system_setting(conn, "public_host", "")
+        public_host = (persisted or CONFIG.public_host or "").strip()
+    username = (account_row["username"] if account_row else runtime.get("username") or "").strip()
+    if username and public_host and public_host not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+        runtime["public_host"] = public_host
+        runtime["username"] = username
+        runtime["filebrowser_url"] = f"https://files-{username}.{public_host}"
+        runtime["phpmyadmin_url"] = f"https://pma-{username}.{public_host}"
+        runtime["adminer_url"] = f"https://adminer-{username}.{public_host}"
+        # Account mailservers share the edge Docker network, where the short
+        # alias `mailserver` is ambiguous.  Pin SnappyMail to this account's
+        # unique mailserver container name.
+        runtime["mail_backend_host"] = f"mp-{username}-mailserver"
+        # Persisted runtimes can predate production host configuration and
+        # contain development-only mail-uXXXX.localhost values.  Derive the
+        # public per-account MX/mail hostname at the read boundary so the
+        # client panel never instructs customers to publish an unusable MX.
+        mail_host = f"mail.{username}.{public_host}"
+        mail_edge_host = f"mail.{public_host}"
+        runtime["mail_host"] = mail_host
+        # SnappyMail's login handoff is a POST; use the canonical HTTPS host
+        # so the request is not converted into a 308 redirect mid-handoff.
+        runtime["mail_webmail_backend_url"] = f"https://{mail_host}"
+        runtime["mail_webmail_url"] = f"https://{mail_host}/webmail"
+        runtime["mail_webmail_login_url"] = f"https://{mail_host}/webmail/login"
+        runtime["mail_edge_host"] = mail_edge_host
+        runtime["mail_edge_url"] = f"http://{mail_edge_host}"
+        runtime["mail_edge_webmail_url"] = f"http://{mail_edge_host}/webmail"
+        runtime["mail_edge_login_url"] = f"http://{mail_edge_host}/webmail/login"
+    return runtime
+
+
+def localize_client_rows(rows, timezone_name):
+    try:
+        zone = ZoneInfo(timezone_name or "UTC")
+    except ZoneInfoNotFoundError:
+        zone = timezone.utc
+    for row in rows:
+        for key, value in list(row.items()):
+            if not isinstance(value, str) or not value or not (key.endswith("_at") or key in {"created_at", "updated_at"}):
+                continue
+            try:
+                raw = value.replace("Z", "+00:00")
+                parsed = datetime.fromisoformat(raw)
+                if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=timezone.utc)
+                row[key] = parsed.astimezone(zone).isoformat(timespec="seconds")
+            except ValueError:
+                pass
+    return rows
+
+
+def client_cache_status(conn, account, website=None):
+    runtime = account_runtime(conn, account["id"])
+    report_path = Path(account["base_path"]) / ".runtime" / "cache" / "last_action.json"
+    report = parse_json_field(report_path.read_text(encoding="utf-8"), {}) if report_path.exists() else {}
+    def website_or_account(column):
+        if website is not None and column in website.keys() and website[column] is not None:
+            return website[column]
+        return account[column] if column in account.keys() and account[column] is not None else 1
+
+    # OPcache, LiteSpeed page cache, and Cloudflare cache are site-scoped.
+    # Object cache and reverse-proxy cache remain account-scoped by design.
+    opcache_enabled = int(website_or_account("opcache_enabled"))
+    object_enabled = int(account["object_cache_enabled"] if "object_cache_enabled" in account.keys() and account["object_cache_enabled"] is not None else 0)
+    reverse_proxy_enabled = int(account["reverse_proxy_cache_enabled"] if "reverse_proxy_cache_enabled" in account.keys() and account["reverse_proxy_cache_enabled"] is not None else 0)
+    litespeed_enabled = int(website_or_account("litespeed_cache_enabled"))
+    cloudflare_enabled = int(website_or_account("cloudflare_cache_enabled"))
+    redis_running = False
+    docker = shutil.which("docker")
+    if docker:
+        probe = subprocess.run([docker, "exec", f"mp-{account['username']}-redis", "redis-cli", "PING"], capture_output=True, text=True, check=False)
+        redis_running = probe.returncode == 0 and probe.stdout.strip().upper() == "PONG"
+    opcache_state = "active" if opcache_enabled else "off"
+    object_state = "active" if object_enabled and redis_running else "off"
+    reverse_proxy_state = "active" if reverse_proxy_enabled else "off"
+    litespeed_state = "active" if litespeed_enabled else "off"
+    cloudflare_state = "active" if cloudflare_enabled else "off"
+    pending = {}
+    pending_rows = conn.execute(
+        """
+        SELECT id, type, status, payload
+        FROM jobs
+        WHERE target_type = 'hosting_account' AND target_id = ?
+          AND status IN ('queued', 'running')
+          AND type IN ('set_cache_settings', 'set_cloudflare_cache')
+        ORDER BY id DESC
+        """,
+        (account["id"],),
+    ).fetchall()
+    for row in pending_rows:
+        payload = parse_json_field(row["payload"], {})
+        if row["type"] == "set_cloudflare_cache":
+            cache_type = "cloudflare"
+        else:
+            cache_type = str(payload.get("type") or "").strip().lower()
+        if cache_type not in {"opcache", "object", "reverse_proxy", "litespeed", "cloudflare"} or cache_type in pending:
+            continue
+        requested_website_id = payload.get("website_id")
+        is_global = payload.get("scope") == "account" or not requested_website_id
+        if website is not None and not is_global and str(requested_website_id) != str(website["id"]):
+            continue
+        if website is None and not is_global:
+            continue
+        pending[cache_type] = {"job_id": row["id"], "status": row["status"]}
+    return {
+        "cache_status": {
+            "opcode_cache": opcache_state,
+            "object_cache": object_state,
+            "opcache_enabled": bool(opcache_enabled),
+            "object_cache_enabled": bool(object_enabled),
+            "reverse_proxy_cache_enabled": bool(reverse_proxy_enabled),
+            "litespeed_cache_enabled": bool(litespeed_enabled),
+            "reverse_proxy": reverse_proxy_state,
+            "litespeed": litespeed_state,
+            "cloudflare_cache_enabled": bool(cloudflare_enabled),
+            "cloudflare_cache": cloudflare_state,
+            "object_cache_reachable": redis_running,
+            "opcode_cache_backend": runtime.get("opcode_cache_backend", "opcache"),
+            "object_cache_backend": runtime.get("object_cache_backend", "redis"),
+            "last_purged": report.get("purged_at"),
+            "last_action": report.get("action"),
+            "last_action_scope": report.get("scope"),
+            "website_id": website["id"] if website is not None else None,
+            "scope": "website" if website is not None else "account",
+            "pending": pending,
+        }
+    }
+
+
+def php_info_probe(account, website=None, runtime=None):
+    runtime = runtime or {}
+    username = account["username"]
+    php_script = (
+        '$opcache_available = function_exists("opcache_get_status");'
+        '$opcache_status = $opcache_available ? @opcache_get_status(false) : null;'
+        '$result = ['
+        '"version" => PHP_VERSION,'
+        '"sapi" => php_sapi_name(),'
+        '"extensions" => get_loaded_extensions(),'
+        '"directives" => ['
+        '"memory_limit" => ini_get("memory_limit"),'
+        '"max_execution_time" => ini_get("max_execution_time"),'
+        '"upload_max_filesize" => ini_get("upload_max_filesize"),'
+        '"post_max_size" => ini_get("post_max_size"),'
+        '"error_reporting" => ini_get("error_reporting"),'
+        '"display_errors" => ini_get("display_errors"),'
+        '"session.gc_maxlifetime" => ini_get("session.gc_maxlifetime"),'
+        '"date.timezone" => ini_get("date.timezone"),'
+        '],'
+        '"opcache" => ['
+        '"available" => $opcache_available,'
+        '"enabled" => $opcache_available ? (bool) ($opcache_status["opcache_enabled"] ?? false) : false,'
+        '"memory_usage" => $opcache_status["memory_usage"] ?? null,'
+        '"statistics" => $opcache_status["opcache_statistics"] ?? null,'
+        '],'
+        '];'
+        'echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);'
+    )
+    probes = []
+    docker = shutil.which("docker")
+    if docker:
+        probes.append([docker, "exec", f"mp-{username}-web", "php", "-r", php_script])
+    probes.append(["php", "-r", php_script])
+    payload = None
+    for command in probes:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=8, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode != 0:
+            continue
+        text = result.stdout.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+            break
+        except json.JSONDecodeError:
+            continue
+    if not payload:
+        payload = {
+            "version": website.get("php_version") if website else "8.3",
+            "sapi": "FPM/FastCGI",
+            "extensions": [
+                "bcmath",
+                "ctype",
+                "curl",
+                "dom",
+                "exif",
+                "fileinfo",
+                "gd",
+                "intl",
+                "json",
+                "mbstring",
+                "mysqli",
+                "opcache",
+                "openssl",
+                "pcre",
+                "pdo",
+                "redis",
+                "xml",
+                "zip",
+            ],
+            "directives": {
+                "memory_limit": "256M",
+                "max_execution_time": str(dict(account).get("php_timeout") or 120),
+                "php_timeout": int(dict(account).get("php_timeout") or 120),
+                "upload_max_filesize": "64M",
+                "post_max_size": "64M",
+                "error_reporting": "E_ALL & ~E_DEPRECATED",
+                "display_errors": "Off",
+                "session.gc_maxlifetime": "1440",
+                "date.timezone": "UTC",
+            },
+            "opcache": {
+                "available": bool(runtime.get("opcode_cache_backend")),
+                "enabled": bool(runtime.get("opcode_cache_backend")),
+                "memory_usage": None,
+                "statistics": None,
+            },
+        }
+    payload["website"] = {
+        "id": website["id"] if website else None,
+        "domain": website["domain"] if website else None,
+        "php_version": website.get("php_version") if website else payload.get("version"),
+        "document_root": website["document_root"] if website else None,
+    }
+    payload["runtime"] = {
+        "web_container": f"mp-{username}-web",
+        "opcode_cache_backend": runtime.get("opcode_cache_backend", "opcache"),
+        "object_cache_backend": runtime.get("object_cache_backend", "redis"),
+    }
+    return payload
+
+
+def client_php_info_payload(conn, account, website_id=None):
+    websites = rows_to_dicts(
+        conn.execute(
+            "SELECT id, account_id, domain, document_root, php_version, ssl_status, status FROM websites WHERE account_id = ? ORDER BY id",
+            (account["id"],),
+        ).fetchall()
+    )
+    website = None
+    if website_id:
+        website = next((item for item in websites if item["id"] == website_id), None)
+        if not website:
+            raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+    elif websites:
+        website = websites[0]
+    runtime = account_runtime(conn, account["id"])
+    payload = php_info_probe(account, website, runtime)
+    payload["websites"] = [
+        {"id": item["id"], "domain": item["domain"], "php_version": item["php_version"], "document_root": item["document_root"]}
+        for item in websites
+    ]
+    return payload
+
+
+def client_disk_usage_payload(conn, account, user_id=None):
+    base_path = Path(account["base_path"]).resolve()
+    scope = get_collaborator_scope(conn, user_id, account["id"]) if user_id else None
+    if scope and scope.get("is_collaborator") and scope.get("allowed_website_ids") is not None:
+        allowed_ws = scope["allowed_website_ids"]
+        if allowed_ws:
+            placeholders = ",".join("?" for _ in allowed_ws)
+            websites = rows_to_dicts(
+                conn.execute(
+                    f"SELECT id, domain, document_root FROM websites WHERE account_id = ? AND id IN ({placeholders}) ORDER BY id",
+                    [account["id"], *allowed_ws],
+                ).fetchall()
+            )
+        else:
+            websites = []
+    else:
+        websites = rows_to_dicts(
+            conn.execute(
+                "SELECT id, domain, document_root FROM websites WHERE account_id = ? ORDER BY id",
+                (account["id"],),
+            ).fetchall()
+        )
+    usage = []
+    for website in websites:
+        doc_root = Path(website["document_root"])
+        size_mb = directory_size_mb(doc_root)
+        try:
+            relative = doc_root.resolve().relative_to(base_path)
+            display_path = f"/{relative.as_posix()}"
+        except ValueError:
+            display_path = f"/{website['domain']}/public_html"
+        usage.append({
+            "path": display_path,
+            "size": format_size_mb(size_mb),
+            "size_mb": round(float(size_mb), 2),
+        })
+    return {"usage": usage, "total_size_mb": round(sum(item["size_mb"] for item in usage), 2)}
+
+
+def format_size_mb(size_mb):
+    size = float(size_mb or 0)
+    if size >= 1024:
+        return f"{size / 1024:.1f} GB"
+    if size >= 1:
+        return f"{size:.1f} MB"
+    return f"{int(round(size * 1024))} KB" if size > 0 else "0 B"
+
+
+def client_sync_jobs(conn, account, limit=50):
+    rows = conn.execute(
+        """
+        SELECT * FROM jobs
+        WHERE (target_type IN ('hosting_account', 'account') AND target_id = ?)
+           OR (target_type = 'website' AND target_id IN (SELECT id FROM websites WHERE account_id = ?))
+           OR (target_type = 'domain' AND target_id IN (SELECT id FROM domains WHERE account_id = ?))
+           OR (
+                target_type = 'dns_record'
+                AND target_id IN (
+                    SELECT dr.id FROM dns_records dr
+                    JOIN domains d ON d.id = dr.domain_id
+                    WHERE d.account_id = ?
+                )
+           )
+           OR (target_type = 'database' AND target_id IN (SELECT id FROM databases WHERE account_id = ?))
+           OR (target_type = 'database_user' AND target_id IN (SELECT id FROM database_users WHERE account_id = ?))
+           OR (
+                target_type = 'database_grant'
+                AND target_id IN (
+                    SELECT dg.id FROM database_grants dg
+                    JOIN databases d ON d.id = dg.database_id
+                    WHERE d.account_id = ?
+                )
+           )
+           OR (target_type = 'backup' AND target_id IN (SELECT id FROM backups WHERE account_id = ?))
+           OR (target_type = 'mailbox' AND target_id IN (SELECT id FROM mailboxes WHERE account_id = ?))
+           OR (target_type = 'cron_job' AND target_id IN (SELECT id FROM cron_jobs WHERE account_id = ?))
+           OR (target_type = 'git_deployment' AND target_id IN (SELECT id FROM git_deployments WHERE account_id = ?))
+           OR (
+                target_type = 'wordpress_install'
+                AND target_id IN (
+                    SELECT wi.id FROM wordpress_installs wi
+                    JOIN websites w ON w.id = wi.website_id
+                    WHERE w.account_id = ?
+                )
+           )
+           OR (
+                target_type = 'script_install'
+                AND target_id IN (
+                    SELECT si.id FROM script_installs si
+                    JOIN websites w ON w.id = si.website_id
+                    WHERE w.account_id = ?
+                )
+           )
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        tuple([account["id"]] * 13 + [limit]),
+    ).fetchall()
+    return [client_visible_job(account, row) for row in rows]
+
+
+def client_visible_job(account, row):
+    item = row_to_dict(row)
+    item["payload"] = parse_json_field(item.get("payload"), {})
+    result = parse_json_field(item.get("result"), {})
+    if not isinstance(result, dict):
+        result = {"message": str(result)}
+    item["result"] = result
+    artifact_path = result.get("artifact_path") or result.get("crontab_path")
+    if artifact_path:
+        artifact = Path(str(artifact_path))
+        base = Path(account["base_path"]).resolve()
+        try:
+            display_path = str(artifact.resolve().relative_to(base))
+        except (OSError, ValueError):
+            display_path = artifact.name
+        item["artifact"] = {"name": artifact.name, "path": display_path, "exists": artifact.exists()}
+    else:
+        item["artifact"] = None
+    return item
+
+
+def admin_traffic_payload(conn, live_window_minutes=5, history_days=30):
+    """Return current and historical website traffic grouped by domain."""
+    attach_analytics(conn, CONFIG.db_path)
+    now = datetime.now(timezone.utc)
+    live_start = (now - timedelta(minutes=live_window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    history_start = (now - timedelta(days=history_days)).strftime("%Y-%m-%d %H:%M:%S")
+
+    current = rows_to_dicts(conn.execute(
+        """
+        SELECT w.id AS website_id, w.domain, w.status,
+               ha.username, COALESCE(u.full_name, u.email) AS owner,
+               COUNT(l.id) AS requests,
+               COALESCE(SUM(l.bytes_sent), 0) AS bandwidth_bytes,
+               MAX(l.created_at) AS last_request_at
+        FROM websites w
+        JOIN hosting_accounts ha ON ha.id = w.account_id
+        JOIN users u ON u.id = ha.user_id
+        LEFT JOIN analytics.access_logs l
+          ON l.website_id = w.id AND l.created_at >= ?
+        GROUP BY w.id, w.domain, w.status, ha.username, u.full_name, u.email
+        ORDER BY bandwidth_bytes DESC, requests DESC, w.domain ASC
+        """,
+        (live_start,),
+    ).fetchall())
+
+    history = rows_to_dicts(conn.execute(
+        """
+        SELECT domain, substr(created_at, 1, 10) AS period,
+               COUNT(*) AS requests,
+               COALESCE(SUM(bytes_sent), 0) AS bandwidth_bytes,
+               SUM(CASE WHEN status_code BETWEEN 400 AND 599 THEN 1 ELSE 0 END) AS errors
+        FROM analytics.access_logs
+        WHERE created_at >= ?
+        GROUP BY domain, substr(created_at, 1, 10)
+        ORDER BY period DESC, bandwidth_bytes DESC, domain ASC
+        """,
+        (history_start,),
+    ).fetchall())
+
+    return {
+        "current": current,
+        "history": history,
+        "live_window_minutes": live_window_minutes,
+        "history_days": history_days,
+        "updated_at": now.isoformat(),
+    }
+
+
+ANALYTICS_FILTERS = {
+    "top-countries": "Top list",
+    "access-logs": "Access logs",
+    "5xx": "Error code 5xx",
+    "4xx": "Error code 4xx",
+    "total-requests": "Total requests",
+    "unique-ips": "Unique IP addresses",
+    "bandwidth": "Bandwidth",
+}
+
+
+def client_analytics_payload(conn, account_id, website_id=None, filter_key="top-countries"):
+    attach_analytics(conn, CONFIG.db_path)
+    analytics_mode, analytics_available = account_analytics_policy(conn, account_id)
+    websites = rows_to_dicts(conn.execute("SELECT id, domain, status, analytics_enabled FROM websites WHERE account_id = ? ORDER BY id", (account_id,)).fetchall())
+    selected = select_analytics_website(websites, website_id)
+    filter_key = filter_key if filter_key in ANALYTICS_FILTERS else "top-countries"
+    if not selected:
+        return empty_analytics_payload(filter_key, analytics_mode=analytics_mode, analytics_available=analytics_available)
+    if not analytics_available:
+        return empty_analytics_payload(filter_key, analytics_mode=analytics_mode, analytics_available=False, domain=selected["domain"], website_id=selected["id"])
+    analytics_enabled = int(selected.get("analytics_enabled", 1) or 0) != 0
+
+    params = [account_id, selected["id"]]
+    where_sql = "account_id = ? AND website_id = ?"
+    summary = conn.execute(
+        f"""
+        SELECT
+          COUNT(*) AS total_requests,
+          COUNT(DISTINCT ip_address) AS unique_ip_addresses,
+          COALESCE(SUM(bytes_sent), 0) AS bandwidth_bytes,
+          SUM(CASE WHEN status_code BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS error_4xx,
+          SUM(CASE WHEN status_code BETWEEN 500 AND 599 THEN 1 ELSE 0 END) AS error_5xx
+        FROM analytics.access_logs
+        WHERE {where_sql}
+        """,
+        params,
+    ).fetchone()
+    top_countries = rows_to_dicts(
+        conn.execute(
+            f"""
+            SELECT country, COUNT(*) AS requests, COALESCE(SUM(bytes_sent), 0) AS bandwidth_bytes
+            FROM analytics.access_logs
+            WHERE {where_sql}
+            GROUP BY country
+            ORDER BY requests DESC, country ASC
+            LIMIT 10
+            """,
+            params,
+        ).fetchall()
+    )
+    access_logs = analytics_logs(conn, where_sql, params)
+    logs_4xx = analytics_logs(conn, f"{where_sql} AND status_code BETWEEN 400 AND 499", params)
+    logs_5xx = analytics_logs(conn, f"{where_sql} AND status_code BETWEEN 500 AND 599", params)
+    top_ips = rows_to_dicts(
+        conn.execute(
+            f"""
+            SELECT COALESCE(ip_address, 'Unknown') AS ip_address, COUNT(*) AS requests, MAX(created_at) AS last_seen_at
+            FROM analytics.access_logs
+            WHERE {where_sql}
+            GROUP BY COALESCE(ip_address, 'Unknown')
+            ORDER BY requests DESC, last_seen_at DESC
+            LIMIT 20
+            """,
+            params,
+        ).fetchall()
+    )
+    top_bandwidth = rows_to_dicts(
+        conn.execute(
+            f"""
+            SELECT path, COUNT(*) AS requests, COALESCE(SUM(bytes_sent), 0) AS bandwidth_bytes
+            FROM analytics.access_logs
+            WHERE {where_sql}
+            GROUP BY path
+            ORDER BY bandwidth_bytes DESC, requests DESC
+            LIMIT 20
+            """,
+            params,
+        ).fetchall()
+    )
+    return {
+        "domain": selected["domain"],
+        "website_id": selected["id"],
+        "analytics_enabled": analytics_enabled,
+        "analytics_mode": analytics_mode,
+        "analytics_available": analytics_available,
+        "filters": [{"key": key, "label": label} for key, label in ANALYTICS_FILTERS.items()],
+        "filter": filter_key,
+        "summary": {
+            "total_requests": int(summary["total_requests"] or 0),
+            "unique_ip_addresses": int(summary["unique_ip_addresses"] or 0),
+            "bandwidth_bytes": int(summary["bandwidth_bytes"] or 0),
+            "error_4xx": int(summary["error_4xx"] or 0),
+            "error_5xx": int(summary["error_5xx"] or 0),
+        },
+        "top_countries": top_countries,
+        "access_logs": access_logs,
+        "error_4xx_logs": logs_4xx,
+        "error_5xx_logs": logs_5xx,
+        "top_ips": top_ips,
+        "top_bandwidth": top_bandwidth,
+    }
+
+
+def select_analytics_website(websites, website_id):
+    if not websites:
+        return None
+    if website_id:
+        for website in websites:
+            if int(website["id"]) == int(website_id):
+                return website
+    return websites[0]
+
+
+def empty_analytics_payload(filter_key, analytics_mode="on", analytics_available=True, domain="", website_id=None):
+    return {
+        "domain": domain,
+        "website_id": website_id,
+        "analytics_enabled": False if analytics_mode == "disabled" else True,
+        "analytics_mode": analytics_mode,
+        "analytics_available": analytics_available,
+        "filters": [{"key": key, "label": label} for key, label in ANALYTICS_FILTERS.items()],
+        "filter": filter_key,
+        "summary": {"total_requests": 0, "unique_ip_addresses": 0, "bandwidth_bytes": 0, "error_4xx": 0, "error_5xx": 0},
+        "top_countries": [],
+        "access_logs": [],
+        "error_4xx_logs": [],
+        "error_5xx_logs": [],
+        "top_ips": [],
+        "top_bandwidth": [],
+    }
+
+
+def analytics_logs(conn, where_sql, params):
+    return rows_to_dicts(
+        conn.execute(
+            f"""
+            SELECT id, created_at, method, path, status_code, bytes_sent, ip_address, country, referer
+            FROM analytics.access_logs
+            WHERE {where_sql}
+            ORDER BY id DESC
+            LIMIT 100
+            """,
+            params,
+        ).fetchall()
+    )
+
+
+COMBINED_LOG_RE = re.compile(
+    r'(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+)(?: [^"]*)?" (?P<status>\d{3}) (?P<bytes>\S+) "(?P<referer>[^"]*)" "(?P<user_agent>[^"]*)"'
+)
+
+
+_PANEL_ACCESS_LOG_CACHE = {}
+
+
+def panel_access_log_website(domain):
+    """Resolve a hosted domain without opening a write transaction per request."""
+    now = time.monotonic()
+    cached = _PANEL_ACCESS_LOG_CACHE.get(domain)
+    if cached and now - cached[0] < 300:
+        return cached[1]
+    website = None
+    try:
+        with connect(CONFIG.db_path) as conn:
+            row = conn.execute(
+                "SELECT id, account_id, domain, document_root FROM websites WHERE domain = ? AND status = 'active'",
+                (domain,),
+            ).fetchone()
+            website = row_to_dict(row) if row else None
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            raise
+    _PANEL_ACCESS_LOG_CACHE[domain] = (now, website)
+    return website
+
+
+def collect_hosted_access_logs(conn, account_id):
+    attach_analytics(conn, CONFIG.db_path)
+    websites = conn.execute(
+        """
+        SELECT w.id, w.account_id, w.domain, w.document_root, COALESCE(w.analytics_enabled, 1) AS analytics_enabled,
+               COALESCE(p.analytics_mode, 'on') AS analytics_mode
+        FROM websites w JOIN hosting_accounts ha ON ha.id = w.account_id
+        JOIN plans p ON p.id = ha.plan_id
+        WHERE w.account_id = ?
+        """,
+        (account_id,),
+    ).fetchall()
+    for website in websites:
+        if website["analytics_mode"] == "disabled" or not int(website["analytics_enabled"]):
+            continue
+        log_path = Path(website["document_root"]).parent / "logs" / "access.log"
+        if not log_path.exists():
+            continue
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-5000:]
+        except OSError:
+            continue
+        for line in lines:
+            parsed = parse_combined_access_log(line)
+            if not parsed:
+                continue
+            created_at = parsed["created_at"]
+            duplicate = conn.execute(
+                """
+                SELECT id FROM analytics.access_logs
+                WHERE website_id = ? AND created_at = ? AND ip_address = ? AND method = ?
+                  AND path = ? AND status_code = ? AND bytes_sent = ?
+                LIMIT 1
+                """,
+                (
+                    website["id"],
+                    created_at,
+                    parsed["ip_address"],
+                    parsed["method"],
+                    parsed["path"],
+                    parsed["status_code"],
+                    parsed["bytes_sent"],
+                ),
+            ).fetchone()
+            if duplicate:
+                continue
+            conn.execute(
+                """
+                INSERT INTO analytics.access_logs(
+                  account_id, website_id, domain, method, path, status_code, bytes_sent,
+                  ip_address, country, user_agent, referer, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    website["account_id"],
+                    website["id"],
+                    website["domain"],
+                    parsed["method"],
+                    parsed["path"],
+                    parsed["status_code"],
+                    parsed["bytes_sent"],
+                    parsed["ip_address"],
+                    request_country({}, parsed["ip_address"]),
+                    parsed["user_agent"],
+                    parsed["referer"],
+                    created_at,
+                ),
+            )
+
+
+def parse_combined_access_log(line):
+    match = COMBINED_LOG_RE.match(line)
+    if not match:
+        return None
+    try:
+        created_at = datetime.strptime(match.group("time"), "%d/%b/%Y:%H:%M:%S %z").isoformat()
+    except ValueError:
+        return None
+    raw_bytes = match.group("bytes")
+    return {
+        "created_at": created_at,
+        "ip_address": match.group("ip")[:80],
+        "method": match.group("method")[:16],
+        "path": match.group("path")[:2048],
+        "status_code": int(match.group("status")),
+        "bytes_sent": int(raw_bytes) if raw_bytes.isdigit() else 0,
+        "referer": "" if match.group("referer") == "-" else match.group("referer")[:1024],
+        "user_agent": "" if match.group("user_agent") == "-" else match.group("user_agent")[:512],
+    }
+
+
+def collect_daily_panel_access_log_metadata(conn):
+    """Import local panel request logs once per day for admin analytics."""
+    attach_analytics(conn, CONFIG.db_path)
+    now = datetime.now(timezone.utc)
+    last_run = get_system_setting(conn, "access_log_metadata_last_run", "")
+    try:
+        if last_run and (now - datetime.fromisoformat(last_run.replace("Z", "+00:00"))).total_seconds() < 86400:
+            return 0
+    except ValueError:
+        pass
+
+    imported = 0
+    for account in conn.execute("SELECT id FROM hosting_accounts WHERE status = 'active'").fetchall():
+        collect_hosted_access_logs(conn, account["id"])
+    websites = conn.execute(
+        """
+        SELECT w.id, w.account_id, w.domain, w.document_root, COALESCE(w.analytics_enabled, 1) AS analytics_enabled,
+               COALESCE(p.analytics_mode, 'on') AS analytics_mode
+        FROM websites w JOIN hosting_accounts ha ON ha.id = w.account_id
+        JOIN plans p ON p.id = ha.plan_id
+        WHERE w.status = 'active'
+        """
+    ).fetchall()
+    for website in websites:
+        if website["analytics_mode"] == "disabled" or not int(website["analytics_enabled"]):
+            continue
+        log_path = Path(website["document_root"]).parent / "logs" / "Zeropanel-access.jsonl"
+        if not log_path.exists():
+            continue
+        cursor_path = log_path.with_suffix(".cursor")
+        try:
+            offset = int(cursor_path.read_text(encoding="ascii").strip() or "0") if cursor_path.exists() else 0
+            if offset > log_path.stat().st_size:
+                offset = 0
+            rows = []
+            with log_path.open("r", encoding="utf-8", errors="replace") as log_file:
+                log_file.seek(offset)
+                for line in log_file:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    rows.append((
+                        int(record.get("account_id") or website["account_id"]),
+                        int(record.get("website_id") or website["id"]),
+                        str(record.get("domain") or website["domain"])[:255],
+                        str(record.get("method") or "GET")[:16],
+                        str(record.get("path") or "/")[:2048],
+                        int(record.get("status_code") or 200),
+                        int(record.get("bytes_sent") or 0),
+                        str(record.get("ip_address") or "")[:80],
+                        str(record.get("country") or "Unknown")[:80],
+                        str(record.get("user_agent") or "")[:512],
+                        str(record.get("referer") or "")[:1024],
+                        str(record.get("created_at") or now.strftime("%Y-%m-%d %H:%M:%S")),
+                    ))
+                new_offset = log_file.tell()
+            if rows:
+                conn.executemany(
+                    """INSERT INTO analytics.access_logs(
+                       account_id, website_id, domain, method, path, status_code, bytes_sent,
+                       ip_address, country, user_agent, referer, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                imported += len(rows)
+            cursor_path.write_text(str(new_offset), encoding="ascii")
+        except (OSError, ValueError):
+            continue
+    set_system_setting(conn, "access_log_metadata_last_run", now.isoformat())
+    return imported
+
+
+def optional_positive_int(value):
+    if value in (None, ""):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_id")
+    if number <= 0:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_id")
+    return number
+
+
+def request_domain(headers):
+    raw = headers.get("X-Zeropanel-Domain") or headers.get("X-Forwarded-Host") or headers.get("Host") or ""
+    domain = str(raw).split(",", 1)[0].strip().lower()
+    if ":" in domain:
+        domain = domain.split(":", 1)[0]
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789.-")
+    if not domain or any(ch not in allowed for ch in domain):
+        return ""
+    return domain
+
+
+CLOUDFLARE_IP_NETWORKS = [
+    ipaddress.ip_network("173.245.48.0/20"),
+    ipaddress.ip_network("103.21.244.0/22"),
+    ipaddress.ip_network("103.22.200.0/22"),
+    ipaddress.ip_network("103.31.4.0/22"),
+    ipaddress.ip_network("141.101.64.0/18"),
+    ipaddress.ip_network("108.162.192.0/18"),
+    ipaddress.ip_network("190.93.240.0/20"),
+    ipaddress.ip_network("188.114.96.0/20"),
+    ipaddress.ip_network("197.234.240.0/22"),
+    ipaddress.ip_network("198.41.128.0/17"),
+    ipaddress.ip_network("162.158.0.0/15"),
+    ipaddress.ip_network("104.16.0.0/12"),
+    ipaddress.ip_network("172.64.0.0/13"),
+    ipaddress.ip_network("131.0.72.0/22"),
+    ipaddress.ip_network("2400:cb00::/32"),
+    ipaddress.ip_network("2606:4700::/32"),
+    ipaddress.ip_network("2803:f800::/32"),
+    ipaddress.ip_network("2405:b000::/32"),
+    ipaddress.ip_network("2405:8100::/32"),
+    ipaddress.ip_network("2a06:98c0::/29"),
+    ipaddress.ip_network("2c0f:f248::/32"),
+]
+
+
+def is_cloudflare_ip(obj):
+    return any(obj in net for net in CLOUDFLARE_IP_NETWORKS)
+
+
+def is_valid_client_ip(ip_str):
+    if not ip_str or not isinstance(ip_str, str):
+        return False
+    clean_ip = ip_str.strip()
+    try:
+        obj = ipaddress.ip_address(clean_ip)
+        if obj.is_private or obj.is_loopback or obj.is_link_local or obj.is_unspecified:
+            return False
+        if is_cloudflare_ip(obj):
+            return False
+        return True
+    except ValueError:
+        return False
+
+
+def client_ip(handler):
+    headers = getattr(handler, "headers", {}) or {}
+    cf_ip = str(headers.get("CF-Connecting-IP", "")).strip()
+    if cf_ip and is_valid_client_ip(cf_ip):
+        return cf_ip[:80]
+
+    real_ip = str(headers.get("X-Real-IP", "")).strip()
+    if real_ip and is_valid_client_ip(real_ip):
+        return real_ip[:80]
+
+    forwarded = str(headers.get("X-Forwarded-For", "")).strip()
+    if forwarded:
+        for part in forwarded.split(","):
+            candidate = part.strip()
+            if candidate and is_valid_client_ip(candidate):
+                return candidate[:80]
+
+    if hasattr(handler, "client_address") and handler.client_address:
+        ip = str(handler.client_address[0]).strip()
+        if is_valid_client_ip(ip):
+            return ip[:80]
+
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:80]
+    if hasattr(handler, "client_address") and handler.client_address:
+        return str(handler.client_address[0])[:80]
+    return ""
+
+
+def request_country(headers, ip_address):
+    for header in ["CF-IPCountry", "X-Country", "X-AppEngine-Country"]:
+        value = str(headers.get(header, "")).strip()
+        if value and value != "ZZ":
+            return value[:80]
+    try:
+        parsed = ipaddress.ip_address(ip_address)
+    except ValueError:
+        return "Unknown"
+    if parsed.is_loopback or parsed.is_private:
+        return "Local network"
+    return "Unknown"
+
+
+RESOURCE_WINDOWS = {
+    "1m": 60,
+    "5m": 5 * 60,
+    "10m": 10 * 60,
+    "30m": 30 * 60,
+    "2h": 2 * 60 * 60,
+    "1d": 24 * 60 * 60,
+    "7d": 7 * 24 * 60 * 60,
+    "30d": 30 * 24 * 60 * 60,
+}
+
+
+def resource_usage_payload(conn, account, window_key):
+    account = dict(account)
+    if window_key not in RESOURCE_WINDOWS:
+        window_key = "30m"
+    try:
+        now = int(time.time())
+        start = now - RESOURCE_WINDOWS[window_key]
+        rows = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT sampled_at, cpu_percent, memory_mb, memory_limit_mb, storage_mb, storage_limit_mb, inodes_used, inodes_limit, COALESCE(bandwidth_mb, 0) AS bandwidth_mb, source
+                FROM resource_usage_samples
+                WHERE account_id = ? AND sampled_at >= ?
+                ORDER BY sampled_at
+                """,
+                (account["id"], start),
+            ).fetchall()
+        )
+        # This is a read-only dashboard endpoint.  Filesystem/Docker usage is
+        # collected by the periodic collector; never calculate it while a
+        # client request is waiting.
+        current = _resource_sample_with_storage_fallback(conn, account["id"], rows[-1]) if rows else cached_resource_usage(account)
+        samples = downsample_resource_usage(rows, max_points=240)
+    except Exception as exc:
+        print(f"resource usage payload failed: {exc}")
+        current = cached_resource_usage(account)
+        samples = []
+    return {
+        "range": window_key,
+        "windows": list(RESOURCE_WINDOWS.keys()),
+        "current": current,
+        "samples": samples,
+    }
+
+
+def _resource_sample_with_storage_fallback(conn, account_id, sample):
+    """Avoid showing zero when a large filesystem scan timed out."""
+    if not sample:
+        return sample
+    current = dict(sample)
+    if float(current.get("storage_mb") or 0) > 0 or int(current.get("inodes_used") or 0) <= 0:
+        return current
+    previous = conn.execute(
+        "SELECT storage_mb FROM resource_usage_samples WHERE account_id = ? AND storage_mb > 0 ORDER BY sampled_at DESC LIMIT 1",
+        (account_id,),
+    ).fetchone()
+    if previous and previous["storage_mb"] is not None:
+        current["storage_mb"] = round(float(previous["storage_mb"]), 2)
+    return current
+
+
+def ensure_resource_usage_history(conn, account):
+    count = conn.execute("SELECT COUNT(*) AS count FROM resource_usage_samples WHERE account_id = ?", (account["id"],)).fetchone()["count"]
+    if count >= 10:
+        return
+    now = int(time.time())
+    estimate = resource_usage_estimate(account)
+    rows = []
+    for offset in range(30 * 24 * 60 * 60, 2 * 60 * 60, -15 * 60):
+        rows.append(simulated_resource_sample(account, estimate, now - offset))
+    for offset in range(2 * 60 * 60, 0, -60):
+        rows.append(simulated_resource_sample(account, estimate, now - offset))
+    conn.executemany(
+        """
+        INSERT INTO resource_usage_samples(account_id, sampled_at, cpu_percent, memory_mb, memory_limit_mb, storage_mb, storage_limit_mb, inodes_used, inodes_limit, bandwidth_mb, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+
+def collect_all_resource_usage_samples(config=None):
+    config = config or CONFIG
+    init_db(config.db_path)
+    with connect(config.db_path) as conn:
+        collect_daily_panel_access_log_metadata(conn)
+        accounts = conn.execute(
+            """
+            SELECT ha.*, p.memory_mb, p.storage_mb
+            FROM hosting_accounts ha
+            JOIN plans p ON p.id = ha.plan_id
+            ORDER BY ha.id
+            """
+        ).fetchall()
+        for account in accounts:
+            collect_resource_usage_sample(conn, account)
+        prune_before = int(time.time()) - RESOURCE_WINDOWS["30d"] - 3600
+        conn.execute("DELETE FROM resource_usage_samples WHERE sampled_at < ?", (prune_before,))
+
+
+def collect_resource_usage_sample(conn, account, force=False):
+    account = dict(account)
+    now = int(time.time())
+    if not force:
+        last = conn.execute(
+            "SELECT sampled_at FROM resource_usage_samples WHERE account_id = ? ORDER BY sampled_at DESC LIMIT 1",
+            (account["id"],),
+        ).fetchone()
+        if last and int(last["sampled_at"]) > now - 45:
+            return
+    sample = docker_resource_usage(account) or resource_usage_estimate(account)
+    base_path = Path(account["base_path"])
+    path_info = path_usage(base_path) if base_path.exists() else {"bytes": 0, "inodes": 0}
+    storage_mb = _storage_mb_with_fallback(conn, account["id"], path_info)
+    inodes_used = int(path_info["inodes"])
+    storage_limit_mb = float(account["storage_mb"] if "storage_mb" in account.keys() and account["storage_mb"] is not None else sample.get("storage_limit_mb") or 0)
+    inodes_limit = int(account["inode_limit"] if "inode_limit" in account.keys() and account["inode_limit"] is not None else 0)
+
+    attach_analytics(conn, CONFIG.db_path)
+    bw_row = conn.execute("SELECT COALESCE(SUM(bytes_sent), 0) / (1024.0 * 1024.0) AS bw_mb FROM analytics.access_logs WHERE account_id = ?", (account["id"],)).fetchone()
+    bandwidth_mb = round(float(bw_row["bw_mb"]), 2) if bw_row else 0.0
+
+    conn.execute(
+        """
+        INSERT INTO resource_usage_samples(account_id, sampled_at, cpu_percent, memory_mb, memory_limit_mb, storage_mb, storage_limit_mb, inodes_used, inodes_limit, bandwidth_mb, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account["id"],
+            now,
+            sample["cpu_percent"],
+            sample["memory_mb"],
+            sample["memory_limit_mb"],
+            storage_mb,
+            storage_limit_mb,
+            inodes_used,
+            inodes_limit,
+            bandwidth_mb,
+            sample["source"],
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE hosting_accounts
+        SET inodes_used = ?, storage_used_mb = ?
+        WHERE id = ?
+        """,
+        (inodes_used, storage_mb, account["id"]),
+    )
+
+
+_DOCKER_STATS_CACHE = {}
+
+
+def docker_resource_usage(account):
+    account = dict(account)
+    username = account.get("username", "")
+    now = time.time()
+    if username in _DOCKER_STATS_CACHE:
+        cached_ts, cached_val = _DOCKER_STATS_CACHE[username]
+        if now - cached_ts < 30:
+            return cached_val
+
+    docker = shutil.which("docker")
+    if not docker:
+        return None
+    # FTP and SSH/SFTP run inside the existing web container.
+    containers = [f"mp-{username}-{service}" for service in ["web", "filebrowser", "phpmyadmin", "db"]]
+    try:
+        result = subprocess.run(
+            [docker, "stats", "--no-stream", "--format", "{{json .}}", *containers],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    cpu_percent = 0.0
+    memory_mb = 0.0
+    memory_limit_mb = float(account.get("memory_mb") or 0)
+    for line in result.stdout.splitlines():
+        try:
+            stat = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        cpu_percent += parse_percent(stat.get("CPUPerc"))
+        mem_usage, mem_limit = parse_docker_mem(stat.get("MemUsage"))
+        memory_mb += mem_usage
+        if mem_limit:
+            memory_limit_mb = max(memory_limit_mb, mem_limit)
+    estimate = resource_usage_estimate(account)
+    res = {
+        "cpu_percent": round(cpu_percent, 2),
+        "memory_mb": round(memory_mb, 2),
+        "memory_limit_mb": memory_limit_mb or estimate["memory_limit_mb"],
+        "storage_mb": estimate["storage_mb"],
+        "storage_limit_mb": estimate["storage_limit_mb"],
+        "source": "docker",
+    }
+    _DOCKER_STATS_CACHE[username] = (now, res)
+    return res
+
+
+def resource_usage_estimate(account):
+    account = dict(account)
+    storage_mb = directory_size_mb(Path(account["base_path"]))
+    storage_limit_mb = float(account.get("storage_mb") or 0)
+    memory_limit_mb = float(account.get("memory_mb") or 0)
+    seed = int(account["id"]) * 17 + int(time.time() // 60)
+    cpu_percent = 2 + (seed % 19)
+    memory_mb = min(memory_limit_mb or 1024, 80 + ((seed * 13) % 260))
+    return {
+        "sampled_at": int(time.time()),
+        "cpu_percent": round(float(cpu_percent), 2),
+        "memory_mb": round(float(memory_mb), 2),
+        "memory_limit_mb": memory_limit_mb,
+        "storage_mb": round(float(storage_mb), 2),
+        "storage_limit_mb": storage_limit_mb,
+        "source": "filesystem",
+    }
+
+
+def cached_resource_usage(account):
+    """Return a cheap dashboard fallback without touching the account disk."""
+    account = dict(account)
+    storage_mb = float(account.get("storage_used_mb") or 0)
+    storage_limit_mb = float(account.get("storage_mb") or 0)
+    memory_limit_mb = float(account.get("memory_mb") or 0)
+    return {
+        "sampled_at": int(time.time()),
+        "cpu_percent": 0.0,
+        "memory_mb": 0.0,
+        "memory_limit_mb": memory_limit_mb,
+        "storage_mb": round(storage_mb, 2),
+        "storage_limit_mb": storage_limit_mb,
+        "inodes_used": int(account.get("inodes_used") or 0),
+        "inodes_limit": int(account.get("inode_limit") or 0),
+        "bandwidth_mb": 0.0,
+        "source": "cached",
+    }
+
+
+def simulated_resource_sample(account, estimate, sampled_at):
+    account = dict(account)
+    wave = (sampled_at // 60 + int(account["id"]) * 11) % 100
+    cpu = max(0, min(100, estimate["cpu_percent"] + ((wave % 13) - 6)))
+    memory = max(0, estimate["memory_mb"] + ((wave % 17) - 8) * 2)
+    storage = max(0, estimate["storage_mb"] * (0.94 + (wave % 7) / 100))
+    inodes = int(estimate.get("inodes_used") or 0)
+    inodes_lim = int(estimate.get("inodes_limit") or account.get("inode_limit") or 100000)
+    bandwidth = max(0.0, round(0.5 + ((wave % 23) * 0.4), 2))
+    return (
+        account["id"],
+        sampled_at,
+        round(cpu, 2),
+        round(memory, 2),
+        estimate["memory_limit_mb"],
+        round(storage, 2),
+        estimate["storage_limit_mb"],
+        inodes,
+        inodes_lim,
+        bandwidth,
+        "historical-estimate",
+    )
+
+
+def directory_size_mb(path):
+    if not path.exists():
+        return 0.0
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total / (1024 * 1024)
+
+
+def parse_percent(value):
+    try:
+        return float(str(value or "0").replace("%", "").strip())
+    except ValueError:
+        return 0.0
+
+
+def parse_docker_mem(value):
+    text = str(value or "")
+    if "/" not in text:
+        return 0.0, 0.0
+    used, limit = [part.strip() for part in text.split("/", 1)]
+    return parse_size_mb(used), parse_size_mb(limit)
+
+
+def parse_size_mb(value):
+    text = str(value or "0").strip().replace(" ", "")
+    units = [("GiB", 1024), ("MiB", 1), ("KiB", 1 / 1024), ("GB", 1000), ("MB", 1), ("KB", 1 / 1000), ("B", 1 / (1024 * 1024))]
+    for suffix, multiplier in units:
+        if text.endswith(suffix):
+            try:
+                return float(text[: -len(suffix)]) * multiplier
+            except ValueError:
+                return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def downsample_resource_usage(rows, max_points=240):
+    if len(rows) <= max_points:
+        return rows
+    bucket_size = max(1, len(rows) // max_points)
+    sampled = []
+    for index in range(0, len(rows), bucket_size):
+        bucket = rows[index : index + bucket_size]
+        if not bucket:
+            continue
+        latest = bucket[-1].copy()
+        for key in ["cpu_percent", "memory_mb", "storage_mb"]:
+            latest[key] = round(sum(float(row[key]) for row in bucket) / len(bucket), 2)
+        sampled.append(latest)
+    return sampled[-max_points:]
+
+
+def client_databases_payload(conn, account_id, user_id=None):
+    runtime = account_runtime(conn, account_id)
+    scope = get_collaborator_scope(conn, user_id, account_id) if user_id else None
+    if scope and scope.get("is_collaborator") and scope.get("allowed_database_ids") is not None:
+        allowed_db = scope["allowed_database_ids"]
+        if allowed_db:
+            placeholders = ",".join("?" for _ in allowed_db)
+            databases = rows_to_dicts(conn.execute(f"SELECT * FROM databases WHERE account_id = ? AND id IN ({placeholders}) ORDER BY id", [account_id, *allowed_db]).fetchall())
+            grants = rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT dg.*, d.name AS database_name, du.username AS username
+                    FROM database_grants dg
+                    JOIN databases d ON d.id = dg.database_id
+                    JOIN database_users du ON du.id = dg.user_id
+                    WHERE d.account_id = ? AND d.id IN ({placeholders})
+                    ORDER BY d.name, du.username
+                    """,
+                    [account_id, *allowed_db],
+                ).fetchall()
+            )
+            allowed_user_ids = {g["user_id"] for g in grants}
+            if allowed_user_ids:
+                u_placeholders = ",".join("?" for _ in allowed_user_ids)
+                users = rows_to_dicts(conn.execute(f"SELECT id, account_id, username, status, created_at, updated_at FROM database_users WHERE account_id = ? AND id IN ({u_placeholders}) ORDER BY id", [account_id, *allowed_user_ids]).fetchall())
+            else:
+                users = []
+        else:
+            databases = []
+            users = []
+            grants = []
+    else:
+        databases = rows_to_dicts(conn.execute("SELECT * FROM databases WHERE account_id = ? ORDER BY id", (account_id,)).fetchall())
+        users = rows_to_dicts(conn.execute("SELECT id, account_id, username, status, created_at, updated_at FROM database_users WHERE account_id = ? ORDER BY id", (account_id,)).fetchall())
+        grants = rows_to_dicts(
+            conn.execute(
+                """
+                SELECT dg.*, d.name AS database_name, du.username AS username
+                FROM database_grants dg
+                JOIN databases d ON d.id = dg.database_id
+                JOIN database_users du ON du.id = dg.user_id
+                WHERE d.account_id = ?
+                ORDER BY d.name, du.username
+                """,
+                (account_id,),
+            ).fetchall()
+        )
+    website_domains = {
+        int(row["id"]): row["domain"]
+        for row in conn.execute("SELECT id, domain FROM websites WHERE account_id = ?", (account_id,)).fetchall()
+    }
+    grants_by_database = {}
+    for grant in grants:
+        grants_by_database.setdefault(grant["database_id"], []).append(grant)
+    for database in databases:
+        database["website_domain"] = website_domains.get(int(database["website_id"])) if database.get("website_id") else None
+        database_grants = grants_by_database.get(database["id"], [])
+        primary_user = database_grants[0]["username"] if database_grants else database["username"]
+        database["grants"] = database_grants
+        database["connection"] = {
+            "host": "db",
+            "port": 3306,
+            "internal_host": "db",
+            "internal_port": 3306,
+            "external_host": runtime.get("db_host"),
+            "external_port": runtime.get("db_port"),
+            "database": database["name"],
+            "username": primary_user,
+            "password": None,
+        }
+    return {"databases": databases, "database_users": users, "database_grants": grants}
+
+
+def client_pg_databases_payload(conn, account_id):
+    runtime = account_runtime(conn, account_id)
+    databases = rows_to_dicts(conn.execute("SELECT * FROM pg_databases WHERE account_id = ? ORDER BY id", (account_id,)).fetchall())
+    users = rows_to_dicts(conn.execute("SELECT id, account_id, username, created_at FROM pg_users WHERE account_id = ? ORDER BY id", (account_id,)).fetchall())
+    grants = rows_to_dicts(
+        conn.execute(
+            """
+            SELECT pg.*, d.name AS database_name, pu.username AS username
+            FROM pg_grants pg
+            JOIN pg_databases d ON d.id = pg.database_id
+            JOIN pg_users pu ON pu.id = pg.user_id
+            WHERE d.account_id = ?
+            ORDER BY d.name, pu.username
+            """,
+            (account_id,),
+        ).fetchall()
+    )
+    grants_by_database = {}
+    for grant in grants:
+        grants_by_database.setdefault(grant["database_id"], []).append(grant)
+    for database in databases:
+        database_grants = grants_by_database.get(database["id"], [])
+        primary_user = database_grants[0]["username"] if database_grants else None
+        database["grants"] = database_grants
+        database["connection"] = {
+            "host": runtime.get("db_host"),
+            "port": runtime.get("pg_port"),
+            "database": database["name"],
+            "username": primary_user,
+            "password": None,
+        }
+    return {"pg_databases": databases, "pg_users": users, "pg_grants": grants}
+
+import re
+from collections import Counter
+from datetime import datetime
+
+LOG_PATTERN = re.compile(
+    r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+) (?P<protocol>[^"]+)" (?P<status>\d+) (?P<size>\d+|-) "(?P<referer>[^"]*)" "(?P<user_agent>[^"]*)"'
+)
+
+def parse_access_log(log_path, max_lines=10000):
+    if not log_path.exists():
+        return {"total_requests": 0, "unique_visitors": 0, "bandwidth_bytes": 0, "errors": 0, "top_pages": [], "visitors_over_time": []}
+    
+    unique_ips = set()
+    total_requests = 0
+    bandwidth = 0
+    errors = 0
+    pages_counter = Counter()
+    dates_counter = Counter()
+    
+    try:
+        # Read the last max_lines (very basic approach: read all and slice, or use deque)
+        # For a more robust approach in production we'd use `tail` or a circular buffer.
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+            if len(lines) > max_lines:
+                lines = lines[-max_lines:]
+            
+            for line in lines:
+                match = LOG_PATTERN.match(line)
+                if match:
+                    total_requests += 1
+                    data = match.groupdict()
+                    unique_ips.add(data["ip"])
+                    
+                    if data["size"] != "-":
+                        bandwidth += int(data["size"])
+                        
+                    status = int(data["status"])
+                    if status >= 400:
+                        errors += 1
+                        
+                    if status < 400 and data["method"] == "GET":
+                        pages_counter[data["path"].split("?")[0]] += 1
+                        
+                    # Time format: 30/May/2026:10:00:00 +0000
+                    try:
+                        date_str = data["time"].split(":")[0]
+                        dates_counter[date_str] += 1
+                    except:
+                        pass
+                        
+    except Exception as e:
+        print(f"Log parsing error: {e}")
+        
+    # Format results
+    top_pages = [{"path": k, "hits": v} for k, v in pages_counter.most_common(10)]
+    
+    # Sort dates chronologically
+    visitors_over_time = []
+    for date_str, count in sorted(dates_counter.items(), key=lambda x: datetime.strptime(x[0], "%d/%b/%Y") if "/" in x[0] else x[0]):
+        visitors_over_time.append({"date": date_str, "requests": count})
+        
+    return {
+        "total_requests": total_requests,
+        "unique_visitors": len(unique_ips),
+        "bandwidth_bytes": bandwidth,
+        "errors": errors,
+        "top_pages": top_pages,
+        "visitors_over_time": visitors_over_time
+    }
+
+def path_int_id(path, prefix):
+    raw = path.removeprefix(prefix).split("/", 1)[0]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_id") from exc
+    if value <= 0:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_id")
+    return value
+
+
+def wordpress_sso_secret(website_id=None, stored_secret=None):
+    """Return the installation's random SSO secret; never derive it globally."""
+    return stored_secret or secrets.token_urlsafe(32)
+
+
+def wordpress_compat_plugin(secret):
+    return f'''<?php
+// Zeropanel Compatibility Plugin
+add_filter('wp_signature_hosts', '__return_empty_array', 999);
+
+// Zeropanel provides one Redis service per hosting account. Keep LiteSpeed
+// Cache pointed at that service even when its own settings are regenerated.
+add_filter('litespeed_conf_load_option_object', function ($value) {{ return true; }}, 20);
+add_filter('litespeed_conf_load_option_object-kind', function ($value) {{ return true; }}, 20);
+add_filter('litespeed_conf_load_option_object-host', function ($value) {{ return 'redis'; }}, 20);
+add_filter('litespeed_conf_load_option_object-port', function ($value) {{ return 6379; }}, 20);
+add_filter('litespeed_conf_load_option_object-db_id', function ($value) {{ return 0; }}, 20);
+// Zeropanel runs due actions from the account-contained cron runner. Avoid
+// Action Scheduler spawning additional frontend loopback requests, which can
+// contend for PHP workers and trigger duplicate shutdown DB work.
+add_filter('action_scheduler_allow_async_request_runner', '__return_false', 20);
+
+// Invalidate Zeropanel's object/page caches when WordPress data or executable
+// code changes. OPcache timestamp validation handles PHP files; these hooks
+// handle cached posts, settings, menus, widgets, plugins, and themes.
+function Zeropanel_invalidate_cache() {{
+    if (function_exists('wp_cache_flush')) @wp_cache_flush();
+    if (!headers_sent()) {{
+        header('X-LiteSpeed-Purge: *', false);
+        header('Cache-Control: no-cache, no-store, must-revalidate, max-age=0', false);
+    }}
+}}
+add_action('save_post', function ($post_id, $post, $update) {{
+    if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id)) return;
+    Zeropanel_invalidate_cache();
+}}, 99, 3);
+add_action('deleted_post', 'Zeropanel_invalidate_cache', 99);
+add_action('created_term', 'Zeropanel_invalidate_cache', 99);
+add_action('edited_term', 'Zeropanel_invalidate_cache', 99);
+add_action('delete_term', 'Zeropanel_invalidate_cache', 99);
+add_action('activated_plugin', 'Zeropanel_invalidate_cache', 99);
+add_action('deactivated_plugin', 'Zeropanel_invalidate_cache', 99);
+add_action('switch_theme', 'Zeropanel_invalidate_cache', 99);
+add_action('upgrader_process_complete', 'Zeropanel_invalidate_cache', 99);
+
+// Do not make anonymous public HTML uncacheable because Facebook Pixel emits
+// a server-side _fbp cookie. The Pixel browser script still manages tracking
+// cookies; all other cookies and authenticated/admin requests are preserved.
+function Zeropanel_strip_public_fbp_cookie($html) {{
+    if (headers_sent()) return $html;
+    $keep = [];
+    foreach (headers_list() as $header) {{
+        if (stripos($header, 'Set-Cookie:') === 0 && preg_match('/^Set-Cookie:\\s*_fbp=/i', $header)) continue;
+        if (stripos($header, 'Set-Cookie:') === 0) $keep[] = substr($header, strlen('Set-Cookie:'));
+    }}
+    if (count($keep) !== count(array_filter(headers_list(), function ($header) {{ return stripos($header, 'Set-Cookie:') === 0; }}))) {{
+        header_remove('Set-Cookie');
+        foreach ($keep as $cookie) header('Set-Cookie:' . $cookie, false);
+    }}
+    return $html;
+}}
+add_action('init', function () {{
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET' && ($_SERVER['REQUEST_METHOD'] ?? '') !== 'HEAD') return;
+    $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+    $logged_in = function_exists('is_user_logged_in') && is_user_logged_in();
+    if (!is_admin() && !$logged_in && strpos($uri, '/wp-json/') !== 0 && strpos($uri, '/wp-admin/') !== 0 && strpos($uri, '/wp-login.php') !== 0) ob_start('Zeropanel_strip_public_fbp_cookie');
+}});
+
+// Short-lived Zeropanel launch tokens log the owning WordPress administrator in.
+add_action('init', function () {{
+    if (empty($_GET['Zeropanel_sso']) || !defined('Zeropanel_SSO_SECRET')) return;
+    $token = (string) $_GET['Zeropanel_sso'];
+    $parts = explode('.', $token);
+    if (count($parts) !== 3) return;
+    $expected = rtrim(strtr(base64_encode(hash_hmac('sha256', $parts[0] . '.' . $parts[1], Zeropanel_SSO_SECRET, true)), '+/', '-_'), '=');
+    if (!hash_equals($expected, $parts[2])) return;
+    $decode = function ($value) {{
+        $value .= str_repeat('=', (4 - strlen($value) % 4) % 4);
+        return json_decode(base64_decode(strtr($value, '-_', '+/')), true);
+    }};
+    $payload = $decode($parts[1]);
+    if (!is_array($payload) || ($payload['purpose'] ?? '') !== 'wordpress_sso' || (int) ($payload['exp'] ?? 0) < time()) return;
+    $user = get_user_by('login', (string) ($payload['admin_username'] ?? ''));
+    if (!$user && !empty($payload['admin_email'])) $user = get_user_by('email', (string) $payload['admin_email']);
+    // Detection metadata can become stale when a site's administrator is
+    // renamed or imported. Use an actual administrator as a safe fallback
+    // instead of sending the user to wp-login.php.
+    if (!$user && function_exists('get_users')) {{
+        $admins = get_users(array('role' => 'administrator', 'number' => 1, 'orderby' => 'ID', 'order' => 'ASC'));
+        $user = $admins ? $admins[0] : null;
+    }}
+    if (!$user) return;
+    wp_set_auth_cookie($user->ID, true, is_ssl());
+    wp_safe_redirect(admin_url());
+    exit;
+}});
+'''
+
+
+def ensure_wordpress_compat(document_root, website_id, admin_username="", admin_email="", sso_secret=None):
+    root = Path(document_root)
+    wp_config = root / "wp-config.php"
+    if not wp_config.exists():
+        return False
+    secret = wordpress_sso_secret(website_id, sso_secret)
+    try:
+        mu_dir = root / "wp-content" / "mu-plugins"
+        mu_dir.mkdir(parents=True, exist_ok=True)
+        (mu_dir / "Zeropanel-compat.php").write_text(wordpress_compat_plugin(secret), encoding="utf-8")
+        config = wp_config.read_text(encoding="utf-8")
+        fs_method_pattern = re.compile(r"define\(\s*(['\"])FS_METHOD\1\s*,\s*(['\"])[^'\"]*\2\s*\)\s*;", re.I)
+        if fs_method_pattern.search(config):
+            config = fs_method_pattern.sub("define('FS_METHOD', 'direct');", config, count=1)
+        else:
+            config = config.replace("<?php", "<?php\ndefine('FS_METHOD', 'direct');\n", 1)
+        # MU plugins are loaded by wp-settings.php, so the SSO secret must be
+        # defined before that file is required. Older configs could have the
+        # define appended at EOF, which made the plugin silently skip SSO.
+        config = re.sub(
+            r"^[ \t]*define\(\s*(['\"])Zeropanel_SSO_SECRET\1\s*,\s*(['\"])[^'\"]*\2\s*\);\s*\n?",
+            "",
+            config,
+            flags=re.I | re.M,
+        )
+        define_line = f"define('Zeropanel_SSO_SECRET', '{secret}');\n"
+        wp_settings_pattern = re.compile(
+            r"require_once\s*(?:\(\s*)?ABSPATH\s*\.\s*['\"]wp-settings\.php['\"]\s*\)?\s*;",
+            re.I,
+        )
+        wp_settings_match = wp_settings_pattern.search(config)
+        if wp_settings_match:
+            config = config[:wp_settings_match.start()] + define_line + "\n" + config[wp_settings_match.start():]
+        else:
+            config = config + "\n" + define_line
+        # WordPress cache drop-ins often persist an absolute plugin path in
+        # wp-config.php. After an account migration that path can point to the
+        # previous account home, causing open_basedir warnings on every PHP
+        # request even though the plugin still exists in the new account.
+        tenweb_dir = root / "wp-content" / "plugins" / "tenweb-speed-optimizer"
+        if tenweb_dir.is_dir():
+            tenweb_path = (tenweb_dir.resolve().as_posix().rstrip("/") + "/")
+            config = re.sub(
+                r"define\(\s*(['\"])TWO_PLUGIN_DIR_CACHE\1\s*,\s*(['\"])[^'\"]*\2\s*\);",
+                lambda m: f"define( 'TWO_PLUGIN_DIR_CACHE', '{tenweb_path}' );",
+                config,
+                count=1,
+            )
+        wp_config.write_text(config, encoding="utf-8")
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
+def require_owned_website(conn, account_id, website_id, user_id=None):
+    row = conn.execute("SELECT * FROM websites WHERE id = ? AND account_id = ?", (website_id, account_id)).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "website_not_found")
+    if user_id:
+        scope = get_collaborator_scope(conn, user_id, account_id)
+        if scope and scope.get("is_collaborator") and scope.get("allowed_website_ids") is not None:
+            if int(website_id) not in scope["allowed_website_ids"]:
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_website")
+    return row
+
+
+def require_owned_database(conn, account_id, database_id, user_id=None):
+    row = conn.execute("SELECT * FROM databases WHERE id = ? AND account_id = ?", (database_id, account_id)).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "database_not_found")
+    if user_id:
+        scope = get_collaborator_scope(conn, user_id, account_id)
+        if scope and scope.get("is_collaborator") and scope.get("allowed_database_ids") is not None:
+            if int(database_id) not in scope["allowed_database_ids"]:
+                raise ApiError(HTTPStatus.FORBIDDEN, "access_denied_to_database")
+    return row
+
+
+def require_owned_database_user(conn, account_id, user_id):
+    row = conn.execute("SELECT * FROM database_users WHERE id = ? AND account_id = ?", (user_id, account_id)).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "database_user_not_found")
+    return row
+
+
+def require_owned_database_grant(conn, account_id, grant_id):
+    row = conn.execute(
+        """
+        SELECT dg.*
+        FROM database_grants dg
+        JOIN databases d ON d.id = dg.database_id
+        JOIN database_users du ON du.id = dg.user_id
+        WHERE dg.id = ? AND d.account_id = ? AND du.account_id = ?
+        """,
+        (grant_id, account_id, account_id),
+    ).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "database_grant_not_found")
+    return row
+
+
+def require_owned_mailbox(conn, account_id, mailbox_id):
+    row = conn.execute("SELECT * FROM mailboxes WHERE id = ? AND account_id = ?", (mailbox_id, account_id)).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "mailbox_not_found")
+    return row
+
+
+def mailbox_storage_metrics(storage_path, quota_mb=0):
+    path = Path(storage_path or "")
+    storage_bytes = mailbox_storage_size_bytes(path) if str(path) else 0
+    inode_count = mailbox_storage_inode_count(path) if str(path) else 0
+    quota_bytes = max(int(quota_mb or 0), 0) * 1024 * 1024
+    used_percent = round((storage_bytes / quota_bytes) * 100, 2) if quota_bytes else 0.0
+    remaining_bytes = max(quota_bytes - storage_bytes, 0) if quota_bytes else 0
+    return {
+        "storage_bytes": storage_bytes,
+        "storage_mb": round(storage_bytes / (1024 * 1024), 2),
+        "storage_inode_count": inode_count,
+        "storage_quota_bytes": quota_bytes,
+        "storage_quota_mb": round(quota_bytes / (1024 * 1024), 2),
+        "storage_remaining_bytes": remaining_bytes,
+        "storage_remaining_mb": round(remaining_bytes / (1024 * 1024), 2),
+        "storage_used_percent": used_percent,
+    }
+
+
+def mailbox_message_folder(direction):
+    return "inbox" if direction == "inbound" else "sent"
+
+
+def mailbox_message_uid(mailbox_id, message_id):
+    return f"{int(mailbox_id)}-{int(message_id)}-{secrets.token_hex(6)}"
+
+
+def parse_mail_message_file(storage_path):
+    path = Path(storage_path or "")
+    if not path.exists() or not path.is_file():
+        return {"body_text": "", "attachments": [], "content_type": "", "subject": "", "headers": {}}
+    try:
+        parsed = BytesParser(policy=email_policy.default).parsebytes(path.read_bytes())
+    except Exception:
+        return {"body_text": "", "attachments": [], "content_type": "", "subject": "", "headers": {}}
+    body_part = parsed.get_body(preferencelist=("plain", "html"))
+    body_text = ""
+    if body_part is not None:
+        try:
+            body_text = body_part.get_content()
+        except Exception:
+            body_text = ""
+    attachments = []
+    for part in parsed.iter_attachments():
+        attachments.append(
+            {
+                "filename": part.get_filename() or "attachment",
+                "content_type": part.get_content_type(),
+                "size_bytes": len(part.get_payload(decode=True) or b""),
+            }
+        )
+    headers = {key.lower(): value for key, value in parsed.items()}
+    return {
+        "body_text": body_text,
+        "attachments": attachments,
+        "content_type": parsed.get_content_type(),
+        "subject": parsed.get("Subject", ""),
+        "headers": headers,
+    }
+
+
+def require_owned_mail_domain(conn, account_id, domain_name):
+    domain = conn.execute(
+        """
+        SELECT d.*, md.id AS mail_domain_id, md.spf_policy, md.dkim_private_key, md.dkim_public_key,
+               md.dkim_selector, md.dmarc_policy, md.catch_all_enabled, md.catch_all_destination,
+               md.status AS mail_status
+        FROM domains d
+        LEFT JOIN mail_domains md ON md.domain_id = d.id
+        WHERE d.account_id = ? AND d.name = ?
+        """,
+        (account_id, domain_name),
+    ).fetchone()
+    if not domain:
+        raise ApiError(HTTPStatus.NOT_FOUND, "mail_domain_not_found")
+    if str(domain["status"]) != "active":
+        raise ApiError(HTTPStatus.BAD_REQUEST, "mail_domain_inactive")
+    if domain["mail_domain_id"]:
+        return domain
+    dkim_material = generate_dkim_material("mango")
+    cur = conn.execute(
+        """
+        INSERT INTO mail_domains(
+          account_id, domain_id, spf_policy, dkim_private_key, dkim_public_key, dkim_selector,
+          dmarc_policy, catch_all_enabled, catch_all_destination, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            domain["id"],
+            recommended_spf_record(),
+            dkim_material["private_key"],
+            dkim_material["public_key"],
+            dkim_material["selector"],
+            recommended_dmarc_record(domain["name"]),
+            0,
+            "",
+            "active",
+        ),
+    )
+    return conn.execute(
+        """
+        SELECT d.*, md.id AS mail_domain_id, md.spf_policy, md.dkim_private_key, md.dkim_public_key,
+               md.dkim_selector, md.dmarc_policy, md.catch_all_enabled, md.catch_all_destination,
+               md.status AS mail_status
+        FROM domains d
+        JOIN mail_domains md ON md.id = ?
+        WHERE d.id = ?
+        """,
+        (cur.lastrowid, domain["id"]),
+    ).fetchone()
+
+
+def require_owned_mail_domain_id(conn, account_id, mail_domain_id):
+    row = conn.execute(
+        """
+        SELECT d.*, md.id AS mail_domain_id, md.spf_policy, md.dkim_private_key, md.dkim_public_key,
+               md.dkim_selector, md.dmarc_policy, md.catch_all_enabled, md.catch_all_destination,
+               md.status AS mail_status
+        FROM mail_domains md
+        JOIN domains d ON d.id = md.domain_id
+        WHERE md.id = ? AND md.account_id = ? AND d.account_id = ?
+        """,
+        (mail_domain_id, account_id, account_id),
+    ).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "mail_domain_not_found")
+    return row
+
+
+def mailbox_row_payload(conn, mailbox):
+    payload = row_to_dict(mailbox)
+    payload.pop("password_hash", None)
+    payload.pop("password_secret", None)
+    payload.update(mailbox_storage_metrics(payload.get("storage_path"), payload.get("quota_mb", 0)))
+    runtime = account_runtime(conn, payload.get("account_id"))
+    if runtime:
+        mail_host = runtime.get("mail_host") or runtime.get("mail_edge_host")
+        mail_url = runtime.get("mail_webmail_backend_url") or (f"http://{mail_host}" if mail_host else "")
+        payload["smtp_host"] = mail_host
+        payload["smtp_port"] = runtime.get("smtp_port")
+        payload["smtp_tls_port"] = runtime.get("smtp_tls_port")
+        payload["smtp_encryption"] = "STARTTLS" if payload["smtp_port"] not in {0, 465} else "SSL/TLS"
+        payload["imap_host"] = mail_host
+        payload["imap_port"] = runtime.get("imap_port", runtime.get("smtp_port", 0) + 1)
+        payload["imap_tls_port"] = runtime.get("imap_tls_port")
+        payload["imap_encryption"] = "STARTTLS" if payload["imap_port"] not in {0, 993} else "SSL/TLS"
+        payload["pop_host"] = mail_host
+        payload["pop_port"] = runtime.get("pop_port", runtime.get("smtp_port", 0) + 2)
+        payload["pop_tls_port"] = runtime.get("pop_tls_port")
+        payload["pop_encryption"] = "STARTTLS" if payload["pop_port"] not in {0, 995} else "SSL/TLS"
+        payload["sieve_port"] = runtime.get("sieve_port")
+        payload["webmail_url"] = runtime.get("mail_webmail_url") or runtime.get("mail_edge_webmail_url") or (f"{mail_url}/webmail" if mail_url else "")
+        payload["mail_webmail_url"] = payload["webmail_url"]
+        payload["mail_webmail_login_url"] = runtime.get("mail_webmail_login_url") or runtime.get("mail_edge_login_url") or ""
+        payload["webmail_login_url"] = payload["mail_webmail_login_url"]
+        payload["mail_edge_host"] = runtime.get("mail_edge_host") or ""
+        payload["mail_edge_url"] = runtime.get("mail_edge_url") or mail_url
+        payload["mail_edge_webmail_url"] = runtime.get("mail_edge_webmail_url") or (f"{payload['mail_edge_url']}/webmail" if payload["mail_edge_url"] else "")
+        payload["mail_edge_login_url"] = runtime.get("mail_edge_login_url") or (f"{payload['mail_edge_url']}/webmail/login" if payload["mail_edge_url"] else "")
+        payload["mail_host"] = mail_host
+        payload["mail_username"] = payload.get("email", "")
+        payload["jmap_url"] = f"{mail_url}/api/public/mail-jmap" if mail_url else ""
+        mailbox_login_base = payload["mail_webmail_login_url"] or ""
+        mailbox_suffix = "/{}".format(payload["id"]) if payload.get("id") else ""
+        mailbox_query = "?email={}".format(quote(payload.get("email") or "", safe="")) if payload.get("email") else ""
+        payload["mailbox_login_url"] = f"{mailbox_login_base}{mailbox_suffix}{mailbox_query}"
+        payload["webmail_login_url"] = payload["mailbox_login_url"]
+    if "mail_domain_id" in payload and payload.get("mail_domain_id"):
+        domain = conn.execute("SELECT * FROM mail_domains WHERE id = ?", (payload["mail_domain_id"],)).fetchone()
+        if domain:
+            payload["mail_domain_status"] = domain["status"]
+            payload["mail_domain_selector"] = domain["dkim_selector"]
+    return payload
+
+
+def client_mailboxes_payload(conn, account_id):
+    account = conn.execute(
+        """
+        SELECT ha.id, p.daily_email_limit
+        FROM hosting_accounts ha
+        JOIN plans p ON p.id = ha.plan_id
+        WHERE ha.id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    mailbox_rows = conn.execute(
+        """
+        SELECT m.id, m.account_id, m.email, m.local_part, m.domain, m.storage_path, m.mail_domain_id,
+               m.quota_mb, m.status, m.created_at, m.sent_today_count, m.sent_today_on,
+               m.last_inbound_at, m.last_outbound_at,
+               md.status AS mail_domain_status, md.dkim_selector AS mail_domain_selector
+        FROM mailboxes m
+        LEFT JOIN mail_domains md ON md.id = m.mail_domain_id
+        WHERE m.account_id = ?
+        ORDER BY m.id
+        """,
+        (account_id,),
+    ).fetchall()
+    runtime = account_runtime(conn, account_id)
+    # The shared edge is for HTTP webmail/JMAP only.  SMTP/IMAP/POP use the
+    # account's public mail hostname and isolated host ports.
+    mail_host = runtime.get("mail_host") if runtime else ""
+    imap_port = runtime.get("imap_port", runtime.get("smtp_port", 0) + 1) if runtime else 0
+    pop_port = runtime.get("pop_port", runtime.get("smtp_port", 0) + 2) if runtime else 0
+    login_base = runtime.get("mail_webmail_login_url") if runtime else ""
+    webmail_base = runtime.get("mail_webmail_url") if runtime else ""
+    jmap_url = f"{runtime.get('mail_webmail_backend_url')}/api/public/mail-jmap" if runtime and runtime.get("mail_webmail_backend_url") else ""
+    mail_domains = conn.execute(
+        """
+        SELECT d.id, d.name, d.status, md.id AS mail_domain_id, md.dkim_selector, md.dkim_public_key, md.status AS mail_status
+        FROM domains d
+        LEFT JOIN mail_domains md ON md.domain_id = d.id
+        WHERE d.account_id = ?
+        ORDER BY d.name
+        """,
+        (account_id,),
+    ).fetchall()
+    mailbox_dicts = rows_to_dicts(mailbox_rows)
+    for mailbox in mailbox_dicts:
+        mailbox.update(mailbox_storage_metrics(mailbox.get("storage_path"), mailbox.get("quota_mb", 0)))
+        mailbox["mail_host"] = mail_host
+        mailbox["smtp_host"] = mail_host
+        mailbox["smtp_port"] = runtime.get("smtp_port") if runtime else 0
+        mailbox["smtp_tls_port"] = runtime.get("smtp_tls_port") if runtime else 0
+        mailbox["smtp_encryption"] = "STARTTLS" if mailbox["smtp_port"] not in {0, 465} else "SSL/TLS"
+        mailbox["imap_host"] = mail_host
+        mailbox["imap_port"] = imap_port
+        mailbox["imap_tls_port"] = runtime.get("imap_tls_port") if runtime else 0
+        mailbox["imap_encryption"] = "STARTTLS" if mailbox["imap_port"] not in {0, 993} else "SSL/TLS"
+        mailbox["pop_host"] = mail_host
+        mailbox["pop_port"] = pop_port
+        mailbox["pop_tls_port"] = runtime.get("pop_tls_port") if runtime else 0
+        mailbox["pop_encryption"] = "STARTTLS" if mailbox["pop_port"] not in {0, 995} else "SSL/TLS"
+        mailbox["sieve_port"] = runtime.get("sieve_port") if runtime else 0
+        mailbox["webmail_url"] = webmail_base or (f"http://{mail_host}/webmail" if mail_host else "")
+        mailbox["webmail_login_url"] = "{}{}?email={}".format(login_base, f"/{mailbox['id']}" if login_base else "", quote(mailbox["email"], safe=""))
+        mailbox["mailbox_login_url"] = mailbox["webmail_login_url"]
+        mailbox["jmap_url"] = jmap_url
+        mailbox["mail_edge_host"] = runtime.get("mail_edge_host") if runtime else ""
+        mailbox["mail_edge_url"] = runtime.get("mail_edge_url") if runtime else ""
+        mailbox["mail_edge_webmail_url"] = runtime.get("mail_edge_webmail_url") if runtime else ""
+        mailbox["mail_edge_login_url"] = runtime.get("mail_edge_login_url") if runtime else ""
+        mailbox["mail_username"] = mailbox["email"]
+    return {
+        "mailboxes": mailbox_dicts,
+        "mail_domains": rows_to_dicts(mail_domains),
+        "daily_email_limit": account["daily_email_limit"] if account else 0,
+        "mail_host": mail_host,
+        "smtp_port": runtime.get("smtp_port") if runtime else 0,
+        "smtp_tls_port": runtime.get("smtp_tls_port") if runtime else 0,
+        "imap_port": imap_port,
+        "imap_tls_port": runtime.get("imap_tls_port") if runtime else 0,
+        "pop_port": pop_port,
+        "pop_tls_port": runtime.get("pop_tls_port") if runtime else 0,
+        "sieve_port": runtime.get("sieve_port") if runtime else 0,
+        "mail_webmail_login_url": login_base,
+        "mail_edge_host": runtime.get("mail_edge_host") if runtime else "",
+        "mail_edge_url": runtime.get("mail_edge_url") if runtime else "",
+        "mail_edge_webmail_url": runtime.get("mail_edge_webmail_url") if runtime else "",
+        "mail_edge_login_url": runtime.get("mail_edge_login_url") if runtime else "",
+        "jmap_url": jmap_url,
+    }
+
+
+def shared_mail_edge_host():
+    if CONFIG.public_host == "127.0.0.1":
+        return "mail.mango.test"
+    return f"mail.{CONFIG.public_host}"
+
+
+def mail_dns_target_for_account(username):
+    """Return the public MX target; development keeps its local hostname."""
+    if CONFIG.public_host == "127.0.0.1":
+        return f"mail-{username}.localhost"
+    return shared_mail_edge_host()
+
+
+def shared_mail_edge_url():
+    return f"http://{shared_mail_edge_host()}"
+
+
+def detect_public_access_host():
+    configured = (CONFIG.public_host or "").strip()
+    if configured and configured not in {"127.0.0.1", "localhost", "0.0.0.0", "::"}:
+        return configured
+
+    probes = [
+        ("1.1.1.1", 80),
+        ("8.8.8.8", 80),
+    ]
+    for host, port in probes:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((host, port))
+                candidate = sock.getsockname()[0]
+            ip = ipaddress.ip_address(candidate)
+            if not ip.is_loopback and not ip.is_unspecified:
+                return candidate
+        except Exception:
+            continue
+
+    try:
+        candidate = socket.gethostbyname(socket.gethostname())
+        ip = ipaddress.ip_address(candidate)
+        if not ip.is_loopback and not ip.is_unspecified:
+            return candidate
+    except Exception:
+        pass
+
+    return ""
+
+
+def shared_mail_edge_manifest(conn):
+    edge_host = shared_mail_edge_host()
+    edge_url = shared_mail_edge_url()
+    edge_webmail_url = f"{edge_url}/webmail"
+    edge_login_url = f"{edge_url}/webmail/login"
+    accounts = []
+    manifest_mailboxes = []
+    manifest_domains = []
+    account_rows = conn.execute(
+        """
+        SELECT ha.id, ha.username, ha.status
+        FROM hosting_accounts ha
+        WHERE ha.status = 'active'
+        ORDER BY ha.id
+        """
+    ).fetchall()
+    for account in account_rows:
+        mailboxes = client_mailboxes_payload(conn, account["id"])
+        routing = client_mail_routing_payload(conn, account["id"])
+        manifest_mailboxes.extend(mailboxes["mailboxes"])
+        for domain in routing["mail_domains"]:
+            # Do not expose dkim_private_key (or other client-only policy
+            # fields) through the public edge contract.
+            manifest_domains.append(
+                {
+                    "id": domain.get("domain_id"),
+                    "name": domain.get("name"),
+                    "status": domain.get("domain_status") or domain.get("mail_status"),
+                    "mail_domain_id": domain.get("mail_domain_id"),
+                    "catch_all_enabled": int(domain.get("catch_all_enabled") or 0),
+                    "catch_all_destination": domain.get("catch_all_destination") or "",
+                }
+            )
+        accounts.append(
+            {
+                "account_id": account["id"],
+                "username": account["username"],
+                "status": account["status"],
+                "mail_host": mailboxes["mail_host"],
+                "smtp_port": mailboxes["smtp_port"],
+                "smtp_tls_port": mailboxes["smtp_tls_port"],
+                "imap_port": mailboxes["imap_port"],
+                "imap_tls_port": mailboxes["imap_tls_port"],
+                "pop_port": mailboxes["pop_port"],
+                "pop_tls_port": mailboxes["pop_tls_port"],
+                "sieve_port": mailboxes["sieve_port"],
+                "mail_edge_host": edge_host,
+                "mail_edge_url": edge_url,
+                "mail_edge_webmail_url": edge_webmail_url,
+                "mail_edge_login_url": edge_login_url,
+                "daily_email_limit": mailboxes["daily_email_limit"],
+                "mailboxes": mailboxes["mailboxes"],
+                "mail_domains": routing["mail_domains"],
+                "mail_aliases": routing["mail_aliases"],
+                "mail_forwarders": routing["mail_forwarders"],
+                "mail_autoresponders": routing["mail_autoresponders"],
+                "mail_edge_routes": routing["mail_edge_routes"],
+                "mail_delivery_logs": routing["mail_delivery_logs"][:25],
+            }
+        )
+    return {
+        "provider": "shared-mail-edge",
+        "edge_host": edge_host,
+        "edge_url": edge_url,
+        "edge_webmail_url": edge_webmail_url,
+        "edge_login_url": edge_login_url,
+        # Keep the top-level contract used by the account-stack mail edge
+        # manifest. The nested account view remains for multi-tenant clients.
+        "mailboxes": manifest_mailboxes,
+        "domains": manifest_domains,
+        "accounts": accounts,
+    }
+
+
+def client_mail_routing_payload(conn, account_id):
+    runtime = account_runtime(conn, account_id)
+    account = conn.execute(
+        """
+        SELECT ha.id, p.daily_email_limit
+        FROM hosting_accounts ha
+        LEFT JOIN plans p ON p.id = ha.plan_id
+        WHERE ha.id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    mail_domain_rows = conn.execute(
+        """
+        SELECT d.id AS domain_id, d.name, d.status AS domain_status,
+               md.id AS mail_domain_id, md.spf_policy, md.dkim_private_key, md.dkim_public_key,
+               md.dkim_selector, md.dmarc_policy, md.catch_all_enabled, md.catch_all_destination,
+               md.status AS mail_status
+        FROM domains d
+        LEFT JOIN mail_domains md ON md.domain_id = d.id
+        WHERE d.account_id = ?
+        ORDER BY d.name
+        """,
+        (account_id,),
+    ).fetchall()
+    auth_rows = []
+    for row in mail_domain_rows:
+        dns_records = conn.execute("SELECT * FROM dns_records WHERE domain_id = ? ORDER BY type, name", (row["domain_id"],)).fetchall()
+        auth = mail_auth_health(row_to_dict(row), rows_to_dicts(dns_records), runtime.get("mail_host"))
+        auth_rows.append({**row_to_dict(row), "auth": auth, "dkim_dns": dkim_dns_value(row["dkim_public_key"])})
+    aliases = conn.execute(
+        "SELECT * FROM mail_aliases WHERE account_id = ? ORDER BY id DESC",
+        (account_id,),
+    ).fetchall()
+    forwarders = conn.execute(
+        "SELECT * FROM mail_forwarders WHERE account_id = ? ORDER BY id DESC",
+        (account_id,),
+    ).fetchall()
+    autoresponders = conn.execute(
+        """
+        SELECT ma.*, m.email AS mailbox_email
+        FROM mail_autoresponders ma
+        JOIN mailboxes m ON m.id = ma.mailbox_id
+        WHERE ma.account_id = ?
+        ORDER BY ma.id DESC
+        """,
+        (account_id,),
+    ).fetchall()
+    logs = conn.execute(
+        """
+        SELECT l.*, m.email AS mailbox_email
+        FROM mail_delivery_logs l
+        LEFT JOIN mailboxes m ON m.id = l.mailbox_id
+        WHERE l.account_id = ?
+        ORDER BY l.id DESC
+        LIMIT 100
+        """,
+        (account_id,),
+    ).fetchall()
+    route_rows = conn.execute(
+        "SELECT * FROM mail_edge_routes WHERE account_id = ? ORDER BY domain",
+        (account_id,),
+    ).fetchall()
+    mail_edge_routes = []
+    for route in rows_to_dicts(route_rows):
+        route["manifest"] = parse_json_field(route.get("manifest_json"), {})
+        mail_edge_routes.append(route)
+    return {
+        "mail_domains": auth_rows,
+        "mail_aliases": rows_to_dicts(aliases),
+        "mail_forwarders": rows_to_dicts(forwarders),
+        "mail_autoresponders": rows_to_dicts(autoresponders),
+        "mail_edge_routes": mail_edge_routes,
+        "mail_delivery_logs": rows_to_dicts(logs),
+        "daily_email_limit": account["daily_email_limit"] if account else 0,
+    }
+
+
+def log_mail_delivery(conn, account_id, action, source_email="", destination_email="", mailbox_id=None, direction="outbound", details=None, status="queued"):
+    conn.execute(
+        """
+        INSERT INTO mail_delivery_logs(account_id, mailbox_id, action, direction, source_email, destination_email, details_json, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (account_id, mailbox_id, action, direction, source_email, destination_email, json.dumps(details or {}), status),
+    )
+
+
+def mailbox_send_budget(conn, account_id):
+    row = conn.execute(
+        """
+        SELECT ha.id, p.daily_email_limit
+        FROM hosting_accounts ha
+        JOIN plans p ON p.id = ha.plan_id
+        WHERE ha.id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    return int(row["daily_email_limit"] if row else 0)
+
+
+def mailbox_reset_send_count_if_needed(conn, mailbox_id, today):
+    conn.execute(
+        """
+        UPDATE mailboxes
+        SET sent_today_count = 0, sent_today_on = ?
+        WHERE id = ? AND sent_today_on != ?
+        """,
+        (today, mailbox_id, today),
+    )
+
+
+def mailbox_increment_send_count(conn, mailbox_id, today):
+    mailbox_reset_send_count_if_needed(conn, mailbox_id, today)
+    conn.execute(
+        """
+        UPDATE mailboxes
+        SET sent_today_count = sent_today_count + 1, sent_today_on = ?, last_outbound_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (today, mailbox_id),
+    )
+
+
+def mailbox_delivery_subject_preview(subject, body):
+    preview = " ".join(str(body or "").split())
+    if not preview:
+        preview = str(subject or "").strip()
+    return preview[:180]
+
+
+def mailbox_resolve_recipients(conn, account_id, recipient_email):
+    recipient_email = normalize_email(recipient_email)
+    targets = []
+    mailbox = conn.execute("SELECT * FROM mailboxes WHERE account_id = ? AND email = ?", (account_id, recipient_email)).fetchone()
+    if mailbox:
+        targets.append({"type": "mailbox", "mailbox": mailbox, "email": mailbox["email"]})
+        return targets
+
+    alias = conn.execute(
+        "SELECT * FROM mail_aliases WHERE account_id = ? AND source_email = ? AND status = 'active'",
+        (account_id, recipient_email),
+    ).fetchone()
+    if alias:
+        resolved = conn.execute("SELECT * FROM mailboxes WHERE account_id = ? AND email = ?", (account_id, alias["destination_email"])).fetchone()
+        if resolved:
+            targets.append({"type": "alias", "mailbox": resolved, "email": resolved["email"]})
+        else:
+            targets.append({"type": "external", "email": alias["destination_email"]})
+        return targets
+
+    forwarder = conn.execute(
+        "SELECT * FROM mail_forwarders WHERE account_id = ? AND source_email = ? AND status = 'active'",
+        (account_id, recipient_email),
+    ).fetchone()
+    if forwarder:
+        resolved = conn.execute("SELECT * FROM mailboxes WHERE account_id = ? AND email = ?", (account_id, forwarder["destination_email"])).fetchone()
+        if resolved:
+            targets.append({"type": "forwarder", "mailbox": resolved, "email": resolved["email"]})
+        else:
+            targets.append({"type": "external", "email": forwarder["destination_email"]})
+        return targets
+
+    domain_name = split_mailbox_address(recipient_email)[1]
+    if domain_name:
+        domain = conn.execute(
+            """
+            SELECT md.*
+            FROM mail_domains md
+            JOIN domains d ON d.id = md.domain_id
+            WHERE d.account_id = ? AND d.name = ? AND md.catch_all_enabled = 1
+            """,
+            (account_id, domain_name),
+        ).fetchone()
+        if domain and domain["catch_all_destination"]:
+            resolved = conn.execute("SELECT * FROM mailboxes WHERE account_id = ? AND email = ?", (account_id, domain["catch_all_destination"])).fetchone()
+            if resolved:
+                targets.append({"type": "catch_all", "mailbox": resolved, "email": resolved["email"]})
+            else:
+                targets.append({"type": "external", "email": domain["catch_all_destination"]})
+            return targets
+
+    targets.append({"type": "external", "email": recipient_email})
+    return targets
+
+
+def mailbox_store_message(conn, account_id, mailbox, direction, sender_email, recipients, subject, body, storage_label, status="stored", attachments=None):
+    preview = mailbox_delivery_subject_preview(subject, body)
+    storage_path = mailbox["storage_path"] if "storage_path" in mailbox.keys() else ""
+    mailbox_dir = Path(storage_path) if storage_path else None
+    if mailbox_dir:
+        ensure_mailbox_storage(mailbox_dir)
+    raw_message_bytes = build_mail_message_bytes(
+        sender_email,
+        recipients,
+        subject,
+        body,
+        attachments=attachments,
+        extra_headers={
+            "X-Zeropanel-Account-ID": account_id,
+            "X-Zeropanel-Mailbox-ID": mailbox["id"],
+            "X-Zeropanel-Delivery-Direction": direction,
+        },
+    )
+    size_bytes = len(raw_message_bytes)
+    quota_mb = mailbox["quota_mb"] if "quota_mb" in mailbox.keys() else 0
+    quota_bytes = max(int(quota_mb or 0), 0) * 1024 * 1024
+    if mailbox_dir and quota_bytes:
+        current_bytes = mailbox_storage_size_bytes(mailbox_dir)
+        if current_bytes + size_bytes > quota_bytes:
+            raise ApiError(HTTPStatus.INSUFFICIENT_STORAGE, "mailbox_quota_reached")
+    payload = {
+        "account_id": account_id,
+        "mailbox_id": mailbox["id"],
+        "direction": direction,
+        "sender_email": sender_email,
+        "recipients_json": json.dumps(recipients),
+        "subject": subject,
+        "body_preview": preview,
+        "storage_path": storage_path,
+        "size_bytes": size_bytes,
+        "status": status,
+        "folder": mailbox_message_folder(direction),
+        "is_read": 0 if direction == "inbound" else 1,
+        "headers_json": json.dumps(
+            {
+                "from": sender_email,
+                "to": recipients,
+                "subject": subject,
+                "direction": direction,
+            }
+        ),
+    }
+    cur = conn.execute(
+        """
+        INSERT INTO mail_messages(
+          account_id, mailbox_id, direction, sender_email, recipients_json, subject, body_preview, storage_path, size_bytes, status, folder, is_read, message_uid, headers_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["account_id"],
+            payload["mailbox_id"],
+            payload["direction"],
+            payload["sender_email"],
+            payload["recipients_json"],
+            payload["subject"],
+            payload["body_preview"],
+            payload["storage_path"],
+            payload["size_bytes"],
+            payload["status"],
+            payload["folder"],
+            payload["is_read"],
+            "",
+            payload["headers_json"],
+        ),
+    )
+    message_id = cur.lastrowid
+    message_uid = mailbox_message_uid(mailbox["id"], message_id)
+    conn.execute("UPDATE mail_messages SET message_uid = ? WHERE id = ?", (message_uid, message_id))
+    if mailbox_dir:
+        message_leaf = "{}.{}.{}-{}.eml".format(int(time.time_ns()), secrets.token_hex(8), sanitize_mailbox_component(storage_label, "message"), message_id)
+        folder = "new" if direction == "inbound" else "cur"
+        message_file = mailbox_dir / folder / message_leaf
+        try:
+            message_file.write_bytes(raw_message_bytes)
+        except Exception:
+            conn.execute("DELETE FROM mail_messages WHERE id = ?", (message_id,))
+            raise
+        conn.execute("UPDATE mail_messages SET storage_path = ? WHERE id = ?", (str(message_file), message_id))
+    return message_id
+
+
+def require_owned_pg_database(conn, account_id, database_id):
+    row = conn.execute("SELECT * FROM pg_databases WHERE id = ? AND account_id = ?", (database_id, account_id)).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "database_not_found")
+    return row
+
+
+def require_owned_pg_user(conn, account_id, user_id):
+    row = conn.execute("SELECT * FROM pg_users WHERE id = ? AND account_id = ?", (user_id, account_id)).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "database_user_not_found")
+    return row
+
+
+def require_owned_pg_grant(conn, account_id, grant_id):
+    row = conn.execute(
+        """
+        SELECT pg.*
+        FROM pg_grants pg
+        JOIN pg_databases d ON d.id = pg.database_id
+        JOIN pg_users pu ON pu.id = pg.user_id
+        WHERE pg.id = ? AND d.account_id = ? AND pu.account_id = ?
+        """,
+        (grant_id, account_id, account_id),
+    ).fetchone()
+    if not row:
+        raise ApiError(HTTPStatus.NOT_FOUND, "database_grant_not_found")
+    return row
+
+
+def admin_count():
+    init_db(CONFIG.db_path)
+    with connect(CONFIG.db_path) as conn:
+        return conn.execute("SELECT COUNT(*) AS count FROM admins").fetchone()["count"]
+
+
+def normalize_email(value):
+    email = str(value or "").strip().lower()
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1] or len(email) > 254:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_email")
+    return email
+
+
+def clean_text(value, fallback):
+    text = " ".join(str(value or "").strip().split())
+    return text[:120] if text else fallback
+
+
+def validate_password(value):
+    password = str(value or "")
+    if len(password) < 10:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "password_too_short")
+    return password
+
+
+def validate_db_identifier(value, error):
+    text = str(value or "").strip()
+    if not text or len(text) > 64:
+        raise ApiError(HTTPStatus.BAD_REQUEST, error)
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+    if any(char not in allowed for char in text):
+        raise ApiError(HTTPStatus.BAD_REQUEST, error)
+    return text
+
+
+def validate_db_password(value):
+    password = str(value or "")
+    if len(password) < 8:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "database_password_too_short")
+    return password
+
+
+def validate_db_privileges(value):
+    privileges = str(value or "ALL").strip().upper()
+    aliases = {"ALL", "READ", "READ_WRITE"}
+    granular = {
+        "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX",
+        "REFERENCES", "EXECUTE", "TRIGGER", "CREATE VIEW", "SHOW VIEW", "EVENT",
+        "CREATE ROUTINE", "ALTER ROUTINE", "CREATE TEMPORARY TABLES", "LOCK TABLES",
+    }
+    if privileges in aliases:
+        return privileges
+    selected = [item.strip() for item in privileges.split(",") if item.strip()]
+    if not selected or len(set(selected)) != len(selected) or any(item not in granular for item in selected):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_database_privileges")
+    return ", ".join(selected)
+
+
+def validate_hotlink_allowed_domains(value):
+    text = str(value or "").strip()
+    for line in text.splitlines():
+        domain = line.strip()
+        if domain:
+            sanitize_domain(domain)
+    return text
+
+
+def validate_plan_dns_accounts(conn, plan):
+    account_ids = [int(value) for value in parse_json_field(plan.get("dns_allowed_provider_accounts_json"), [])]
+    if account_ids:
+        placeholders = sql_placeholders(account_ids)
+        rows = conn.execute(
+            f"""
+            SELECT a.id
+            FROM dns_provider_accounts a
+            JOIN dns_providers p ON p.id = a.provider_id
+            WHERE a.id IN ({placeholders}) AND a.status = 'active' AND p.key = ?
+            """,
+            [*account_ids, DNS_PROVIDER_CLOUDFLARE],
+        ).fetchall()
+        if len(rows) != len(set(account_ids)):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider_account_id")
+    default_id = plan.get("dns_default_provider_account_id")
+    if plan.get("dns_default_provider") == DNS_PROVIDER_CLOUDFLARE:
+        if default_id and account_ids and int(default_id) not in set(account_ids):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "default_dns_provider_account_not_allowed")
+        if default_id:
+            valid = conn.execute(
+                """
+                SELECT a.id FROM dns_provider_accounts a
+                JOIN dns_providers p ON p.id = a.provider_id
+                WHERE a.id = ? AND a.status = 'active' AND p.key = ?
+                """,
+                (int(default_id), DNS_PROVIDER_CLOUDFLARE),
+            ).fetchone()
+            if not valid:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider_account_id")
+
+
+def validate_plan_payload(body):
+    name = clean_text(body.get("name"), "")
+    if not name:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_plan_name")
+    memory_mb = positive_int(body.get("memory_mb"), "invalid_memory_mb", minimum=128, maximum=262144)
+    storage_mb = positive_int(body.get("storage_mb"), "invalid_storage_mb", minimum=100, maximum=104857600)
+    inode_limit = positive_int(body.get("inode_limit"), "invalid_inode_limit", minimum=1000, maximum=1000000000)
+    max_websites = positive_int(body.get("max_websites"), "invalid_max_websites", minimum=1, maximum=10000)
+    max_subdomains = positive_int(body.get("max_subdomains", 10), "invalid_max_subdomains", minimum=0, maximum=10000)
+    max_databases = positive_int(body.get("max_databases"), "invalid_max_databases", minimum=0, maximum=10000)
+    max_mailboxes = positive_int(body.get("max_mailboxes"), "invalid_max_mailboxes", minimum=0, maximum=10000)
+    max_cron_jobs = positive_int(body.get("max_cron_jobs"), "invalid_max_cron_jobs", minimum=0, maximum=10000)
+    daily_email_limit = positive_int(body.get("daily_email_limit"), "invalid_daily_email_limit", minimum=0, maximum=10000000)
+    backup_retention_days = positive_int(body.get("backup_retention_days"), "invalid_backup_retention_days", minimum=1, maximum=3650)
+    backup_schedule = str(body.get("backup_schedule", "daily") or "daily").strip().lower()
+    if backup_schedule not in {"disabled", "daily", "weekly", "monthly", "quarterly"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_backup_schedule")
+    cpu_limit = normalize_cpu_limit(body.get("cpu_limit", "1"))
+    service_cpu_limit = normalize_cpu_limit(body.get("service_cpu_limit", "0.25"))
+    total_cpu_limit = normalize_cpu_limit(body.get("total_cpu_limit", "2"))
+    if float(total_cpu_limit) < float(cpu_limit):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "total_cpu_limit_below_web_cpu_limit")
+    max_processes = positive_int(body.get("max_processes", 120), "invalid_max_processes", minimum=0, maximum=10000)
+    php_workers = positive_int(body.get("php_workers", 60), "invalid_php_workers", minimum=0, maximum=1000)
+    php_timeout = positive_int(body.get("php_timeout", 120), "invalid_php_timeout", minimum=10, maximum=3600)
+    bandwidth_mb = positive_int(body.get("bandwidth_mb", 0), "invalid_bandwidth_mb", minimum=0, maximum=104857600)
+    
+    nameserver_1 = clean_text(body.get("nameserver_1", "ns1.dns-parking.com"), "")
+    nameserver_2 = clean_text(body.get("nameserver_2", "ns2.dns-parking.com"), "")
+    backup_location = clean_text(body.get("backup_location", "Singapore"), "")
+    frontend_frameworks = clean_text(body.get("frontend_frameworks", "Angular, Astro, Next.js, Nuxt, Parcel, React, Vue.js, etc."), "")
+    backend_frameworks = clean_text(body.get("backend_frameworks", "Express, Fastify, Hono, NestJS, Nuxt, React Router, SvelteKit"), "")
+    nodejs_versions = clean_text(body.get("nodejs_versions", "24.x, 22.x, 20.x and 18.x"), "")
+    package_managers = clean_text(body.get("package_managers", "npm (default), yarn and pnpm"), "")
+    dns_default_provider = str(body.get("dns_default_provider", DNS_PROVIDER_LOCAL_POWERDNS) or DNS_PROVIDER_LOCAL_POWERDNS).strip()
+    if dns_default_provider not in DNS_PROVIDER_KEYS:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider")
+    raw_allowed_providers = body.get("dns_allowed_providers", body.get("dns_allowed_providers_json", [dns_default_provider]))
+    if isinstance(raw_allowed_providers, str):
+        try:
+            allowed_providers = json.loads(raw_allowed_providers)
+        except json.JSONDecodeError:
+            allowed_providers = [item.strip() for item in raw_allowed_providers.split(",") if item.strip()]
+    else:
+        allowed_providers = list(raw_allowed_providers or [])
+    if dns_default_provider not in allowed_providers:
+        allowed_providers.append(dns_default_provider)
+    if not allowed_providers or any(provider not in DNS_PROVIDER_KEYS for provider in allowed_providers):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_allowed_providers")
+    raw_allowed_accounts = body.get("dns_allowed_provider_account_ids", body.get("dns_allowed_provider_accounts_json", []))
+    if isinstance(raw_allowed_accounts, str):
+        try:
+            allowed_account_ids = json.loads(raw_allowed_accounts)
+        except json.JSONDecodeError:
+            allowed_account_ids = [item.strip() for item in raw_allowed_accounts.split(",") if item.strip()]
+    else:
+        allowed_account_ids = list(raw_allowed_accounts or [])
+    try:
+        allowed_account_ids = sorted({positive_int(value, "invalid_dns_provider_account_id") for value in allowed_account_ids})
+    except (TypeError, ValueError):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider_account_id")
+    raw_record_types = body.get("dns_allowed_record_types", body.get("dns_allowed_record_types_json", DEFAULT_DNS_RECORD_TYPES))
+    if isinstance(raw_record_types, str):
+        try:
+            allowed_record_types = json.loads(raw_record_types)
+        except json.JSONDecodeError:
+            allowed_record_types = [item.strip().upper() for item in raw_record_types.split(",") if item.strip()]
+    else:
+        allowed_record_types = [str(item).strip().upper() for item in (raw_record_types or [])]
+    if not allowed_record_types or any(record_type not in DNS_RECORD_TYPES for record_type in allowed_record_types):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_allowed_record_types")
+    dns_default_provider_account_id = body.get("dns_default_provider_account_id")
+    if dns_default_provider_account_id in ("", None):
+        dns_default_provider_account_id = None
+    else:
+        dns_default_provider_account_id = positive_int(dns_default_provider_account_id, "invalid_dns_provider_account_id")
+    dns_customer_editable = 1 if body.get("dns_customer_editable", True) else 0
+    dns_max_records_per_domain = positive_int(body.get("dns_max_records_per_domain", 100), "invalid_dns_max_records", minimum=0, maximum=10000)
+    dns_min_ttl = positive_int(body.get("dns_min_ttl", 60), "invalid_dns_min_ttl", minimum=60, maximum=86400)
+    dns_wildcard_records_allowed = 1 if body.get("dns_wildcard_records_allowed", True) else 0
+    dns_cloudflare_proxy_allowed = 1 if body.get("dns_cloudflare_proxy_allowed", False) else 0
+    dns_dnssec_allowed = 1 if body.get("dns_dnssec_allowed", False) else 0
+    dns_dnssec_required = 1 if body.get("dns_dnssec_required", False) else 0
+    allow_api_access = 1 if body.get("allow_api_access", False) else 0
+    analytics_mode = str(body.get("analytics_mode", "on") or "on").strip().lower()
+    if analytics_mode not in {"off", "on", "disabled"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_analytics_mode")
+    is_reseller = 1 if body.get("is_reseller", False) else 0
+    max_clients = positive_int(body.get("max_clients", 0), "invalid_max_clients", minimum=0, maximum=1000000)
+    max_reseller_subplans = positive_int(body.get("max_reseller_subplans", 0), "invalid_max_reseller_subplans", minimum=0, maximum=100000)
+    if dns_dnssec_required:
+        dns_dnssec_allowed = 1
+    
+    return {
+        "name": name,
+        "cpu_limit": cpu_limit,
+        "service_cpu_limit": service_cpu_limit,
+        "total_cpu_limit": total_cpu_limit,
+        "memory_mb": memory_mb,
+        "storage_mb": storage_mb,
+        "inode_limit": inode_limit,
+        "max_websites": max_websites,
+        "max_subdomains": max_subdomains,
+        "max_databases": max_databases,
+        "max_mailboxes": max_mailboxes,
+        "max_cron_jobs": max_cron_jobs,
+        "daily_email_limit": daily_email_limit,
+        "backup_retention_days": backup_retention_days,
+        "backup_schedule": backup_schedule,
+        "max_processes": max_processes,
+        "php_workers": php_workers,
+        "php_timeout": php_timeout,
+        "bandwidth_mb": bandwidth_mb,
+        "nameserver_1": nameserver_1,
+        "nameserver_2": nameserver_2,
+        "backup_location": backup_location,
+        "frontend_frameworks": frontend_frameworks,
+        "backend_frameworks": backend_frameworks,
+        "nodejs_versions": nodejs_versions,
+        "package_managers": package_managers,
+        "dns_default_provider": dns_default_provider,
+        "dns_allowed_providers_json": json.dumps(sorted(set(allowed_providers))),
+        "dns_allowed_provider_accounts_json": json.dumps(allowed_account_ids),
+        "dns_default_provider_account_id": dns_default_provider_account_id,
+        "dns_customer_editable": dns_customer_editable,
+        "dns_max_records_per_domain": dns_max_records_per_domain,
+        "dns_allowed_record_types_json": json.dumps(sorted(set(allowed_record_types))),
+        "dns_min_ttl": dns_min_ttl,
+        "dns_wildcard_records_allowed": dns_wildcard_records_allowed,
+        "dns_cloudflare_proxy_allowed": dns_cloudflare_proxy_allowed,
+        "dns_dnssec_allowed": dns_dnssec_allowed,
+        "dns_dnssec_required": dns_dnssec_required,
+        "allow_api_access": allow_api_access,
+        "analytics_mode": analytics_mode,
+        "is_reseller": is_reseller,
+        "max_clients": max_clients,
+        "max_reseller_subplans": max_reseller_subplans,
+    }
+
+
+def positive_int(value, error, minimum=1, maximum=None):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ApiError(HTTPStatus.BAD_REQUEST, error)
+    if number < minimum or (maximum is not None and number > maximum):
+        raise ApiError(HTTPStatus.BAD_REQUEST, error)
+    return number
+
+
+def validate_dns_record_payload(body):
+    domain_id = positive_int(body.get("domain_id"), "invalid_domain_id")
+    record_type = str(body.get("type", "A") or "A").strip().upper()
+    if record_type not in DNS_RECORD_TYPES:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_record_type")
+    name = str(body.get("name", "@") or "@").strip()
+    if not name or len(name) > 253 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-@*" for ch in name):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_record_name")
+    value = str(body.get("value") or body.get("content") or "").strip()
+    if not value or len(value) > 4096 or "\n" in value or "\r" in value:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_record_value")
+    ttl = positive_int(body.get("ttl", 300), "invalid_dns_ttl", minimum=60, maximum=86400)
+    priority = body.get("priority")
+    if priority in ("", None):
+        priority = None
+    else:
+        priority = positive_int(priority, "invalid_dns_priority", minimum=0, maximum=65535)
+    proxied_val = body.get("proxied")
+    # Cloudflare proxying is meaningful only for address and hostname records.
+    # Normalize this server-side so an unsupported type can never be stored as
+    # proxied, even if a client sends a forged payload.
+    if record_type not in {"A", "AAAA", "CNAME"}:
+        proxied = 0
+    elif proxied_val is None:
+        proxied = 1 if record_type in {"A", "AAAA", "CNAME"} else 0
+    else:
+        proxied = 1 if proxied_val else 0
+    provider_metadata = body.get("provider_metadata") or body.get("provider_metadata_json") or {}
+    if isinstance(provider_metadata, str):
+        provider_metadata = parse_json_field(provider_metadata, {})
+    if not isinstance(provider_metadata, dict):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_dns_provider_metadata")
+    return {
+        "domain_id": domain_id,
+        "type": record_type,
+        "name": name,
+        "value": value,
+        "ttl": ttl,
+        "priority": priority,
+        "proxied": proxied,
+        "provider_metadata": provider_metadata,
+    }
+
+
+def enforce_dns_record_policy(conn, account_id, record_payload, domain_id, creating=False):
+    plan = conn.execute(
+        """
+        SELECT p.*
+        FROM hosting_accounts ha
+        JOIN plans p ON p.id = ha.plan_id
+        WHERE ha.id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    if not plan:
+        raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+    policy = plan_dns_policy(plan)
+    if not policy["customer_editable"]:
+        raise ApiError(HTTPStatus.FORBIDDEN, "dns_editing_not_allowed")
+    if record_payload["type"] not in set(policy["allowed_record_types"]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "dns_record_type_not_allowed_by_plan")
+    if int(record_payload["ttl"]) < int(policy["min_ttl"]):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "dns_ttl_below_plan_minimum")
+    if not policy["wildcard_records_allowed"] and "*" in record_payload["name"]:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "dns_wildcards_not_allowed_by_plan")
+    if creating:
+        count = conn.execute("SELECT COUNT(*) AS count FROM dns_records WHERE domain_id = ?", (domain_id,)).fetchone()["count"]
+        if int(count) >= int(policy["max_records_per_domain"]):
+            raise ApiError(HTTPStatus.FORBIDDEN, "dns_record_limit_reached")
+
+
+def normalize_cpu_limit(value):
+    raw = str(value or "").strip().lower().replace("cores", "").replace("core", "").strip()
+    try:
+        cpu = float(raw)
+    except ValueError:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cpu_limit")
+    if cpu <= 0 or cpu > 256:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_cpu_limit")
+    return "{:g}".format(cpu)
+
+
+def otpauth_uri(issuer, email, secret):
+    panel_host = str(CONFIG.public_host or "").strip()
+    if panel_host:
+        issuer = "{} - {}".format(panel_host, issuer)
+    label = "{}:{}".format(issuer, email)
+    return "otpauth://totp/{}?secret={}&issuer={}".format(
+        quote(label),
+        quote(secret),
+        quote(issuer),
+    )
+
+
+def resolve_panel_base_domain(request_headers=None):
+    host = ""
+    if request_headers:
+        if isinstance(request_headers, dict):
+            # Behind a reverse proxy Host can be localhost; use the public
+            # host users actually used to reach the panel/API.
+            host = request_headers.get("X-Forwarded-Host") or request_headers.get("Host") or ""
+        elif hasattr(request_headers, "get"):
+            host = request_headers.get("X-Forwarded-Host", "") or request_headers.get("Host", "") or ""
+    # Proxies may pass a comma-separated forwarding chain; the first host is
+    # the one presented by the client.
+    host = str(host).split(",", 1)[0].strip()
+    if not host and hasattr(CONFIG, "public_host"):
+        host = CONFIG.public_host or ""
+
+    if host.startswith("[") and "]" in host:
+        host = host[1:host.index("]")]
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0].strip()
+
+    host = host.strip().lower()
+    if host and host not in {"127.0.0.1", "0.0.0.0", "localhost"}:
+        parts = host.split(".")
+        is_ip = len(parts) == 4 and all(p.isdigit() for p in parts)
+        if not is_ip:
+            # Conventional panel/API endpoints are not part of customer
+            # website hostnames. Keep arbitrary configured subdomains intact.
+            if len(parts) > 2 and parts[0] in {"admin", "api", "client", "panel", "www"}:
+                host = ".".join(parts[1:])
+            return host
+
+    return "mango.test"
+
+
+def get_provisioning_test_domain(username, request_headers=None):
+    base_domain = resolve_panel_base_domain(request_headers)
+    return "{}.{}".format(username, base_domain)
+
+
+def create_initial_hosting_account(conn, user_id, request_headers=None):
+    plan = conn.execute("SELECT * FROM plans ORDER BY id LIMIT 1").fetchone()
+    node = conn.execute("SELECT * FROM nodes ORDER BY id LIMIT 1").fetchone()
+    if not plan or not node:
+        return None
+
+    username = "u{:06d}".format(user_id)
+    base_path = str(CONFIG.account_root / username)
+    cur = conn.execute(
+        """
+        INSERT INTO hosting_accounts(
+          user_id, plan_id, node_id, username, base_path, status,
+          opcache_enabled, object_cache_enabled, reverse_proxy_cache_enabled,
+          litespeed_cache_enabled, cloudflare_cache_enabled
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, plan["id"], node["id"], username, base_path, "provisioning", 1, 0, 0, 1, 1),
+    )
+    account_id = cur.lastrowid
+    domain = get_provisioning_test_domain(username, request_headers=request_headers)
+    document_root = str(CONFIG.account_root / username / "domains" / domain / "public_html")
+    website_id = conn.execute(
+        """
+        INSERT INTO websites(account_id, domain, document_root, php_version, ssl_status, status, analytics_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (account_id, domain, document_root, "8.3", "missing", "active", default_analytics_enabled(conn, account_id)),
+    ).lastrowid
+    dns_assignment = default_domain_dns_assignment(conn, account_id)
+    domain_id = conn.execute(
+        """
+        INSERT INTO domains(
+          account_id, name, kind, status, linked_website_id, dns_provider,
+          dns_provider_account_id, nameservers_json, dns_status, provider_state_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            domain,
+            "managed",
+            "active",
+            website_id,
+            dns_assignment["dns_provider"],
+            dns_assignment["dns_provider_account_id"],
+            json.dumps(dns_assignment["nameservers"]),
+            dns_assignment["dns_status"],
+            json.dumps(dns_assignment["provider_state"], sort_keys=True),
+        ),
+    ).lastrowid
+    conn.execute(
+        "INSERT OR IGNORE INTO mail_domains(account_id, domain_id, status) VALUES (?, ?, ?)",
+        (account_id, domain_id, "active"),
+    )
+    mail_domain_id = conn.execute(
+        "SELECT id FROM mail_domains WHERE account_id = ? AND domain_id = ?",
+        (account_id, domain_id),
+    ).fetchone()["id"]
+    mail_host = mail_dns_target_for_account(username)
+    dkim_material = seed_website_dns_records(conn, domain_id, domain, mail_host)
+    conn.execute(
+        """
+        UPDATE mail_domains
+        SET spf_policy = ?, dkim_private_key = ?, dkim_public_key = ?, dkim_selector = ?, dmarc_policy = ?, catch_all_enabled = ?, catch_all_destination = ?, status = ?
+        WHERE id = ?
+        """,
+        (
+            recommended_spf_record(mail_host),
+            dkim_material["dkim_private_key"],
+            dkim_material["dkim_public_key"],
+            dkim_material["dkim_selector"],
+            recommended_dmarc_record(domain),
+            0,
+            "",
+            "active",
+            mail_domain_id,
+        ),
+    )
+    job_id = enqueue_agent_job(conn, "provision_hosting_account", "hosting_account", account_id, {"signup": True})
+    account = conn.execute("SELECT * FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+    return {
+        "id": account_id,
+        "username": username,
+        "status": account["status"],
+        "base_path": base_path,
+        "default_domain": domain,
+        "provision_job_id": job_id,
+    }
+
+
+def enqueue_agent_job(conn, job_type, target_type, target_id=None, payload=None, inline=None):
+    job_id = create_job(conn, job_type, target_type, target_id, payload)
+    if inline is None:
+        inline = CONFIG.agent_inline
+    if inline:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET status = 'running', attempts = attempts + 1, claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (job_id,),
+        )
+        job = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        Agent(CONFIG).run_claimed_job(conn, job)
+    return job_id
+
+
+def enqueue_dns_zone_sync(conn, domain_id, payload=None):
+    """Queue the latest DNS zone state without rejecting rapid mutations."""
+    queued = conn.execute(
+        """
+        SELECT id FROM jobs
+        WHERE type = 'sync_dns_zone'
+          AND target_type = 'domain'
+          AND target_id = ?
+          AND status = 'queued'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (domain_id,),
+    ).fetchone()
+    if queued:
+        return queued["id"]
+
+    # If a sync is already running, create one follow-up job. The follow-up
+    # reads the committed records after the running job finishes and publishes
+    # all changes made during it.
+    return enqueue_agent_job(conn, "sync_dns_zone", "domain", domain_id, payload or {})
+
+
+def enqueue_mail_policy_sync(conn, account_id, payload=None):
+    payload = dict(payload or {})
+    payload.setdefault("reason", "mail_policy_changed")
+    return enqueue_agent_job(conn, "sync_mail_policy", "hosting_account", account_id, payload)
+
+
+def sanitize_domain(value):
+    domain = str(value or "").strip().lower()
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789.-")
+    if not domain or len(domain) > 253 or any(ch not in allowed for ch in domain) or "." not in domain:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "invalid_domain")
+    return domain
+
+
+def delete_client_website(conn, account, website):
+    website_id = website["id"]
+    domain = website["domain"]
+    domain_row = conn.execute(
+        "SELECT * FROM domains WHERE account_id = ? AND name = ?",
+        (account["id"], domain),
+    ).fetchone()
+    removed_domain = row_to_dict(domain_row) if domain_row else None
+    if domain_row:
+        domain_id = domain_row["id"]
+        conn.execute("DELETE FROM dns_records WHERE domain_id = ?", (domain_id,))
+        conn.execute("DELETE FROM dns_zones WHERE domain_id = ?", (domain_id,))
+        conn.execute("DELETE FROM dns_zone_exports WHERE domain_id = ?", (domain_id,))
+        mail_domain = conn.execute("SELECT id FROM mail_domains WHERE domain_id = ?", (domain_id,)).fetchone()
+        if mail_domain:
+            m_id = mail_domain["id"]
+            conn.execute("UPDATE mailboxes SET mail_domain_id = NULL WHERE mail_domain_id = ?", (m_id,))
+            conn.execute("DELETE FROM mail_edge_routes WHERE domain_id = ? OR mail_domain_id = ?", (domain_id, m_id))
+            conn.execute("DELETE FROM mail_domains WHERE id = ?", (m_id,))
+        else:
+            conn.execute("DELETE FROM mail_edge_routes WHERE domain_id = ?", (domain_id,))
+            conn.execute("DELETE FROM mail_domains WHERE domain_id = ?", (domain_id,))
+
+
+
+        conn.execute("UPDATE acme_certificate_orders SET domain_id = NULL WHERE domain_id = ?", (domain_id,))
+        # A website deletion also releases its managed domain.  Leaving an
+        # unlinked row here reserves the name for the old account and blocks
+        # a customer from adding it to another account later.
+        conn.execute("UPDATE websites SET parent_domain_id = NULL WHERE parent_domain_id = ?", (domain_id,))
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'registrar_domains'").fetchone():
+            conn.execute("UPDATE registrar_domains SET domain_id = NULL WHERE domain_id = ?", (domain_id,))
+        conn.execute("DELETE FROM domains WHERE id = ?", (domain_id,))
+    conn.execute("DELETE FROM redirects WHERE website_id = ?", (website_id,))
+    conn.execute("DELETE FROM script_installs WHERE website_id = ?", (website_id,))
+    conn.execute("DELETE FROM wordpress_installs WHERE website_id = ?", (website_id,))
+    attach_analytics(conn, CONFIG.db_path)
+    conn.execute("UPDATE analytics.access_logs SET website_id = NULL WHERE website_id = ?", (website_id,))
+    conn.execute("UPDATE acme_certificate_orders SET website_id = NULL WHERE website_id = ?", (website_id,))
+    conn.execute("UPDATE ssl_certificates SET website_id = NULL, status = 'removed' WHERE website_id = ?", (website_id,))
+    conn.execute("DELETE FROM websites WHERE id = ?", (website_id,))
+
+    return enqueue_agent_job(
+        conn,
+        "delete_website",
+        "hosting_account",
+        account["id"],
+        {
+            "removed_website_id": website_id,
+            "domain": domain,
+            # The worker runs after the database record has gone, so retain
+            # the DNS assignment it needs to remove the authoritative zone.
+            "removed_domain": removed_domain,
+        },
+    )
+
+
+def admin_clients_payload(conn):
+    users = rows_to_dicts(conn.execute("SELECT id, email, full_name, status, created_at FROM users ORDER BY id").fetchall())
+    for user in users:
+        user["accounts"] = admin_client_accounts(conn, user["id"])
+        user["profile"] = user_profile_payload(conn, user["id"])
+    return users
+
+
+def admin_clients_page_payload(conn, search="", page=1, page_size=25):
+    search = str(search or "").strip()
+    where = ""
+    params = []
+    if search:
+        where = "WHERE LOWER(u.email) LIKE ? OR LOWER(COALESCE(u.full_name, '')) LIKE ? OR CAST(u.id AS TEXT) LIKE ?"
+        needle = f"%{search.lower()}%"
+        params = [needle, needle, needle]
+    total = conn.execute(f"SELECT COUNT(*) AS count FROM users u {where}", params).fetchone()["count"]
+    page = max(1, int(page or 1))
+    page_size = min(100, max(10, int(page_size or 25)))
+    offset = (page - 1) * page_size
+    rows = conn.execute(
+        f"SELECT u.id, u.email, u.full_name, u.status, u.created_at FROM users u {where} ORDER BY u.id ASC LIMIT ? OFFSET ?",
+        [*params, page_size, offset],
+    ).fetchall()
+    users = []
+    for row in rows:
+        user = row_to_dict(row)
+        user["accounts"] = admin_client_accounts(conn, user["id"])
+        user["profile"] = user_profile_payload(conn, user["id"])
+        users.append(user)
+    return {
+        "clients": users,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        },
+    }
+
+
+def admin_client_payload(conn, user_id):
+    user = conn.execute("SELECT id, email, full_name, status, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return None
+    payload = row_to_dict(user)
+    payload["accounts"] = admin_client_accounts(conn, user_id)
+    payload["profile"] = user_profile_payload(conn, user_id)
+    return payload
+
+
+PROFILE_TEXT_LIMITS = {
+    "company_name": 160,
+    "phone": 40,
+    "tax_id": 80,
+    "address_line1": 180,
+    "address_line2": 180,
+    "city": 100,
+    "state": 100,
+    "postal_code": 30,
+    "country": 80,
+}
+
+
+def user_profile_payload(conn, user_id):
+    user = conn.execute(
+        "SELECT id, email, full_name, status, created_at, CASE WHEN COALESCE(totp_secret, '') <> '' THEN 1 ELSE 0 END AS has_2fa FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    if not user:
+        return None
+    profile = conn.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
+    billing = {field: (profile[field] if profile else "") for field in PROFILE_TEXT_LIMITS}
+    billing["billing_email"] = profile["billing_email"] if profile else ""
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "full_name": user["full_name"],
+        "status": user["status"],
+        "created_at": user["created_at"],
+        "has_2fa": bool(user["has_2fa"]),
+        "billing": billing,
+    }
+
+
+def profile_text(value, field):
+    text = " ".join(str(value or "").strip().split())
+    limit = PROFILE_TEXT_LIMITS[field]
+    if len(text) > limit:
+        raise ApiError(HTTPStatus.BAD_REQUEST, f"{field}_too_long")
+    return text
+
+
+def profile_billing_payload(body, existing=None):
+    existing = existing or {}
+    result = {}
+    for field in PROFILE_TEXT_LIMITS:
+        value = body[field] if field in body else existing.get(field, "")
+        result[field] = profile_text(value, field)
+    raw_email = body["billing_email"] if "billing_email" in body else existing.get("billing_email", "")
+    result["billing_email"] = normalize_email(raw_email) if str(raw_email or "").strip() else ""
+    return result
+
+
+def save_user_profile(conn, user_id, billing):
+    conn.execute(
+        """
+        INSERT INTO user_profiles(user_id, billing_email, company_name, phone, tax_id, address_line1, address_line2, city, state, postal_code, country, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+          billing_email = excluded.billing_email,
+          company_name = excluded.company_name,
+          phone = excluded.phone,
+          tax_id = excluded.tax_id,
+          address_line1 = excluded.address_line1,
+          address_line2 = excluded.address_line2,
+          city = excluded.city,
+          state = excluded.state,
+          postal_code = excluded.postal_code,
+          country = excluded.country,
+          updated_at = CURRENT_TIMESTAMP
+        """,
+        (user_id, *(billing[field] for field in ["billing_email", *PROFILE_TEXT_LIMITS])),
+    )
+
+
+def revoke_user_sessions(conn, user_id):
+    conn.execute("DELETE FROM sessions WHERE actor_type = 'user' AND actor_id = ?", (user_id,))
+
+
+def verify_user_sensitive_change(actor, body, action):
+    if not verify_password(str(body.get("current_password") or ""), actor.get("password_hash", "")):
+        raise ApiError(HTTPStatus.UNAUTHORIZED, f"current_password_required_for_{action}")
+    if actor.get("totp_secret") and not verify_totp(actor["totp_secret"], body.get("totp_code")):
+        raise ApiError(HTTPStatus.UNAUTHORIZED, "valid_totp_code_required")
+
+
+def verify_admin_sensitive_change(actor, body):
+    if not verify_password(str(body.get("admin_password") or ""), actor.get("password_hash", "")):
+        raise ApiError(HTTPStatus.UNAUTHORIZED, "admin_reauthentication_failed")
+    if actor.get("totp_secret") and not verify_totp(actor["totp_secret"], body.get("admin_totp_code")):
+        raise ApiError(HTTPStatus.UNAUTHORIZED, "admin_totp_required")
+
+
+def admin_client_accounts(conn, user_id):
+    rows = conn.execute(
+        """
+        SELECT ha.*, p.name AS plan_name, n.name AS node_name,
+               p.cpu_limit, p.memory_mb, p.storage_mb, p.inode_limit,
+               p.max_websites, p.max_databases, p.max_mailboxes, p.max_cron_jobs,
+               p.daily_email_limit, p.backup_retention_days
+        FROM hosting_accounts ha
+        JOIN plans p ON p.id = ha.plan_id
+        JOIN nodes n ON n.id = ha.node_id
+        WHERE ha.user_id = ?
+        ORDER BY ha.id
+        """,
+        (user_id,),
+    ).fetchall()
+    accounts = rows_to_dicts(rows)
+    for account in accounts:
+        account["website_count"] = conn.execute("SELECT COUNT(*) AS count FROM websites WHERE account_id = ?", (account["id"],)).fetchone()["count"]
+        account["database_count"] = conn.execute("SELECT COUNT(*) AS count FROM databases WHERE account_id = ?", (account["id"],)).fetchone()["count"]
+        account["mailbox_count"] = conn.execute("SELECT COUNT(*) AS count FROM mailboxes WHERE account_id = ?", (account["id"],)).fetchone()["count"]
+        account["backup_count"] = conn.execute("SELECT COUNT(*) AS count FROM backups WHERE account_id = ?", (account["id"],)).fetchone()["count"]
+        account["runtime"] = account_runtime(conn, account["id"])
+
+        dns_pol = account_dns_policy(conn, account)
+        account["dns_policy"] = dns_pol
+        account["selected_dns_provider"] = account.get("dns_provider") or ""
+        account["selected_dns_account_id"] = account.get("dns_provider_account_id") or ""
+        account["effective_dns_provider"] = dns_pol["dns_provider"]
+        account["effective_dns_provider_account_id"] = dns_pol["dns_provider_account_id"]
+        account["dns_source"] = dns_pol["source"]
+        account["effective_dns_label"] = dns_pol["display_label"]
+    return accounts
+
+
+def delete_hosting_account(conn, account_id):
+    account = conn.execute("SELECT id, user_id FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+    if not account:
+        raise ApiError(HTTPStatus.NOT_FOUND, "hosting_account_not_found")
+    _delete_hosting_accounts(conn, [account_id], owner_user_id=None)
+    return {"account_id": account_id, "user_id": account["user_id"]}
+
+
+def _delete_hosting_accounts(conn, account_ids, owner_user_id=None):
+    if not account_ids:
+        return {"account_ids": [], "website_ids": []}
+    website_ids = select_ids_for_accounts(conn, "websites", account_ids)
+    domain_ids = select_ids_for_accounts(conn, "domains", account_ids)
+    backup_rows = select_rows_for_accounts(conn, "backups", account_ids, "id, artifact_path")
+
+    if domain_ids:
+        conn.execute("DELETE FROM dns_records WHERE domain_id IN ({})".format(sql_placeholders(domain_ids)), domain_ids)
+    if website_ids:
+        conn.execute("DELETE FROM wordpress_installs WHERE website_id IN ({})".format(sql_placeholders(website_ids)), website_ids)
+        conn.execute("DELETE FROM script_installs WHERE website_id IN ({})".format(sql_placeholders(website_ids)), website_ids)
+    if account_ids:
+        database_ids = select_ids_for_accounts(conn, "databases", account_ids)
+        if database_ids:
+            conn.execute("DELETE FROM database_grants WHERE database_id IN ({})".format(sql_placeholders(database_ids)), database_ids)
+        conn.execute("DELETE FROM database_users WHERE account_id IN ({})".format(sql_placeholders(account_ids)), account_ids)
+        for table in [
+            "mailbox_launch_tokens",
+            "mail_messages",
+            "mail_delivery_logs",
+            "mail_autoresponders",
+            "mail_aliases",
+            "mail_forwarders",
+            "mailboxes",
+            "mail_edge_routes",
+            "mail_domains",
+            "access_logs",
+            "acme_certificate_orders",
+            "api_tokens",
+            "cron_jobs",
+            "dns_zones",
+            "ftp_accounts",
+            "git_deployments",
+            "hotlink_settings",
+            "ip_rules",
+            "pg_users",
+            "pg_databases",
+            "protected_directories",
+            "redirects",
+            "remote_mysql_hosts",
+            "resource_usage_samples",
+            "ssl_certificates",
+            "account_stacks",
+            "domains",
+            "websites",
+            "databases",
+        ]:
+            conn.execute("DELETE FROM {} WHERE account_id IN ({})".format(table, sql_placeholders(account_ids)), account_ids)
+        if owner_user_id is None:
+            conn.execute("DELETE FROM collaborators WHERE hosting_account_id IN ({})".format(sql_placeholders(account_ids)), account_ids)
+            conn.execute("DELETE FROM support_notes WHERE hosting_account_id IN ({})".format(sql_placeholders(account_ids)), account_ids)
+        else:
+            conn.execute("DELETE FROM collaborators WHERE hosting_account_id IN ({}) OR owner_user_id = ?".format(sql_placeholders(account_ids)), [*account_ids, owner_user_id])
+            conn.execute("DELETE FROM support_notes WHERE hosting_account_id IN ({}) OR user_id = ?".format(sql_placeholders(account_ids)), [*account_ids, owner_user_id])
+        for row in backup_rows:
+            artifact_path = row["artifact_path"]
+            if artifact_path:
+                artifact = Path(artifact_path)
+                if artifact.exists() and artifact.is_file():
+                    artifact.unlink()
+        conn.execute("DELETE FROM backups WHERE account_id IN ({})".format(sql_placeholders(account_ids)), account_ids)
+        conn.execute("DELETE FROM hosting_accounts WHERE id IN ({})".format(sql_placeholders(account_ids)), account_ids)
+    return {"account_ids": account_ids, "website_ids": website_ids}
+
+
+def delete_client(conn, user_id):
+    accounts = conn.execute("SELECT id FROM hosting_accounts WHERE user_id = ?", (user_id,)).fetchall()
+    account_ids = [row["id"] for row in accounts]
+    deleted_accounts = _delete_hosting_accounts(conn, account_ids, owner_user_id=user_id)
+    conn.execute("DELETE FROM sessions WHERE actor_type = 'user' AND actor_id = ?", (user_id,))
+    conn.execute("DELETE FROM activity_logs WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return {"user_id": user_id, **deleted_accounts}
+
+
+def select_ids_for_accounts(conn, table, account_ids):
+    if not account_ids:
+        return []
+    rows = conn.execute(
+        "SELECT id FROM {} WHERE account_id IN ({})".format(table, sql_placeholders(account_ids)),
+        account_ids,
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
+def select_rows_for_accounts(conn, table, account_ids, columns):
+    if not account_ids:
+        return []
+    return conn.execute(
+        "SELECT {} FROM {} WHERE account_id IN ({})".format(columns, table, sql_placeholders(account_ids)),
+        account_ids,
+    ).fetchall()
+
+
+def sql_placeholders(values):
+    return ",".join("?" for _ in values)
+
+
+def get_collaborator_scope(conn, user_id, account_id):
+    if not user_id or not account_id:
+        return {
+            "is_collaborator": False,
+            "allowed_website_ids": None,
+            "allowed_subdomain_ids": None,
+            "allowed_database_ids": None,
+            "allowed_menus": None,
+            "can_create_websites": True,
+            "can_create_subdomains": True,
+            "can_edit_subdomains": True,
+            "can_delete_subdomains": True,
+            "can_edit_websites": True,
+            "can_delete_websites": True,
+            "can_create_databases": True,
+            "can_edit_databases": True,
+            "can_delete_databases": True,
+            "can_create_ftp": True,
+            "can_create_mail": True,
+            "can_edit_files": True,
+        }
+
+    acc = conn.execute("SELECT user_id FROM hosting_accounts WHERE id = ?", (account_id,)).fetchone()
+    if acc and acc["user_id"] == user_id:
+        return {
+            "is_collaborator": False,
+            "allowed_website_ids": None,
+            "allowed_subdomain_ids": None,
+            "allowed_database_ids": None,
+            "allowed_menus": None,
+            "can_create_websites": True,
+            "can_create_subdomains": True,
+            "can_edit_subdomains": True,
+            "can_delete_subdomains": True,
+            "can_edit_websites": True,
+            "can_delete_websites": True,
+            "can_create_databases": True,
+            "can_edit_databases": True,
+            "can_delete_databases": True,
+            "can_create_ftp": True,
+            "can_create_mail": True,
+            "can_edit_files": True,
+        }
+
+    u = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
+    email = u["email"] if u else ""
+
+    row = conn.execute(
+        """
+        SELECT * FROM collaborators
+        WHERE hosting_account_id = ? AND (target_user_id = ? OR LOWER(invited_email) = LOWER(?)) AND status = 'active'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (account_id, user_id, email),
+    ).fetchone()
+
+    if not row:
+        return {
+            "is_collaborator": True,
+            "allowed_website_ids": [],
+            "allowed_subdomain_ids": [],
+            "allowed_database_ids": [],
+            "owned_website_ids": [],
+            "owned_subdomain_ids": [],
+            "owned_database_ids": [],
+            "allowed_menus": [],
+            "can_create_websites": False,
+            "can_create_subdomains": False,
+            "can_edit_subdomains": False,
+            "can_delete_subdomains": False,
+            "can_edit_websites": False,
+            "can_delete_websites": False,
+            "can_create_databases": False,
+            "can_edit_databases": False,
+            "can_delete_databases": False,
+            "can_create_ftp": False,
+            "can_create_mail": False,
+            "can_edit_files": False,
+        }
+
+    collab = dict(row)
+    perms = parse_json_field(collab.get("permissions_json"), {})
+
+    all_ws = perms.get("all_websites", True)
+    ws_ids = [int(x) for x in perms.get("website_ids", []) if str(x).isdigit()] if not all_ws else None
+
+    all_subdomains = perms.get("all_subdomains", False)
+    subdomain_ids = [int(x) for x in perms.get("subdomain_ids", []) if str(x).isdigit()] if not all_subdomains else None
+
+    all_db = perms.get("all_databases", True)
+    db_ids = [int(x) for x in perms.get("database_ids", []) if str(x).isdigit()] if not all_db else None
+
+    owned_ws = [r["id"] for r in conn.execute(
+        "SELECT id FROM websites WHERE account_id = ? AND created_by_user_id = ?",
+        (account_id, user_id),
+    ).fetchall()]
+    owned_db = [r["id"] for r in conn.execute(
+        "SELECT id FROM databases WHERE account_id = ? AND created_by_user_id = ?",
+        (account_id, user_id),
+    ).fetchall()]
+    if ws_ids is not None:
+        ws_ids = sorted(set(ws_ids).union(owned_ws))
+    owned_subdomains = [r["id"] for r in conn.execute(
+        "SELECT id FROM websites WHERE account_id = ? AND is_subdomain = 1 AND created_by_user_id = ?",
+        (account_id, user_id),
+    ).fetchall()]
+    if subdomain_ids is not None:
+        subdomain_ids = sorted(set(subdomain_ids).union(owned_subdomains))
+    if db_ids is not None:
+        db_ids = sorted(set(db_ids).union(owned_db))
+
+    menus = perms.get("allowed_menus", ["websites", "files", "databases", "ftp", "mail", "dns", "cron", "ssl", "analytics", "collaborators"])
+
+    return {
+        "is_collaborator": True,
+        "collaborator_id": collab["id"],
+        "permissions": perms,
+        "allowed_website_ids": ws_ids,
+        "allowed_subdomain_ids": subdomain_ids,
+        "allowed_database_ids": db_ids,
+        "owned_website_ids": owned_ws,
+        "owned_subdomain_ids": owned_subdomains,
+        "owned_database_ids": owned_db,
+        "allowed_menus": list(menus) if menus is not None else None,
+        "can_create_websites": perms.get("can_create_websites", False),
+        "can_create_subdomains": perms.get("can_create_subdomains", False),
+        "can_edit_subdomains": perms.get("can_edit_subdomains", True),
+        "can_delete_subdomains": perms.get("can_delete_subdomains", False),
+        "can_edit_websites": perms.get("can_edit_websites", True),
+        "can_delete_websites": perms.get("can_delete_websites", False),
+        "can_create_databases": perms.get("can_create_databases", False),
+        "can_edit_databases": perms.get("can_edit_databases", True),
+        "can_delete_databases": perms.get("can_delete_databases", False),
+        "can_create_ftp": perms.get("can_create_ftp", False),
+        "can_create_mail": perms.get("can_create_mail", False),
+        "can_edit_files": perms.get("can_edit_files", True),
+    }
+
+
+def require_collaborator_permission(conn, actor_id, account_id, perm_key, err_msg=None, resource_type=None, resource_id=None):
+    scope = get_collaborator_scope(conn, actor_id, account_id)
+    if scope.get("is_collaborator"):
+        owned_key = {"website": "owned_website_ids", "subdomain": "owned_subdomain_ids", "database": "owned_database_ids"}.get(resource_type)
+        if owned_key and resource_id is not None and int(resource_id) in scope.get(owned_key, []):
+            return scope
+        if not scope.get(perm_key):
+            raise ApiError(HTTPStatus.FORBIDDEN, err_msg or f"collaborator_permission_denied_{perm_key}")
+    return scope
+
+
+def client_home(conn, user_id, active_account_id=None, request_host=None):
+    user_row = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
+    user_email = user_row["email"] if user_row else ""
+
+    accounts = rows_to_dicts(
+        conn.execute(
+            """
+            SELECT DISTINCT ha.*,
+                   p.name AS plan_name, p.cpu_limit, p.memory_mb, p.storage_mb,
+                   p.inode_limit, p.max_websites, p.max_subdomains, p.max_databases, p.max_mailboxes,
+                   p.max_cron_jobs, p.daily_email_limit, p.backup_retention_days,
+                   p.max_processes, p.php_workers, p.bandwidth_limit_gb * 1024 AS bandwidth_mb,
+                   p.nameserver1 AS nameserver_1, p.nameserver2 AS nameserver_2, 
+                   p.server_location AS node_location, p.backups_location AS backup_location,
+                   p.frontend_frameworks, p.backend_frameworks, COALESCE(p.allow_api_access, 0) AS allow_api_access,
+                   n.name AS node_name, n.hostname AS node_hostname, n.ip_address AS node_ip,
+                   (CASE WHEN ha.user_id = ? THEN 1 ELSE 0 END) AS is_owner
+            FROM hosting_accounts ha
+            JOIN plans p ON p.id = ha.plan_id
+            JOIN nodes n ON n.id = ha.node_id
+            LEFT JOIN collaborators c ON c.hosting_account_id = ha.id AND c.status = 'active'
+            WHERE ha.user_id = ? OR (c.target_user_id = ? OR LOWER(c.invited_email) = LOWER(?))
+            ORDER BY ha.id
+            """,
+            (user_id, user_id, user_id, user_email),
+        ).fetchall()
+    )
+    host_public_ip = get_host_public_ip(conn, request_host=request_host)
+    for account in accounts:
+        account["runtime"] = account_runtime(conn, account["id"])
+        acc_ip = account.get("node_ip")
+        if not acc_ip or acc_ip in ("157.15.203.66", "127.0.0.1", "localhost", "0.0.0.0", ""):
+            if account.get("dedicated_ip_id"):
+                ded = conn.execute("SELECT ip_address FROM server_ips WHERE id = ?", (account["dedicated_ip_id"],)).fetchone()
+                if ded and ded["ip_address"] and ded["ip_address"] not in ("157.15.203.66", "127.0.0.1", "0.0.0.0", ""):
+                    account["node_ip"] = ded["ip_address"]
+                    continue
+            account["node_ip"] = host_public_ip
+
+    primary_account = None
+    if accounts:
+        if active_account_id:
+            for acc in accounts:
+                if str(acc["id"]) == str(active_account_id):
+                    primary_account = acc
+                    break
+        if not primary_account:
+            primary_account = accounts[0]
+
+    collab_scope = get_collaborator_scope(conn, user_id, primary_account["id"]) if primary_account else None
+
+    if primary_account:
+        if collab_scope and collab_scope.get("is_collaborator") and collab_scope.get("allowed_website_ids") is not None:
+            allowed_ws = collab_scope["allowed_website_ids"]
+            if allowed_ws:
+                placeholders = ",".join("?" for _ in allowed_ws)
+                websites = rows_to_dicts(
+                    conn.execute(
+                        f"""
+                        SELECT w.*, d.id AS domain_id, d.nameservers_json, d.provider_state_json, d.dns_provider, d.dns_status
+                        FROM websites w
+                        JOIN hosting_accounts ha ON ha.id = w.account_id
+                        LEFT JOIN domains d ON d.linked_website_id = w.id
+                        WHERE w.account_id = ? AND w.id IN ({placeholders})
+                        ORDER BY w.id
+                        """,
+                        [primary_account["id"], *allowed_ws],
+                    ).fetchall()
+                )
+            else:
+                websites = []
+        else:
+            websites = rows_to_dicts(
+                conn.execute(
+                    """
+                    SELECT w.*, d.id AS domain_id, d.nameservers_json, d.provider_state_json, d.dns_provider, d.dns_status
+                    FROM websites w
+                    JOIN hosting_accounts ha ON ha.id = w.account_id
+                    LEFT JOIN domains d ON d.linked_website_id = w.id
+                    WHERE w.account_id = ?
+                    ORDER BY w.id
+                    """,
+                    (primary_account["id"],),
+                ).fetchall()
+            )
+    else:
+        websites = []
+    warnings = []
+    if primary_account:
+        rebuilding_job = conn.execute(
+            """
+            SELECT id FROM jobs
+            WHERE target_type = 'hosting_account' AND target_id = ?
+              AND type = 'provision_hosting_account' AND status IN ('queued', 'running')
+              AND (not_before_at IS NULL OR not_before_at <= CURRENT_TIMESTAMP)
+              AND updated_at >= datetime('now', '-2 hours')
+            LIMIT 1
+            """,
+            (primary_account["id"],),
+        ).fetchone()
+        if primary_account.get("status") in {"provisioning", "rebuilding"} or rebuilding_job:
+            warnings.append({
+                "kind": "maintenance",
+                "message": "Maintenance activity in progress on your account. Please try again in a few minutes."
+            })
+        if primary_account.get("status") in {"suspended", "hard_suspended"}:
+            hard = primary_account.get("status") == "hard_suspended"
+            warnings.insert(0, {
+                "kind": "suspension",
+                "mode": "hard" if hard else "soft",
+                "message": (
+                    "This hosting account is hard suspended. Its services are currently turned off. "
+                    "Please contact support to restore access."
+                    if hard else
+                    "This hosting account is soft suspended. Websites are unavailable until the suspension is lifted. "
+                    "Please contact support for assistance."
+                ),
+            })
+    for website in websites:
+        if website["ssl_status"] == "missing":
+            warnings.append({"kind": "ssl", "message": f"SSL is not installed for {website['domain']}"})
+    for website in websites:
+        website["public_url"] = f"http://{website['domain']}"
+        website["host_header"] = website["domain"]
+        website["nameservers"] = website_dns_nameservers(website)
+        website["dns_provider_label"] = "Cloudflare" if website.get("dns_provider") == DNS_PROVIDER_CLOUDFLARE else "Local DNS"
+        w_ip = None
+        if website.get("domain_id"):
+            a_rec = conn.execute(
+                "SELECT value FROM dns_records WHERE domain_id = ? AND type = 'A' AND name = '@' ORDER BY system_record DESC, id LIMIT 1",
+                (website["domain_id"],)
+            ).fetchone()
+            if a_rec and a_rec["value"]:
+                w_ip = a_rec["value"]
+        if not w_ip or (w_ip in ("127.0.0.1", "0.0.0.0", "localhost", "157.15.203.66") and host_public_ip not in ("127.0.0.1", "0.0.0.0", "localhost")):
+            if primary_account and primary_account.get("dedicated_ip_id"):
+                ded = conn.execute("SELECT ip_address FROM server_ips WHERE id = ?", (primary_account["dedicated_ip_id"],)).fetchone()
+                if ded and ded["ip_address"] and ded["ip_address"] not in ("157.15.203.66", "127.0.0.1", "0.0.0.0", ""):
+                    w_ip = ded["ip_address"]
+            if not w_ip or w_ip in ("127.0.0.1", "0.0.0.0", "localhost", "157.15.203.66"):
+                w_ip = host_public_ip
+        website["server_ip"] = w_ip
+        website["ip_address"] = w_ip
+    user = conn.execute("SELECT id, email, full_name, totp_secret FROM users WHERE id = ?", (user_id,)).fetchone()
+    has_2fa = bool(user and user["totp_secret"])
+    user_dict = {"id": user["id"], "email": user["email"], "full_name": user["full_name"]} if user else None
+    
+    disk_used_mb = 0
+    disk_limit_mb = primary_account["storage_mb"] if primary_account and "storage_mb" in primary_account else 10240
+    inodes_used = 0
+    inodes_limit = primary_account["inode_limit"] if primary_account and "inode_limit" in primary_account else 100000
+    cpu_status = "low"
+    memory_status = "healthy"
+    cpu_pct = 20.0
+    memory_pct = 35.0
+
+    if primary_account:
+        sample = conn.execute(
+            """
+            SELECT storage_mb, storage_limit_mb, inodes_used, inodes_limit, cpu_percent, memory_mb, memory_limit_mb
+            FROM resource_usage_samples
+            WHERE account_id = ?
+            ORDER BY sampled_at DESC LIMIT 1
+            """,
+            (primary_account["id"],),
+        ).fetchone()
+        if sample:
+            s_dict = _resource_sample_with_storage_fallback(conn, primary_account["id"], sample)
+            disk_used_mb = round(s_dict["storage_mb"])
+            if s_dict.get("storage_limit_mb"):
+                disk_limit_mb = round(s_dict["storage_limit_mb"])
+            inodes_used = s_dict.get("inodes_used") or 0
+            if s_dict.get("inodes_limit"):
+                inodes_limit = s_dict["inodes_limit"]
+            cpu_pct = float(s_dict.get("cpu_percent") or 0)
+            if cpu_pct > 80:
+                cpu_status = "high"
+            elif cpu_pct > 30:
+                cpu_status = "moderate"
+            mem_used = float(s_dict.get("memory_mb") or 0)
+            mem_lim = float(s_dict.get("memory_limit_mb") or primary_account.get("memory_mb") or 1)
+            if mem_lim > 0:
+                memory_pct = round((mem_used / mem_lim) * 100, 1)
+            if memory_pct > 85:
+                memory_status = "elevated"
+        else:
+            cached = cached_resource_usage(primary_account)
+            inodes_used = cached["inodes_used"]
+            disk_used_mb = round(cached["storage_mb"])
+
+    user_is_reseller = is_user_reseller(conn, user_id)
+    return {
+        "user": user_dict,
+        "is_reseller": user_is_reseller,
+        "reseller_port": CONFIG.reseller_port,
+        "email": user["email"] if user else None,
+        "accounts": accounts,
+        "websites": websites,
+        "collaborator_scope": collab_scope,
+        "warnings": warnings,
+        "hosting_account_suspended": bool(primary_account and primary_account.get("status") in {"suspended", "hard_suspended"}),
+        "hosting_account_suspension_mode": (
+            "hard" if primary_account and primary_account.get("status") == "hard_suspended"
+            else "soft" if primary_account and primary_account.get("status") == "suspended"
+            else None
+        ),
+        "has_2fa": has_2fa,
+        "server_ip": host_public_ip,
+        "resources": {
+            "disk_used_mb": disk_used_mb,
+            "disk_limit_mb": disk_limit_mb,
+            "inodes_used": inodes_used,
+            "inodes_limit": inodes_limit,
+            "cpu": cpu_status,
+            "cpu_percent": cpu_pct,
+            "memory": memory_status,
+            "memory_percent": memory_pct,
+        },
+    }
+
+
+def website_dns_nameservers(website):
+    nameservers = parse_json_field(website.get("nameservers_json"), []) if isinstance(website, dict) else []
+    if nameservers:
+        return nameservers
+    provider_state = parse_json_field(website.get("provider_state_json"), {}) if isinstance(website, dict) else {}
+    state_nameservers = provider_state.get("nameservers") or []
+    if state_nameservers:
+        return state_nameservers
+    domain_record = website.get("domain_record") if isinstance(website, dict) else None
+    if isinstance(domain_record, dict):
+        nameservers = domain_record.get("nameservers") or []
+        if nameservers:
+            return nameservers
+        provider_state = domain_record.get("provider_state") or {}
+        if provider_state.get("nameservers"):
+            return provider_state["nameservers"]
+    return []
+
+
+
+def admin_dashboard(conn):
+    counts = {}
+    for key, table in [
+        ("users", "users"),
+        ("hosting_accounts", "hosting_accounts"),
+        ("websites", "websites"),
+        ("account_stacks", "account_stacks"),
+        ("jobs", "jobs"),
+        ("open_incidents", "status_incidents WHERE state != 'resolved' AND published = 1"),
+    ]:
+        counts[key] = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
+    nodes = rows_to_dicts(conn.execute("SELECT * FROM nodes ORDER BY id").fetchall())
+    jobs = rows_to_dicts(conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 10").fetchall())
+    alerts = rows_to_dicts(conn.execute("SELECT * FROM admin_alerts WHERE status = 'open' ORDER BY id DESC LIMIT 25").fetchall())
+    status = build_status_payload(conn)
+    return {"counts": counts, "nodes": nodes, "recent_jobs": jobs, "alerts": alerts, "status": status}
+
+
+def build_status_payload(conn):
+    components = rows_to_dicts(conn.execute("SELECT * FROM status_components ORDER BY sort_order, name").fetchall())
+    queue_worker = service_worker_health(conn)
+    components.append(
+        {
+            "id": "queue-worker",
+            "name": "Queue Worker",
+            "group_name": "Operations",
+            "status": queue_worker["status"],
+            "description": queue_worker["description"],
+            "updated_at": queue_worker["updated_at"],
+        }
+    )
+    incidents = rows_to_dicts(
+        conn.execute("SELECT * FROM status_incidents WHERE published = 1 ORDER BY id DESC LIMIT 20").fetchall()
+    )
+    maintenances = rows_to_dicts(
+        conn.execute("SELECT * FROM status_maintenances WHERE published = 1 ORDER BY starts_at DESC LIMIT 20").fetchall()
+    )
+    active_incidents = [incident for incident in incidents if incident["state"] != "resolved"]
+    if any(component["status"] == "major_outage" for component in components):
+        overall = "major_outage"
+    elif active_incidents or any(component["status"] in {"degraded", "partial_outage"} for component in components):
+        overall = "degraded_performance"
+    elif any(component["status"] == "maintenance" for component in components):
+        overall = "maintenance"
+    else:
+        overall = "operational"
+    return {
+        "overall_status": overall,
+        "components": components,
+        "incidents": incidents,
+        "maintenance": maintenances,
+        "history_days": 90,
+    }
+
+
+def service_worker_health(conn=None):
+    if conn:
+        try:
+            override = conn.execute("SELECT value FROM system_settings WHERE key = 'status_override_queue_worker'").fetchone()
+            if override and override["value"]:
+                return {
+                    "status": override["value"],
+                    "description": f"Queue worker status set to {override['value']}.",
+                    "updated_at": None,
+                }
+        except Exception:
+            pass
+
+    pid_file = SERVICE_VAR_DIR / "Zeropanel-worker.pid"
+    log_file = SERVICE_VAR_DIR / "Zeropanel-worker.log"
+    if pid_file.exists():
+        pid = pid_file.read_text(encoding="utf-8").strip()
+        if pid:
+            try:
+                pid_int = int(pid)
+            except ValueError:
+                pid_int = None
+            if pid_int:
+                try:
+                    os.kill(pid_int, 0)
+                    return {
+                        "status": "operational",
+                        "description": "Queue worker is running.",
+                        "updated_at": None,
+                    }
+                except OSError:
+                    pass
+    return {
+        "status": "degraded",
+        "description": f"Queue worker is not running. Check {log_file}.",
+        "updated_at": None,
+    }
+
+
+def build_atom_feed(payload):
+    entries = []
+    for incident in payload["incidents"][:10]:
+        entries.append(
+            """
+            <entry><title>{title}</title><id>incident-{id}</id><updated>{updated}</updated><summary>{state}</summary></entry>
+            """.format(
+                title=escape_xml(incident["title"]),
+                id=incident["id"],
+                updated=incident.get("resolved_at") or incident.get("created_at"),
+                state=escape_xml(incident["state"]),
+            ).strip()
+        )
+    return """<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Zeropanel Status</title>
+  <id>Zeropanel-status</id>
+  <updated>{updated}</updated>
+  {entries}
+</feed>
+""".format(updated=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), entries="\n  ".join(entries))
+
+
+def escape_xml(value):
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def start_resource_usage_collector(config):
+    # Resource collection walks every account's filesystem (including inode
+    # counts), so it must not run as a frequent background poll.  The setting
+    # is read on every loop so an admin change takes effect without a restart.
+    scan_date = None
+
+    def loop():
+        nonlocal scan_date
+        while True:
+            try:
+                with connect(config.db_path) as conn:
+                    timezone_name = get_system_setting(conn, "system_timezone", default_system_timezone_name())
+                    scan_time = get_system_setting(conn, "resource_scan_time", "03:00")
+                try:
+                    zone = ZoneInfo(timezone_name)
+                except (ZoneInfoNotFoundError, ValueError):
+                    zone = ZoneInfo(default_system_timezone_name())
+                try:
+                    hour, minute = (int(part) for part in str(scan_time).split(":", 1))
+                except (TypeError, ValueError):
+                    hour, minute = 3, 0
+                now = datetime.now(zone)
+                scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                # Do not launch a catch-up scan immediately when the service
+                # starts after 03:00. The next eligible run is tomorrow.
+                if scan_date is None:
+                    scan_date = now.date()
+                elif now >= scheduled and now.date() != scan_date:
+                    collect_all_resource_usage_samples(config)
+                    scan_date = now.date()
+            except Exception as exc:
+                print(f"resource usage collector error: {exc}")
+            time.sleep(30)
+
+    thread = threading.Thread(target=loop, name="Zeropanel-resource-usage", daemon=True)
+    thread.start()
+    return thread
+
+
+def start_worker_daemon(config):
+    def loop():
+        pid = os.getpid()
+        pid_file = SERVICE_VAR_DIR / "Zeropanel-worker.pid"
+        log_file = SERVICE_VAR_DIR / "Zeropanel-worker.log"
+        SERVICE_VAR_DIR.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(pid), encoding="utf-8")
+
+        agent = Agent(config)
+        try:
+            with connect(config.db_path) as conn:
+                agent.recover_interrupted_wordpress_detections(conn)
+        except Exception as exc:
+            try:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(f"[{datetime.datetime.now(datetime.UTC)}] detection recovery error: {exc}\n")
+            except Exception:
+                pass
+        last_renewal_check = 0
+        while True:
+            if time.monotonic() - last_renewal_check >= 60:
+                last_renewal_check = time.monotonic()
+                try:
+                    with connect(config.db_path) as conn:
+                        renew_due_orders(conn)
+                except Exception as exc:
+                    try:
+                        with open(log_file, "a", encoding="utf-8") as f:
+                            f.write(f"[{datetime.datetime.now(datetime.UTC)}] billing renewal error: {exc}\n")
+                    except Exception:
+                        pass
+            try:
+                agent.run_all()
+            except Exception as exc:
+                try:
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(f"[{datetime.datetime.now(datetime.UTC)}] worker error: {exc}\n")
+                except Exception:
+                    pass
+            time.sleep(15)
+
+    thread = threading.Thread(target=loop, name="Zeropanel-worker", daemon=True)
+    thread.start()
+    return thread
+
+
+def start_edge_proxy(public_host=None):
+    """Start or refresh the shared Caddy edge proxy for Docker-backed installations."""
+    if not shutil.which("docker"):
+        return
+
+    edge_compose = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docker-compose-edge.yml")
+    edge_env = os.environ.copy()
+    edge_env["MP_PUBLIC_HOST"] = str(public_host or CONFIG.public_host or "").strip()
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-f", edge_compose, "up", "-d"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=edge_env,
+        )
+        if result.returncode != 0:
+            print(f"Failed to start edge proxy: {result.stderr.strip() or result.stdout.strip()}")
+    except Exception as exc:
+        print(f"Failed to start edge proxy: {exc}")
+
+
+def run():
+    CONFIG.data_dir.mkdir(parents=True, exist_ok=True)
+    CONFIG.account_root.mkdir(parents=True, exist_ok=True)
+    init_db(CONFIG.db_path)
+    init_analytics_db(CONFIG.db_path)
+    with connect(CONFIG.db_path) as conn:
+        # Status history is operational telemetry, not control-plane state.
+        # Keep a bounded window so repeated health checks cannot grow the
+        # primary database indefinitely.
+        conn.execute("DELETE FROM status_check_results WHERE created_at < datetime('now', '-30 days')")
+        persisted_public_host = get_system_setting(conn, "public_host", "")
+        if persisted_public_host:
+            CONFIG.public_host = normalize_public_host(persisted_public_host)
+        apply_system_timezone(conn)
+    if CONFIG.env != "development":
+        ensure_local_node(
+            CONFIG.db_path,
+            name=os.getenv("MP_NODE_NAME", "local"),
+            hostname=os.getenv("MP_NODE_HOSTNAME", CONFIG.public_host),
+        )
+    if CONFIG.agent_mode == "docker" and CONFIG.env != "development":
+        start_edge_proxy()
+        try:
+            with connect(CONFIG.db_path) as conn:
+                Agent(CONFIG).reconcile_all_account_stacks(conn)
+        except Exception as exc:
+            print(f"Failed to reconcile account stacks on startup: {exc}")
+    if CONFIG.env == "development":
+        seed_dev_data(CONFIG.db_path, CONFIG.account_root)
+        agent = Agent(CONFIG)
+        agent.run_all()
+        import subprocess
+        # Start the shared edge proxy so the Zeropanel-edge network exists
+        # before any account stacks try to attach to it.
+        start_edge_proxy()
+        # Ensure the network exists even if caddy isn't running yet
+        try:
+            subprocess.run(
+                ["docker", "network", "create", "Zeropanel-edge"],
+                check=False, capture_output=True
+            )
+        except Exception:
+            pass  # Already exists — that's fine
+
+        # Materialize every account stack so a single `make dev-up` brings the
+        # whole system up: files in simulate mode, containers in docker mode.
+        agent.apply_all_accounts()
+    start_resource_usage_collector(CONFIG)
+    start_worker_daemon(CONFIG)
+    start_probe_block_monitor(CONFIG)
+    if CONFIG.client_port == CONFIG.admin_port:
+        raise RuntimeError("MP_CLIENT_PORT and MP_ADMIN_PORT must be different so client and admin panels stay separate.")
+
+    client_httpd = MangoDualServer((CONFIG.host, CONFIG.client_port), MangoHandler)
+    client_httpd.panel = "client"
+    admin_httpd = MangoDualServer((CONFIG.host, CONFIG.admin_port), MangoHandler)
+    admin_httpd.panel = "admin"
+    admin_thread = threading.Thread(target=admin_httpd.serve_forever, name="Zeropanel-admin", daemon=True)
+    admin_thread.start()
+
+    reseller_httpd = MangoDualServer((CONFIG.host, CONFIG.reseller_port), MangoHandler)
+    reseller_httpd.panel = "reseller"
+    reseller_thread = threading.Thread(target=reseller_httpd.serve_forever, name="Zeropanel-reseller", daemon=True)
+    reseller_thread.start()
+
+    local_host = "127.0.0.1" if CONFIG.host in {"0.0.0.0", "::"} else CONFIG.host
+    public_host = detect_public_access_host()
+    print(f"ZeroPanel client panel running at   http://{local_host}:{CONFIG.client_port}")
+    print(f"ZeroPanel admin panel running at    http://{local_host}:{CONFIG.admin_port}/admin")
+    print(f"ZeroPanel reseller panel running at http://{local_host}:{CONFIG.reseller_port}/reseller")
+    print(f"Status: http://{local_host}:{CONFIG.client_port}/status")
+    if public_host:
+        print(f"Public client access:   http://{public_host}:{CONFIG.client_port}")
+        print(f"Public admin access:    http://{public_host}:{CONFIG.admin_port}/admin")
+        print(f"Public reseller access: http://{public_host}:{CONFIG.reseller_port}/reseller")
+        print(f"Public status:          http://{public_host}:{CONFIG.client_port}/status")
+    try:
+        client_httpd.serve_forever()
+    finally:
+        admin_httpd.shutdown()
+        admin_thread.join(timeout=5)
+        reseller_httpd.shutdown()
+        reseller_thread.join(timeout=5)
+
+
+if __name__ == "__main__":
+    run()

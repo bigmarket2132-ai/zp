@@ -1,0 +1,6098 @@
+const { createApp } = Vue;
+
+const CLIENT_ROUTE_PREFIX = "/client";
+
+const DEFAULT_INSTALLER_SCRIPTS = [
+  {
+    id: "wordpress",
+    name: "WordPress",
+    icon: "wordpress",
+    description: "Install WordPress CMS onto your site.",
+    required_fields: [
+      { name: "site_title", label: "Site Title", type: "text", placeholder: "My WordPress Site", default: "My WordPress Site" },
+      { name: "admin_username", label: "Admin Username", type: "text", placeholder: "admin", default: "admin" },
+      { name: "admin_email", label: "Admin Email", type: "email", placeholder: "admin@example.com", default: "admin@example.com" },
+      { name: "admin_password", label: "Admin Password", type: "password", placeholder: "Minimum 8 chars", default: "" },
+    ],
+  },
+  {
+    id: "joomla",
+    name: "Joomla",
+    icon: "network",
+    description: "Install Joomla CMS onto your site.",
+    required_fields: [
+      { name: "site_title", label: "Site Name", type: "text", placeholder: "My Joomla Site", default: "My Joomla Site" },
+      { name: "admin_username", label: "Admin Username", type: "text", placeholder: "admin", default: "admin" },
+      { name: "admin_email", label: "Admin Email", type: "email", placeholder: "admin@example.com", default: "admin@example.com" },
+      { name: "admin_password", label: "Admin Password", type: "password", placeholder: "Minimum 8 chars", default: "" },
+    ],
+  },
+  {
+    id: "phpbb",
+    name: "phpBB",
+    icon: "activity",
+    description: "Install phpBB Forum software onto your site.",
+    required_fields: [
+      { name: "site_title", label: "Forum Name", type: "text", placeholder: "My phpBB Forum", default: "My phpBB Forum" },
+      { name: "admin_username", label: "Admin Username", type: "text", placeholder: "admin", default: "admin" },
+      { name: "admin_email", label: "Admin Email", type: "email", placeholder: "admin@example.com", default: "admin@example.com" },
+      { name: "admin_password", label: "Admin Password", type: "password", placeholder: "Minimum 8 chars", default: "" },
+    ],
+  },
+  {
+    id: "drupal",
+    name: "Drupal",
+    icon: "wrench",
+    description: "Install Drupal CMS onto your site.",
+    required_fields: [
+      { name: "site_title", label: "Site Name", type: "text", placeholder: "My Drupal Site", default: "My Drupal Site" },
+      { name: "admin_username", label: "Admin Username", type: "text", placeholder: "admin", default: "admin" },
+      { name: "admin_email", label: "Admin Email", type: "email", placeholder: "admin@example.com", default: "admin@example.com" },
+      { name: "admin_password", label: "Admin Password", type: "password", placeholder: "Minimum 8 chars", default: "" },
+    ],
+  },
+];
+
+
+const CLIENT_PAGE_TARGETS = new Set([
+  "home",
+  "dashboard",
+  "servers",
+  "billing",
+  "minecraft",
+  "web",
+  "discord",
+  "telegram",
+  "database",
+  "server-overview",
+  "server-console",
+  "server-files",
+  "server-databases",
+  "server-schedules",
+  "server-backups",
+  "server-network",
+  "server-startup",
+  "server-settings",
+  "server-activity",
+  "app-server-overview",
+  "app-server-console",
+  "app-server-files",
+  "app-server-startup",
+  "app-server-domains",
+  "app-server-databases",
+  "app-server-network",
+  "app-server-settings",
+  "app-server-activity",
+  "wordpress-manager",
+  "installer",
+  "hosting-plan",
+  "performance",
+  "analytics",
+  "security",
+  "domains",
+  "website",
+  "website-details",
+  "files",
+  "databases",
+  "email",
+  "cron-jobs",
+  "backups",
+  "git",
+  "ssh-access",
+  "php-configuration",
+  "dns-zone-editor",
+  "php-info",
+  "cache-manager",
+  "password-protect-directories",
+  "ip-manager",
+  "hotlink-protection",
+  "folder-index-manager",
+  "fix-file-ownership",
+  "services",
+  "activity",
+  "settings",
+  "redirects",
+  "disk-usage",
+  "modsecurity",
+  "mysql-database-wizard",
+  "api-tokens",
+  "two-factor-auth",
+  "ftp-accounts",
+  "ssl-tls",
+  "ssh-sftp-access",
+  "fix-permissions",
+  "account-sharing",
+]);
+
+const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"];
+const SERVER_PAGE_TARGETS = new Set([
+  "server-overview", "server-console", "server-files", "server-databases", "server-schedules",
+  "server-backups", "server-network", "server-startup", "server-settings", "server-activity",
+]);
+
+function serverRouteFromLocation() {
+  const path = window.location.pathname.replace(/\/+$/, "");
+  const match = path.match(/^\/client\/server\/(\d+)(?:\/([a-z-]+))?$/);
+  if (!match) return null;
+  const page = match[2] || "overview";
+  const target = `server-${page}`;
+  return CLIENT_PAGE_TARGETS.has(target) ? { id: match[1], target } : { id: match[1], target: "server-overview" };
+}
+
+function pageFromLocation() {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const serverRoute = serverRouteFromLocation();
+  if (serverRoute) return serverRoute.target;
+  if (path === "/" || path === CLIENT_ROUTE_PREFIX) return "dashboard";
+  if (path === `${CLIENT_ROUTE_PREFIX}/servers`) return "servers";
+  if (path === `${CLIENT_ROUTE_PREFIX}/minecraft`) return "minecraft";
+  if (path === `${CLIENT_ROUTE_PREFIX}/web`) return "web";
+  if (path === `${CLIENT_ROUTE_PREFIX}/discord`) return "discord";
+  if (path === `${CLIENT_ROUTE_PREFIX}/telegram`) return "telegram";
+  if (path === `${CLIENT_ROUTE_PREFIX}/database`) return "database";
+  if (path === "/home" || path === "/home.html") return "home";
+  if (path.startsWith("/home/")) return "home";
+  if (path === "/store" || path === "/store.html") return "billing";
+  if (path.startsWith("/store/")) return "billing";
+  if (!path.startsWith(`${CLIENT_ROUTE_PREFIX}/`)) return "dashboard";
+  const target = decodeURIComponent(path.slice(CLIENT_ROUTE_PREFIX.length + 1).split("/", 1)[0] || "");
+  return CLIENT_PAGE_TARGETS.has(target) ? target : "dashboard";
+}
+
+function pageUrl(target, serverId = "") {
+  const page = CLIENT_PAGE_TARGETS.has(target) ? target : "dashboard";
+  if (page === "home") return "/home";
+  if (page === "billing") return "/store";
+  if (page === "dashboard") return CLIENT_ROUTE_PREFIX;
+  if (page === "servers") return `${CLIENT_ROUTE_PREFIX}/servers`;
+  if (page === "minecraft") return `${CLIENT_ROUTE_PREFIX}/minecraft`;
+  if (page === "web") return `${CLIENT_ROUTE_PREFIX}/web`;
+  if (page === "discord") return `${CLIENT_ROUTE_PREFIX}/discord`;
+  if (page === "telegram") return `${CLIENT_ROUTE_PREFIX}/telegram`;
+  if (page === "database") return `${CLIENT_ROUTE_PREFIX}/database`;
+  if (page.startsWith("server-")) {
+    const route = serverRouteFromLocation();
+    const id = String(serverId || route?.id || "");
+    if (id) return `${CLIENT_ROUTE_PREFIX}/server/${encodeURIComponent(id)}/${page.slice("server-".length)}`;
+  }
+  return `${CLIENT_ROUTE_PREFIX}/${encodeURIComponent(page)}`;
+}
+
+function normalizedClientTarget(target) {
+  const targetMap = {
+    visitors: "analytics",
+    errors: "analytics",
+    bandwidth: "analytics",
+    webalizer: "analytics",
+    "raw-access": "analytics",
+    "resource-usage": "performance",
+    images: "files",
+    "remote-mysql": "databases",
+    "postgresql-databases": "databases",
+    "postgresql-database-wizard": "databases",
+    "site-builder": "installer",
+  };
+  return targetMap[target] || target;
+}
+
+const AppIcon = {
+  props: ["name"],
+  computed: {
+    svgContent() {
+      // Each icon is a full SVG inner HTML string — allows mixing path/circle/rect/polyline etc.
+      const icons = {
+        // ── Navigation / Shell ───────────────────────────────────
+        dashboard: `<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>`,
+        home: `<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9 21v-6h6v6"/>`,
+        bell: `<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path>`,
+        download: `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>`,
+        refresh: `<path d="M21 12a9 9 0 1 1-3.03-6.7"/><polyline points="21 3 21 9 15 9"/>`,
+        search: `<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>`,
+        user: `<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>`,
+        logout: `<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>`,
+        login: `<path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M21 3v18a2 2 0 0 1-2 2h-8"/>`,
+        chevron: `<polyline points="6 9 12 15 18 9"/>`,
+        settings: `<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>`,
+        plus: `<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>`,
+        trash: `<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>`,
+        external: `<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>`,
+        check: `<polyline points="20 6 9 17 4 12"/>`,
+        warning: `<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>`,
+        info: `<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>`,
+
+        // ── Hosting / Sites ───────────────────────────────────────
+        website: `<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="2" y1="7" x2="22" y2="7"/><circle cx="5" cy="5" r=".5" fill="currentColor"/><circle cx="8" cy="5" r=".5" fill="currentColor"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>`,
+        domains: `<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>`,
+        "site-builder": `<rect x="3" y="3" width="18" height="4" rx="1"/><rect x="3" y="9" width="8" height="12" rx="1"/><rect x="13" y="9" width="8" height="5" rx="1"/><rect x="13" y="16" width="8" height="5" rx="1"/>`,
+        redirects: `<path d="M5 12h14"/><path d="M12 5l7 7-7 7"/><path d="M3 5h4a4 4 0 0 1 4 4v0a4 4 0 0 1-4 4H3"/>`,
+        wordpress: `<circle cx="12" cy="12" r="10"/><path d="M5 12h14M12 2c3.5 4 3.5 12 0 16M12 2c-3.5 4-3.5 12 0 16"/>`,
+        installer: `<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>`,
+
+        // ── Files ────────────────────────────────────────────────
+        files: `<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>`,
+        folder: `<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>`,
+        images: `<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>`,
+        "disk-usage": `<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/>`,
+        ftp: `<path d="M4 17l8-8 8 8"/><path d="M4 7h16"/><line x1="8" y1="17" x2="8" y2="21"/><line x1="16" y1="17" x2="16" y2="21"/>`,
+        "password-protect": `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="17" r="1" fill="currentColor"/>`,
+        "folder-index": `<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="9" y1="14" x2="15" y2="14"/><line x1="9" y1="17" x2="12" y2="17"/>`,
+        backup: `<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>`,
+        git: `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/>`,
+
+        // ── Databases ─────────────────────────────────────────────
+        databases: `<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>`,
+        "databases-wizard": `<ellipse cx="10" cy="6" rx="7" ry="2.5"/><path d="M3 6v5c0 1.38 3.13 2.5 7 2.5 1.06 0 2.06-.1 2.97-.28"/><path d="M3 11v5c0 1.38 3.13 2.5 7 2.5.5 0 1-.03 1.47-.08"/><path d="M18 13l2 2 4-4"/><circle cx="20" cy="17" r="3"/>`,
+        "remote-mysql": `<ellipse cx="8" cy="7" rx="6" ry="2.5"/><path d="M2 7v5c0 1.38 2.69 2.5 6 2.5.55 0 1.08-.04 1.58-.1"/><path d="M14 10h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"/><line x1="2" y1="7" x2="2" y2="17"/><line x1="14" y1="13" x2="10" y2="13"/>`,
+        postgresql: `<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><line x1="12" y1="9" x2="12" y2="21"/><path d="M8 16a4 4 0 0 0 8 0"/>`,
+        "postgresql-wizard": `<ellipse cx="10" cy="6" rx="7" ry="2.5"/><path d="M3 6v5c0 1.38 3.13 2.5 7 2.5.55 0 1.08-.04 1.6-.1"/><path d="M17 11l2 2 4-4"/>`,
+        phpmyadmin: `<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><path d="M9 14h1v4"/><path d="M13 14h2a1.5 1.5 0 0 1 0 3h-2"/>`,
+        phppgadmin: `<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><circle cx="9" cy="15" r="2"/><line x1="14" y1="13" x2="14" y2="18"/><line x1="17" y1="13" x2="17" y2="18"/><line x1="14" y1="15.5" x2="17" y2="15.5"/>`,
+
+        // ── Email ─────────────────────────────────────────────────
+        email: `<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/>`,
+        webmail: `<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22 6 12 13 2 6"/><line x1="2" y1="18" x2="8" y2="12"/><line x1="22" y1="18" x2="16" y2="12"/>`,
+
+        // ── Performance / Metrics ─────────────────────────────────
+        performance: `<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>`,
+        analytics: `<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/>`,
+        visitors: `<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>`,
+        errors: `<polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>`,
+        bandwidth: `<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>`,
+        "raw-access": `<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>`,
+        webalizer: `<path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>`,
+        "resource-usage": `<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>`,
+        activity: `<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>`,
+
+        // ── Security ──────────────────────────────────────────────
+        security: `<path d="M12 3l8 3v5c0 5.25-3.5 9.74-8 11-4.5-1.26-8-5.75-8-11V6l8-3z"/><polyline points="9 12 11 14 15 10"/>`,
+        shield: `<path d="M12 3l8 3v5c0 5.25-3.5 9.74-8 11-4.5-1.26-8-5.75-8-11V6l8-3z"/>`,
+        lock: `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
+        key: `<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.77-7.77zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/>`,
+        ssl: `<rect x="5" y="11" width="14" height="11" rx="1"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><path d="M12 15v2"/><circle cx="12" cy="15" r="1" fill="currentColor"/>`,
+        totp: `<rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/><path d="M9 7h1l1 3 2-3h1"/>`,
+        "password-protect": `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="17" r="1" fill="currentColor"/>`,
+        hotlink: `<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/><line x1="5" y1="5" x2="19" y2="19"/>`,
+        ip: `<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12" y2="16"/><path d="M8 12h8"/>`,
+        modsecurity: `<path d="M12 3l8 3v5c0 5.25-3.5 9.74-8 11-4.5-1.26-8-5.75-8-11V6l8-3z"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>`,
+        "api-tokens": `<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.77-7.77zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/>`,
+
+        // ── Infrastructure / System ───────────────────────────────
+        cpu: `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>`,
+        memory: `<path d="M6 4h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><path d="M6 13h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2z"/><line x1="10" y1="4" x2="10" y2="13"/><line x1="14" y1="4" x2="14" y2="13"/><line x1="10" y1="13" x2="10" y2="22"/><line x1="14" y1="13" x2="14" y2="22"/>`,
+        disk: `<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="9"/><line x1="18.9" y1="5.1" x2="14.12" y2="9.88"/>`,
+        network: `<circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><line x1="12" y1="7" x2="12" y2="11"/><line x1="10.54" y1="12.75" x2="6.5" y2="17.25"/><line x1="13.46" y1="12.75" x2="17.5" y2="17.25"/>`,
+        services: `<circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M8.46 8.46a5 5 0 0 0 0 7.07"/>`,
+        terminal: `<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>`,
+        sftp: `<rect x="2" y="6" width="20" height="16" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><path d="M6 14h4"/><path d="M14 17l3-3-3-3"/>`,
+        dns: `<path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>`,
+        cache: `<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/>`,
+
+        // ── PHP / Code ────────────────────────────────────────────
+        php: `<path d="M12 2a10 10 0 0 0-10 10 10 10 0 0 0 10 10 10 10 0 0 0 10-10A10 10 0 0 0 12 2zm-2 6h-1l-1 4H7l1-4H7M15 8h-2l-1 4h2a2 2 0 0 0 0-4zm0 5h-2l-.5 3h-1l.5-3h-1"/>`,
+        code: `<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>`,
+        link: `<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>`,
+        fix: `<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`,
+        wrench: `<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>`,
+
+        // ── Hosting / Plan ────────────────────────────────────────
+        plan: `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>`,
+        rocket: `<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>`,
+        cron: `<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>`,
+
+        // ── Communication ─────────────────────────────────────────
+        indexing: `<line x1="21" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="13" y2="18"/>`,
+        image: `<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>`,
+      };
+      return icons[this.name] || icons.info;
+    },
+  },
+  template: `
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" v-html="svgContent">
+    </svg>
+  `,
+};
+
+const app = createApp({
+  components: { AppIcon },
+  data() {
+    return {
+      token: localStorage.getItem("mp_client_token") || "",
+
+      challengeToken: "",
+      message: "",
+      notifications: [],
+      notificationsOpen: false,
+      sessionExpired: false,
+      loadingServices: false,
+      phpWorkers: { loading: false, mode: "max_per_site", max_workers: 4, plan_default_workers: 4, websites: [] },
+      serviceStatusMap: {},
+      availableServices: [
+        { id: "web", name: "Web Server (OpenLiteSpeed)", icon: "website", description: "Serves PHP and static files." },
+        { id: "db", name: "Database Server (MariaDB)", icon: "databases", description: "MySQL/MariaDB relational database." },
+        { id: "phpmyadmin", name: "phpMyAdmin", icon: "phpmyadmin", description: "Web-based database management." },
+        { id: "filebrowser", name: "File Manager", icon: "folder", description: "Web-based file manager interface." },
+        { id: "sftp", name: "SFTP Service", icon: "sftp", description: "Secure FTP access." },
+      ],
+      activePage: pageFromLocation(),
+      login: {
+        email: "",
+        password: "",
+        code: "",
+      },
+      selectedAccountId: localStorage.getItem("mp_selected_account_id") || "",
+      accountSwitcherOpen: false,
+      store: { categories: [], orders: [], balance_cents: 0 },
+      storeLoading: false,
+      storeError: "",
+      selectedStoreCategory: "",
+      storeCategoriesOpen: false,
+      collapsedSidebarSections: JSON.parse(localStorage.getItem("mp_client_collapsed_sections") || "{}"),
+      minecraftServers: [],
+      selectedMinecraftServerId: serverRouteFromLocation()?.id || "",
+      selectedApplicationServerId: "",
+      applicationServers: [],
+      selectedDatabaseId: "",
+      minecraftVersions: [],
+      minecraftVersionChoice: "",
+      minecraftSoftwareChoice: "",
+      minecraftSoftwareChanging: false,
+      minecraftSettings: { name: "", difficulty: "normal", max_players: 20 },
+      minecraftConsole: "",
+      minecraftCommand: "",
+      minecraftFilePath: "",
+      // Application Server state
+      appServerStats: null,
+      appServerConsole: "",
+      appServerCommand: "",
+      appServerConsoleAutoScroll: true,
+      appServerStartup: { runtime: "python", main_file: "main.py", install_command: "pip install -r requirements.txt", start_command: "python main.py", build_command: "", environment: {} },
+      appServerStartupSaving: false,
+      newEnvVarKey: "",
+      newEnvVarValue: "",
+      appServerSettings: { name: "" },
+      appServerSettingsSaving: false,
+      minecraftFiles: [],
+      minecraftFileSearch: "",
+      minecraftFileBusy: false,
+      minecraftEditingFile: null,
+      minecraftFileContent: "",
+      minecraftConsoleTimer: null,
+      minecraftConsolePaused: false,
+      minecraftConsoleAutoScroll: true,
+      minecraftMetricsTimer: null,
+      minecraftRuntimeMetrics: null,
+      minecraftPreviousNetworkSample: null,
+      minecraftNetworkRates: { rx_bytes_per_second: null, tx_bytes_per_second: null },
+      recalculatingUsage: false,
+      isHomeLoading: false,
+      isAnalyticsLoading: false,
+      home: {
+        resources: { disk_used_mb: 0, disk_limit_mb: 0, inodes_used: 0, inodes_limit: 0, cpu: "unknown", memory: "unknown" },
+        warnings: [],
+        accounts: [],
+        websites: [],
+        user: null,
+        email: "",
+      },
+      featureStatuses: {},
+      websites: [],
+      websitesLoaded: false,
+      subdomains: [],
+      subdomainDomains: [],
+      subdomainUsage: { used: 0, limit: 0 },
+      subdomainWizard: { open: false, label: "", parent_domain_id: "", hosting_mode: "separate", path: "", configure_dns: false, submitting: false, building: false, complete: false, createdSubdomain: null, error: "" },
+      domains: [],
+      registeredDomains: [],
+      registeredDomainSort: { key: "expiry", direction: "asc" },
+      registeredWhoisModal: { open: false, loading: false, domain: "", activeTab: "registrant", form: {}, currentNameservers: [], defaultNameservers: [], nameserverMode: "default", nameservers: ["", ""], saving: false },
+      databases: [],
+      databasesLoading: false,
+      databaseLoadSequence: 0,
+      databaseUsers: [],
+      databaseGrants: [],
+      pgDatabases: [],
+      pgUsers: [],
+      pgGrants: [],
+      pgDbWizardStep: 1,
+      newPgDbName: "",
+      newPgDbUser: "",
+      newPgDbPassword: "",
+      wizardPgDbId: null,
+      wizardPgUserId: null,
+      // PHP Config
+      phpVersions: ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"],
+      phpSwitching: {},
+      phpSwitchTarget: {},
+      phpSwitchCountdowns: {},
+      phpSwitchTimers: {},
+      editingPhpIniSite: null,
+      phpIniForm: {},
+      phpIniSaving: false,
+      resourceUsage: { range: "30m", windows: ["1m", "5m", "10m", "30m", "2h", "1d", "7d", "30d"], current: {}, samples: [] },
+      resourceRange: "30m",
+      hostingPlanRangeInitialized: false,
+      resourcePoll: null,
+      resourceUsageLoading: false,
+      analytics: {
+        domain: "",
+        website_id: null,
+        analytics_enabled: true,
+        filter: "top-countries",
+        filters: [
+          { key: "top-countries", label: "Top list" },
+          { key: "access-logs", label: "Access logs" },
+          { key: "5xx", label: "Error code 5xx" },
+          { key: "4xx", label: "Error code 4xx" },
+          { key: "total-requests", label: "Total requests" },
+          { key: "unique-ips", label: "Unique IP addresses" },
+          { key: "bandwidth", label: "Bandwidth" },
+        ],
+        summary: { total_requests: 0, unique_ip_addresses: 0, bandwidth_bytes: 0, error_4xx: 0, error_5xx: 0 },
+        top_countries: [],
+        access_logs: [],
+        error_4xx_logs: [],
+        error_5xx_logs: [],
+        top_ips: [],
+        top_bandwidth: [],
+      },
+      activity: [],
+      phpInfo: { website: {}, runtime: {}, directives: {}, extensions: [], opcache: {} },
+      selectedWebsiteId: "",
+      siteSwitcherOpen: false,
+      siteSearchQuery: "",
+      websiteTableSearchQuery: "",
+      searchQuery: "",
+      userMenuOpen: false,
+      collaborators: [],
+      sharedAccounts: [],
+      collabTab: "grant",
+      shareModalOpen: false,
+      editingCollabId: null,
+      checkingEmail: false,
+      emailCheckStatus: null,
+      existingUserData: null,
+      savingCollab: false,
+      availableMenus: [
+        { id: "websites", label: "Websites & Domains" },
+        { id: "files", label: "File Manager" },
+        { id: "databases", label: "Databases" },
+        { id: "ftp", label: "FTP Accounts" },
+        { id: "mail", label: "Email Accounts" },
+        { id: "dns", label: "DNS Manager" },
+        { id: "cron", label: "Cron Jobs" },
+        { id: "ssl", label: "SSL Certificates" },
+        { id: "analytics", label: "Analytics" },
+      ],
+      shareForm: {
+        id: null,
+        email: "",
+        name: "",
+        newPassword: "",
+        enableTotp: false,
+        all_websites: true,
+        website_ids: [],
+        all_subdomains: false,
+        subdomain_ids: [],
+        all_databases: true,
+        database_ids: [],
+        allowed_menus: ["websites", "files", "databases", "ftp", "mail", "dns", "cron", "ssl", "analytics"],
+        can_create_websites: false,
+        can_create_subdomains: false,
+        can_edit_subdomains: true,
+        can_delete_subdomains: false,
+        can_edit_websites: true,
+        can_delete_websites: false,
+        can_create_databases: false,
+        can_edit_databases: true,
+        can_delete_databases: false,
+        can_create_ftp: false,
+        can_create_mail: false,
+        can_edit_files: true,
+      },
+      dbModal: null,
+      dbSubmitting: false,
+      newDatabase: { name: "", username: "", website_id: "" },
+      newDatabaseUser: { username: "", password: "" },
+      newDatabaseGrant: { database_id: "", user_id: "", selectedPrivileges: ["ALL"] },
+      databaseWizard: { name: "", username: "", password: "", website_id: "", selectedPrivileges: ["ALL"] },
+      databasePrivilegeOptions: ["ALL", "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "EXECUTE", "TRIGGER", "CREATE VIEW", "SHOW VIEW", "EVENT", "CREATE ROUTINE", "ALTER ROUTINE", "CREATE TEMPORARY TABLES", "LOCK TABLES"],
+      editingDatabase: null,
+      databaseAssignmentWebsiteId: "",
+      editingDatabaseUser: null,
+      editingDatabaseGrant: null,
+      // DB Wizard
+      dbWizardStep: 1,
+      dbWizardSubmitting: false,
+      wizardDbName: "",
+      wizardDbUser: "",
+      wizardDbPass: "",
+      wizardWebsiteId: "",
+      dbTab: "databases", // 'databases', 'users', 'grants'
+      databaseWebsiteFilter: "",
+      backupWizard: { isOpen: false, step: 1, isRunning: false, progressText: '', websiteId: 'all' },
+      installer: {
+        scripts: DEFAULT_INSTALLER_SCRIPTS.map((script) => ({ ...script, required_fields: [...script.required_fields] })),
+        selectedScript: null,
+        isSubmitting: false,
+        form: {
+          website_id: "",
+          site_title: "",
+          admin_username: "",
+          admin_email: "",
+          admin_password: "",
+          allow_overwrite: false,
+        }
+      },
+      wordpressSites: [],
+      wordpressManagerLoading: true,
+      wordpressSitesLoaded: false,
+      wordpressDetecting: false,
+      wordpressDetectionRun: null,
+      wordpressDetectionPoller: null,
+      wordpressDetectionPolling: false,
+      siteWizard: { isOpen: false, step: 1, type: 'blank', domain: '', site_title: 'My Site', admin_username: 'admin', admin_email: '', admin_password: '', allow_overwrite: false, createdWebsite: null, createdDomainNameservers: [], dnsCheckResult: null, dnsAction: 'keep', isCheckingDns: false, isSubmitting: false, isBuilding: false, errorMessage: '', dnsTab: 'records' },
+      connectWizard: { isOpen: false, website: null, method: 'nameservers', auto_update_dns: false, checking: false, result: null },
+      websiteErrorModal: { isOpen: false, website: null, error: "" },
+      sshState: { enabled: false, toggling: false, loaded: false, hasPassword: false, settingPassword: false, newPassword: null, passwordModal: false, passwordInput: "", passwordError: "" },
+      ftpState: { enabled: true, toggling: false, loaded: false },
+      siteSslModal: { isOpen: false, website: null },
+      sslModal: { isOpen: false, website_id: "", crt: "", key: "", isSubmitting: false, errorMessage: "" },
+      issuingSsl: {},
+      mailboxes: [],
+      launchingMailboxId: null,
+      mailRouting: {
+        mail_domains: [],
+        mail_aliases: [],
+        mail_forwarders: [],
+        mail_autoresponders: [],
+        mail_edge_routes: [],
+        mail_delivery_logs: [],
+      },
+      mailDomainEditor: {
+        isOpen: false,
+        isSaving: false,
+        mailDomainId: null,
+        dkim_selector: "mango",
+        spf_policy: "",
+        dmarc_policy: "",
+        catch_all_enabled: false,
+        catch_all_destination: "",
+        status: "active",
+        regenerate_dkim: false,
+      },
+      mailAliasEditor: {
+        isOpen: false,
+        isSaving: false,
+        aliasId: null,
+        source_email: "",
+        destination_email: "",
+        status: "active",
+      },
+      mailForwarderEditor: {
+        isOpen: false,
+        isSaving: false,
+        forwarderId: null,
+        source_email: "",
+        destination_email: "",
+        status: "active",
+      },
+      mailAutoresponderEditor: {
+        isOpen: false,
+        isSaving: false,
+        autoresponderId: null,
+        mailbox_id: "",
+        subject: "Auto-reply",
+        body: "",
+        enabled: true,
+      },
+      mailboxWizard: { isOpen: false, mode: "create", step: 1, isCreating: false, createdMailbox: null, mailboxId: null, local_part: "", domain: "", email: "", quota_mb: 1024, password: "", confirm_password: "", configure_dns: false, status: "active" },
+      mailboxEditor: { isOpen: false, isSaving: false, mailboxId: null, email: "", quota_mb: 1024, status: "active", password: "", confirm_password: "" },
+      cronJobs: [],
+      newCronJob: { schedule: "*/15 * * * *", command: "" },
+      cronMode: "php",
+      cronPreset: "*/15 * * * *",
+      cronSchedule: { minute: "*/15", hour: "*", day: "*", month: "*", weekday: "*" },
+      cronOutputJob: null,
+      backups: [],
+      restoreHistory: [],
+      backupSiteId: "all",
+      backupTab: "manage",
+      gitDeployments: [],
+      newGitDeployment: { website_id: "", repository_url: "", branch: "main", access_key: "", deploy_path: "" },
+      // DNS Zone Editor
+      dnsRecords: [],
+      dnsZones: [],
+      dnsDeleteSaving: {},
+      dnsDeleteQueues: {},
+      dnsProviderOptions: { providers: [], accounts: [], default_provider: "local_powerdns", default_provider_account_id: null, customer_editable: true },
+      dnsProviderModal: { open: false, domain: null, provider_key: "", provider_account_id: "" },
+      selectedDomainId: "",
+      settingDefaultDns: false,
+      dnsProxySaving: {},
+      dnsPulling: false,
+      nameserverEditor: { domainId: null, source: "default", values: ["", ""] },
+      dnsRecordTypes: ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA"],
+      newDnsRecord: { domain_id: "", type: "A", name: "@", value: "", ttl: 300, priority: null, proxied: true },
+      // Cache Manager
+      cacheStatus: { object_cache: "inactive", opcode_cache: "active", reverse_proxy: "active", litespeed: "active", cloudflare_cache: "active", opcache_enabled: true, object_cache_enabled: true, reverse_proxy_cache_enabled: true, litespeed_cache_enabled: true, cloudflare_cache_enabled: true, last_purged: null, last_cloudflare_purged: null, opcode_cache_backend: "opcache", object_cache_backend: "redis", pending: {} },
+      cachePurging: false,
+      cachePendingTimer: null,
+      // IP Manager
+      ipRules: [],
+      newIpRule: { ip: "", type: "block" },
+      // Hotlink Protection
+      hotlink: { enabled: false, allowed_domains: "", saving: false },
+      // Fix File Ownership
+      fixOwnershipRunning: false,
+      fixOwnershipResult: null,
+      fixOwnershipWebsiteId: "all",
+      // Password Protect Dirs
+      protectedDirs: [],
+      newProtectedDir: { path: "", username: "", password: "" },
+      // Redirects
+      redirects: [],
+      newRedirect: { website_id: "", source_path: "/", target_url: "", type: "301", match_type: "exact" },
+      // Disk Usage
+      diskUsage: [],
+      apiTokens: [],
+      newApiTokenName: "",
+      newApiTokenRaw: "",
+      // FTP Accounts
+      ftpAccounts: [],
+      newFtpUsername: "",
+      newFtpPassword: "",
+      newFtpPath: "public_html",
+      // 2FA
+      customSslCrt: "",
+      customSslKey: "",
+      resourceHistory: [],
+      rawAccessLogs: [],
+      imageOptimizeDir: "",
+      siteBuilderTemplates: [],
+      analyticsStats: null,
+      syncJobs: [],
+      has2FA: false,
+      tfaSetup: { secret: null, uri: "", code: "" },
+      tfaDisableCode: "",
+      tfaDisablePassword: "",
+      profileLoading: false,
+      profileSaving: false,
+      accountTimezone: "UTC",
+      timezoneSaving: false,
+      profileForm: {
+        id: null,
+        full_name: "",
+        email: "",
+        has_2fa: false,
+        billing: {
+          billing_email: "",
+          company_name: "",
+          phone: "",
+          tax_id: "",
+          address_line1: "",
+          address_line2: "",
+          city: "",
+          state: "",
+          postal_code: "",
+          country: "",
+        },
+      },
+      // Account Settings and Themes
+      activeTheme: localStorage.getItem("mp_theme") || "Default",
+      isChangingPassword: false,
+      settingsForm: {
+        current_password: "",
+        new_password: "",
+        confirm_password: "",
+        totp_code: "",
+      },
+    };
+  },
+  mounted() {
+    document.body.classList.add('app-loaded');
+    const hash = window.location.hash.replace("#", "?");
+    const searchParams = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(hash);
+    const urlSsoToken = searchParams.get("sso_token") || searchParams.get("token") || hashParams.get("sso_token") || hashParams.get("token");
+    if (urlSsoToken) {
+      this.token = urlSsoToken;
+      localStorage.setItem("mp_client_token", urlSsoToken);
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, "", "/#overview");
+      }
+    }
+    if (!this.token) {
+      this.token = localStorage.getItem("mp_client_token") || localStorage.getItem("mp_reseller_token") || localStorage.getItem("token") || "";
+    }
+    if (!this.token) {
+      window.location.href = "/login";
+      return;
+    }
+    this.focusSearchBar();
+    this.load();
+    window.addEventListener("popstate", () => {
+      const serverRoute = serverRouteFromLocation();
+      if (serverRoute) this.selectedMinecraftServerId = serverRoute.id;
+      this.activePage = pageFromLocation();
+      if (this.isMinecraftServerPage) {
+        this.loadMinecraftServerDetails();
+        if (this.activePage === "server-console") this.startMinecraftConsolePolling();
+        else this.stopMinecraftConsolePolling();
+        if (["server-overview", "server-network"].includes(this.activePage)) this.startMinecraftMetricsPolling();
+        else this.stopMinecraftMetricsPolling();
+      } else {
+        this.stopMinecraftConsolePolling();
+        this.stopMinecraftMetricsPolling();
+      }
+    });
+  },
+  unmounted() {
+    if (this.resourcePoll) window.clearInterval(this.resourcePoll);
+    if (this.cachePendingTimer) window.clearTimeout(this.cachePendingTimer);
+    this.stopMinecraftConsolePolling();
+    this.stopMinecraftMetricsPolling();
+    this.stopWordPressDetectionPolling();
+  },
+  computed: {
+    backupInProgress() {
+      return this.backups.some((backup) => ["queued", "running"].includes(backup.status));
+    },
+    filteredBackups() {
+      return this.backups;
+    },
+    latestCompletedBackup() {
+      return this.backups
+        .filter((backup) => backup.status === "completed")
+        .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))[0] || null;
+    },
+    composedCronSchedule() {
+      return [this.cronSchedule.minute, this.cronSchedule.hour, this.cronSchedule.day, this.cronSchedule.month, this.cronSchedule.weekday].join(" ");
+    },
+    isCollaboratorRestrictedWebsites() {
+      const scope = this.home?.collaborator_scope;
+      return Boolean(scope && scope.is_collaborator && Array.isArray(scope.allowed_website_ids));
+    },
+    userIsReseller() {
+      return Boolean(this.home && this.home.is_reseller);
+    },
+    resellerPortalUrl() {
+      const port = (this.home && this.home.reseller_port) || "8002";
+      const host = window.location.hostname;
+      const currentToken = this.token || localStorage.getItem("mp_client_token") || localStorage.getItem("token") || "";
+      return `${window.location.protocol}//${host}:${port}/reseller#sso_token=${encodeURIComponent(currentToken)}`;
+    },
+    serverIp() {
+      return (this.home && this.home.server_ip) || (this.activeAccount && this.activeAccount.node_ip) || (this.selectedWebsite && (this.selectedWebsite.server_ip || this.selectedWebsite.ip_address)) || (window.location && window.location.hostname) || "127.0.0.1";
+    },
+    selectedSubdomainParent() {
+      return (this.subdomainDomains || []).find((domain) => String(domain.id) === String(this.subdomainWizard.parent_domain_id)) || null;
+    },
+    subdomainDnsName() {
+      const label = this.subdomainWizard.label || "subdomain";
+      const parent = this.selectedSubdomainParent;
+      return `${label}.${parent?.name || "your-domain.com"}`;
+    },
+    sortedRegisteredDomains() {
+      const direction = this.registeredDomainSort.direction === "desc" ? -1 : 1;
+      const key = this.registeredDomainSort.key;
+      return [...this.registeredDomains].sort((left, right) => {
+        if (key === "domain") {
+          return String(left.domain_name || "").localeCompare(String(right.domain_name || "")) * direction;
+        }
+        const leftDays = this.domainDaysRemaining(left);
+        const rightDays = this.domainDaysRemaining(right);
+        if (leftDays == null && rightDays != null) return 1;
+        if (leftDays != null && rightDays == null) return -1;
+        const leftValue = leftDays == null ? Number.POSITIVE_INFINITY : leftDays;
+        const rightValue = rightDays == null ? Number.POSITIVE_INFINITY : rightDays;
+        return (leftValue - rightValue) * direction || String(left.domain_name || "").localeCompare(String(right.domain_name || ""));
+      });
+    },
+    unreadNotificationsCount() {
+      return this.notifications.filter(n => !n.read).length;
+    },
+    activeToasts() {
+      return this.notifications.filter(n => n.toastVisible);
+    },
+    currentUserEmail() {
+      if (this.home && this.home.user && this.home.user.email) return this.home.user.email;
+      if (this.home && this.home.account && this.home.account.email) return this.home.account.email;
+      if (this.home && this.home.email) return this.home.email;
+      return this.login.email || "";
+    },
+    userInitial() {
+      return ((this.currentUserEmail || "U").trim()[0] || "U").toUpperCase();
+    },
+    selectedWebsite() {
+      return this.websites.find((site) => String(site.id) === String(this.selectedWebsiteId)) || this.websites[0] || null;
+    },
+    websiteDetailDomain() {
+      const site = this.selectedWebsite;
+      return site ? this.domains.find((domain) => String(domain.name).toLowerCase() === String(site.domain).toLowerCase()) || null : null;
+    },
+    websiteDetailSubdomains() {
+      const parentDomain = this.websiteDetailDomain;
+      if (!parentDomain) return [];
+      return this.subdomains.filter((subdomain) => String(subdomain.parent_domain_id) === String(parentDomain.id));
+    },
+    selectedWebsiteUsesCloudflare() {
+      const site = this.selectedWebsite;
+      return Boolean(this.selectedWebsiteId && site && (site.dns_provider === "cloudflare" || site.dns_provider_label === "Cloudflare"));
+    },
+    mailboxWizardDomain() {
+      return (this.mailRouting.mail_domains || []).find((domain) => String(domain.name) === String(this.mailboxWizard.domain)) || null;
+    },
+    mailboxWizardDnsReady() {
+      const auth = this.mailboxWizardDomain?.auth;
+      return Boolean(auth && auth.mx?.configured && auth.spf?.configured && auth.dkim?.configured && auth.dmarc?.configured);
+    },
+    selectedWebsiteLabel() {
+      return this.selectedWebsiteId && this.selectedWebsite ? this.selectedWebsite.domain : "All sites";
+    },
+    serverSelectorItems() {
+      const items = [];
+      for (const site of this.websites || []) {
+        items.push({
+          id: `site-${site.id}`,
+          primary: String(site.id),
+          type: "website",
+          name: site.domain || "Website",
+          label: "Web Server",
+          status: site.status || "unknown",
+          meta: site.domain || "Web Server",
+        });
+      }
+      for (const server of this.minecraftServers || []) {
+        items.push({
+          id: `minecraft-${server.id}`,
+          primary: String(server.id),
+          type: "minecraft",
+          name: server.name || `minecraft-${server.id}`,
+          label: "Minecraft Server",
+          status: server.status || "stopped",
+          meta: server.version || "Minecraft",
+        });
+      }
+      for (const database of this.databases || []) {
+        items.push({
+          id: `db-${database.id}`,
+          primary: String(database.id),
+          type: "database",
+          name: database.name || `database-${database.id}`,
+          label: "Database Server",
+          status: database.status || "active",
+          meta: database.username || "Database",
+        });
+      }
+      for (const appServer of this.applicationServers || []) {
+        const serviceLabels = {
+          discord_bot: "Discord Bot",
+          telegram_bot: "Telegram Bot",
+          minecraft_afk_bot: "Minecraft AFK Bot",
+        };
+        items.push({
+          id: `app-${appServer.id}`,
+          primary: String(appServer.id),
+          type: "application_server",
+          name: appServer.name || `app-${appServer.id}`,
+          label: serviceLabels[appServer.service_type] || "Application Server",
+          status: appServer.status || "stopped",
+          meta: appServer.runtime || "Application",
+        });
+      }
+      return items;
+    },
+    filteredServers() {
+      const query = this.siteSearchQuery.trim().toLowerCase();
+      if (!query) return this.serverSelectorItems;
+      return this.serverSelectorItems.filter((server) => `${server.name} ${server.label} ${server.status} ${server.meta}`.toLowerCase().includes(query));
+    },
+    filteredMinecraftServers() {
+      return this.minecraftServers || [];
+    },
+    filteredWebServers() {
+      return this.websites || [];
+    },
+    filteredDatabaseServers() {
+      return this.databases || [];
+    },
+    filteredApplicationServers() {
+      return this.applicationServers || [];
+    },
+    selectedCategoryName() {
+      const selected = this.storePlanGroups.find((entry) => String(entry.category.id) === String(this.selectedStoreCategory));
+      return selected ? selected.category.name : "Plans";
+    },
+    selectedServerLabel() {
+      const selected = this.serverSelectorItems.find((service) => {
+        if (service.type === "website") return String(service.primary) === String(this.selectedWebsiteId);
+        if (service.type === "minecraft") return String(service.primary) === String(this.selectedMinecraftServerId);
+        if (service.type === "database") return String(service.primary) === String(this.selectedDatabaseId);
+        return false;
+      });
+      return selected ? selected.name : "All servers";
+    },
+    selectedWebsiteWordPress() {
+      if (!this.selectedWebsiteId) return null;
+      return this.wordpressSites.find((site) => String(site.website_id) === String(this.selectedWebsiteId)) || null;
+    },
+    hasHostingAccount() {
+      return Array.isArray(this.home.accounts) && this.home.accounts.length > 0;
+    },
+    hasMinecraftAccess() {
+      return this.minecraftServers.some((server) => server.status !== "deleted");
+    },
+    storePlanGroups() {
+      return this.store.categories || [];
+    },
+    visibleStorePlans() {
+      const selected = this.storePlanGroups.find((entry) => String(entry.category.id) === String(this.selectedStoreCategory));
+      return selected ? selected.plans : this.storePlanGroups.flatMap((entry) => entry.plans || []);
+    },
+    selectedMinecraftServer() {
+      return this.minecraftServers.find((server) => String(server.id) === String(this.selectedMinecraftServerId)) || null;
+    },
+    selectedApplicationServer() {
+      return this.applicationServers.find((server) => String(server.id) === String(this.selectedApplicationServerId)) || null;
+    },
+    applicationServerServiceLabel() {
+      const labels = {
+        discord_bot: "Discord Bot",
+        telegram_bot: "Telegram Bot",
+        minecraft_afk_bot: "Minecraft AFK Bot",
+      };
+      return labels[this.selectedApplicationServer?.service_type] || "Application Server";
+    },
+    filteredMinecraftFiles() {
+      const query = this.minecraftFileSearch.trim().toLowerCase();
+      if (!query) return this.minecraftFiles;
+      return this.minecraftFiles.filter((file) => file.name.toLowerCase().includes(query));
+    },
+    minecraftPathParts() {
+      return this.minecraftFilePath.split("/").filter(Boolean);
+    },
+    isMinecraftServerPage() {
+      return SERVER_PAGE_TARGETS.has(this.activePage);
+    },
+    minecraftServerAddress() {
+      return this.selectedMinecraftServer?.port ? `${window.location.hostname}:${this.selectedMinecraftServer.port}` : "Not allocated";
+    },
+    minecraftServerActivity() {
+      const serverId = Number(this.selectedMinecraftServerId);
+      return (this.activity || []).filter((item) => {
+        let metadata = item.metadata;
+        if (typeof metadata === "string") {
+          try { metadata = JSON.parse(metadata); } catch (error) { metadata = {}; }
+        }
+        return Number(metadata?.server_id) === serverId;
+      });
+    },
+    activeAccount() {
+      if (!this.home || !Array.isArray(this.home.accounts) || this.home.accounts.length === 0) return null;
+      if (this.selectedAccountId) {
+        const found = this.home.accounts.find(a => String(a.id) === String(this.selectedAccountId));
+        if (found) return found;
+      }
+      return this.home.accounts[0];
+    },
+    activeAccountLabel() {
+      if (!this.activeAccount) return "No account";
+      return `${this.activeAccount.username} (${this.activeAccount.plan_name || 'Account'})`;
+    },
+    isAccountMaintenance() {
+      if (this.activeAccount && (this.activeAccount.status === "provisioning" || this.activeAccount.status === "rebuilding")) {
+        return true;
+      }
+      if (this.home && Array.isArray(this.home.warnings)) {
+        return this.home.warnings.some((w) => w.kind === "maintenance");
+      }
+      return false;
+    },
+    isApiAccessAllowed() {
+      if (!this.activeAccount) return false;
+      return Boolean(this.activeAccount.allow_api_access);
+    },
+    filteredSites() {
+      const query = this.siteSearchQuery.trim().toLowerCase();
+      if (!query) return this.websites;
+      return this.websites.filter((site) => `${site.domain} ${site.status} ${site.document_root}`.toLowerCase().includes(query));
+    },
+    filteredWebsites() {
+      const query = this.websiteTableSearchQuery.trim().toLowerCase();
+      if (!query) return this.websites;
+      return this.websites.filter((site) => {
+        const searchable = [
+          site.domain, site.document_root, site.status, site.ssl_status,
+          site.php_version, site.dns_status, site.dns_provider,
+          site.dns_provider_label, site.dns_last_error,
+          (site.nameservers || []).join(" "),
+        ].filter(Boolean).join(" ").toLowerCase();
+        return searchable.includes(query);
+      });
+    },
+    filteredDatabases() {
+      if (!this.databaseWebsiteFilter) return this.databases;
+      return this.databases.filter((database) => String(database.website_id || "") === String(this.databaseWebsiteFilter));
+    },
+    diskPercent() {
+      const used = Number(this.home.resources.disk_used_mb || 0);
+      const limit = Number(this.home.resources.disk_limit_mb || 1);
+      return Math.min(100, limit > 0 ? (used / limit) * 100 : 0).toFixed(1);
+    },
+    inodePercent() {
+      const used = Number(this.home.resources.inodes_used || 0);
+      const limit = Number(this.home.resources.inodes_limit || 1);
+      return Math.min(100, limit > 0 ? (used / limit) * 100 : 0).toFixed(1);
+    },
+    cpuPercent() {
+      const pct = Number(this.home.resources?.cpu_percent ?? this.home.resources?.cpu_load ?? 20);
+      return Math.min(100, Math.max(0, pct)).toFixed(1);
+    },
+    cpuLoadDisplay() {
+      const resources = this.home?.resources || {};
+      const value = resources.cpu_percent ?? resources.cpu_load;
+      if (value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value))) {
+        return `${Number(value).toFixed(1)}%`;
+      }
+      return resources.cpu || "—";
+    },
+    cpuLoadStatus() {
+      return this.home?.resources?.cpu || "unknown";
+    },
+    memoryPercent() {
+      const pct = Number(this.home.resources?.memory_percent ?? 35);
+      return Math.min(100, Math.max(0, pct)).toFixed(1);
+    },
+    sidebarSections() {
+      // Store page - now uses sidebar instead of navbar
+      if (this.activePage === "billing" || this.activePage === "store") {
+        return [
+          { label: "Global", items: [
+            { label: "Home", target: "home", icon: "home", description: "Account summary and recent orders." },
+            { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+            { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+            { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+          ] },
+        ];
+      }
+
+      // Minecraft server page - Minecraft-specific sidebar
+      if (this.isMinecraftServerPage) {
+        const server = this.selectedMinecraftServer;
+        return [
+          { label: "Global", items: [
+            { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+            { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+            { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+          ] },
+          { label: `${server?.name || "Minecraft server"} · Minecraft`, items: [
+            { label: "Overview", target: "server-overview", icon: "dashboard", description: "Status, resources, and server controls." },
+            { label: "Console", target: "server-console", icon: "terminal", description: "Live logs and remote console commands." },
+            { label: "Files", target: "server-files", icon: "files", description: "Browse and edit server files." },
+            { label: "Databases", target: "server-databases", icon: "databases", description: "Server database allocations." },
+            { label: "Schedules", target: "server-schedules", icon: "cron", description: "Scheduled server actions." },
+            { label: "Backups", target: "server-backups", icon: "backup", description: "Server snapshots and restores." },
+            { label: "Network", target: "server-network", icon: "network", description: "Allocated address and port." },
+            { label: "Startup", target: "server-startup", icon: "terminal", description: "Server software and version." },
+            { label: "Settings", target: "server-settings", icon: "settings", description: "Minecraft configuration and power." },
+            { label: "Activity", target: "server-activity", icon: "activity", description: "Server actions and recent events." },
+          ] },
+        ];
+      }
+
+      // Global/home sidebar - simple navigation
+      if (this.activePage === "home" || this.activePage === "servers" || this.activePage === "minecraft") {
+        const sections = [
+          { label: "Global", items: [
+            { label: "Home", target: "home", icon: "home", description: "Account summary and recent orders." },
+            { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+            { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+            { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+          ] },
+        ];
+        return sections;
+      }
+
+      // No hosting account - basic navigation
+      if (!this.hasHostingAccount) {
+        const sections = [
+          { label: "Global", items: [
+            { label: "Home", target: "home", icon: "home", description: "Account summary and recent orders." },
+            { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+            { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+            { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+          ] },
+        ];
+        return sections;
+      }
+
+      // Web server context - Web-specific sidebar
+      if (this.selectedWebsiteId) {
+        const website = this.selectedWebsite;
+        return [
+          { label: "Global", items: [
+            { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+            { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+            { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+          ] },
+          { label: `${website?.domain || "Web Server"} · Web`, items: [
+            { label: "Overview", target: "website-details", icon: "dashboard", description: "Website status and resources." },
+            { label: "Websites", target: "website", icon: "website", description: "Manage all websites." },
+            { label: "Files", target: "files", icon: "files", description: "File manager and SFTP." },
+            { label: "Domains", target: "domains", icon: "domains", description: "Domains and DNS." },
+            { label: "Databases", target: "databases", icon: "databases", description: "Database management." },
+            { label: "SSL", target: "ssl-tls", icon: "ssl", description: "SSL certificates." },
+            { label: "Cron Jobs", target: "cron-jobs", icon: "cron", description: "Scheduled tasks." },
+            { label: "Network", target: "ip-manager", icon: "network", description: "IP and network settings." },
+            { label: "Settings", target: "security", icon: "settings", description: "Security and configuration." },
+          ] },
+        ];
+      }
+
+      // Database server context - Database-specific sidebar
+      if (this.selectedDatabaseId) {
+        const database = this.databases.find(d => String(d.id) === String(this.selectedDatabaseId));
+        return [
+          { label: "Global", items: [
+            { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+            { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+            { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+          ] },
+          { label: `${database?.name || "Database"} · Database`, items: [
+            { label: "Overview", target: "databases", icon: "dashboard", description: "Database status and connection." },
+            { label: "Users", target: "databases", icon: "user", description: "Database users and permissions." },
+            { label: "phpMyAdmin", target: "databases", icon: "databases", description: "Open phpMyAdmin." },
+            { label: "Backups", target: "backups", icon: "backup", description: "Database backups." },
+            { label: "Settings", target: "databases", icon: "settings", description: "Database configuration." },
+          ] },
+        ];
+      }
+
+      // Application server context - Bot-specific sidebar
+      if (this.selectedApplicationServerId) {
+        const appServer = this.applicationServers.find(s => String(s.id) === String(this.selectedApplicationServerId));
+        const serviceLabels = {
+          discord_bot: "Discord Bot",
+          telegram_bot: "Telegram Bot",
+          minecraft_afk_bot: "Minecraft AFK Bot",
+        };
+        const serviceLabel = serviceLabels[appServer?.service_type] || "Application Server";
+        return [
+          { label: "Global", items: [
+            { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+            { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+            { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+          ] },
+          { label: `${appServer?.name || "Application Server"} · ${serviceLabel}`, items: [
+            { label: "Overview", target: "app-server-overview", icon: "dashboard", description: "Status, resources, and server controls." },
+            { label: "Console", target: "app-server-console", icon: "terminal", description: "Live logs and remote console commands." },
+            { label: "Files", target: "app-server-files", icon: "files", description: "Browse and edit server files." },
+            { label: "Startup", target: "app-server-startup", icon: "terminal", description: "Runtime, main file, and environment variables." },
+            { label: "Domains", target: "app-server-domains", icon: "domains", description: "Domain connections." },
+            { label: "Databases", target: "app-server-databases", icon: "databases", description: "Database allocations." },
+            { label: "Network", target: "app-server-network", icon: "network", description: "Network settings and ports." },
+            { label: "Settings", target: "app-server-settings", icon: "settings", description: "Configuration and management." },
+            { label: "Activity", target: "app-server-activity", icon: "activity", description: "Server actions and recent events." },
+          ] },
+        ];
+      }
+
+      // Default hosting account sidebar with Web Server management
+      const rawSections = [
+        {
+          label: "Web Server",
+          items: [
+            { label: "Overview", target: "dashboard", icon: "dashboard", description: "Resource usage and account overview." },
+            { label: "Websites", target: "website", icon: "website", description: "Websites, PHP versions, SSL." },
+            { label: "Files", target: "files", icon: "files", description: "File manager, SFTP." },
+            { label: "Domains", target: "domains", icon: "domains", description: "Domains and DNS." },
+            { label: "Databases", target: "databases", icon: "databases", description: "Database management." },
+            { label: "SSL", target: "ssl-tls", icon: "ssl", description: "SSL certificates." },
+            { label: "Cron Jobs", target: "cron-jobs", icon: "cron", description: "Scheduled tasks." },
+            { label: "Network", target: "ip-manager", icon: "network", description: "IP and network settings." },
+            { label: "Settings", target: "security", icon: "settings", description: "Security and configuration." },
+          ],
+        },
+      ];
+      rawSections.unshift({ label: "Global", items: [
+        { label: "Home", target: "home", icon: "home", description: "Account summary and recent orders." },
+        { label: "Servers", target: "servers", icon: "dashboard", description: "All of your hosting services." },
+        { label: "Store", target: "billing", icon: "plan", description: "Browse services and view billing." },
+        { label: "Account", target: "settings", icon: "user", description: "Account profile and security." },
+      ] });
+
+      const scope = this.home?.collaborator_scope;
+      const entitledSections = rawSections.map((section) => ({
+        ...section,
+        items: section.items.filter((item) => item.target === "billing" || item.target === "minecraft" || this.isPlanFeatureEnabled(item.target)),
+      })).filter((section) => section.items.length > 0);
+      if (!scope || !scope.is_collaborator || !Array.isArray(scope.allowed_menus)) {
+        return entitledSections;
+      }
+
+      const menuMap = {
+        websites: ["website", "subdomains", "redirects", "site-builder", "installer", "php-configuration", "php-info", "cache-manager", "folder-index-manager", "services", "api-tokens"],
+        files: ["files", "disk-usage", "password-protect-directories", "fix-file-ownership", "backups", "git", "images"],
+        databases: ["databases", "mysql-database-wizard", "remote-mysql", "postgresql-databases", "postgresql-database-wizard", "phppgadmin"],
+        ftp: ["ftp-accounts", "ssh-access"],
+        mail: ["email"],
+        dns: ["domains", "dns-zone-editor"],
+        cron: ["cron-jobs"],
+        ssl: ["security", "ssl-tls", "modsecurity", "hotlink-protection", "ip-manager"],
+        analytics: ["analytics", "performance", "activity", "visitors", "errors", "bandwidth", "raw-access", "webalizer", "resource-usage"],
+        collaborators: ["account-sharing"],
+      };
+
+      const allowedTargets = new Set(["dashboard", "hosting-plan", "two-factor-auth"]);
+      allowedTargets.add("billing");
+      if (this.hasMinecraftAccess) allowedTargets.add("minecraft");
+      for (const m of scope.allowed_menus) {
+        if (menuMap[m] && m !== "collaborators") {
+          menuMap[m].forEach((t) => allowedTargets.add(t));
+        }
+      }
+      allowedTargets.delete("account-sharing");
+
+      return entitledSections.map((sec) => ({
+        label: sec.label,
+        items: sec.items.filter((item) => allowedTargets.has(item.target)),
+      })).filter((sec) => sec.items.length > 0);
+    },
+    activeMenuItem() {
+      return this.menuItems.find((item) => item.target === this.activePage) || this.menuItems[0];
+    },
+    activeFeatureStatus() {
+      return this.featureStatus(this.activePage);
+    },
+    recentSyncJobs() {
+      return this.syncJobs.slice(0, 5);
+    },
+    searchResults() {
+      const query = this.searchQuery.trim().toLowerCase();
+      if (!query) return [];
+      const items = [];
+      const add = (type, label, detail, action) => items.push({ type, label, detail, action });
+
+      for (const item of this.menuItems) add("Function", item.label, item.group || "Client panel", () => this.goTo(item.target));
+      // The dashboard tool grid contains launchable tools that are not sidebar
+      // entries (for example phpMyAdmin and phpPgAdmin). Keep the global index
+      // in sync with that complete catalog as well.
+      for (const tile of this.ZeropanelTiles) {
+        add("Tool", tile.label, tile.group || "Client panel", () => tile.action ? tile.action() : this.goTo(tile.target));
+      }
+      for (const script of this.installer.scripts || []) {
+        add("App", script.name, "App Installer", () => this.openInstallerModal(script));
+      }
+      for (const site of this.websites) add("Site", site.domain, site.status, () => this.openWebsiteDetails(site));
+      for (const domain of this.domains) add("Domain", domain.name, domain.status, () => this.goTo("domains"));
+      for (const database of this.databases) add("Database", database.name, database.username, () => this.goTo("databases"));
+      for (const user of this.databaseUsers) add("Database user", user.username, user.status, () => this.goTo("databases"));
+      for (const site of this.wordpressSites || []) add("WordPress", site.domain, site.site_title || "WordPress Manager", () => this.goTo("wordpress-manager"));
+      for (const mailbox of this.mailboxes || []) add("Mailbox", mailbox.email, mailbox.status, () => this.goTo("email"));
+      for (const ftp of this.ftpAccounts || []) add("FTP account", ftp.username, ftp.path || "FTP Accounts", () => this.goTo("ftp-accounts"));
+      for (const job of this.cronJobs || []) add("Cron job", job.command, job.schedule || "Cron Jobs", () => this.goTo("cron-jobs"));
+      for (const subdomain of this.subdomains || []) add("Subdomain", subdomain.domain, subdomain.status, () => this.goTo("website"));
+      for (const item of this.activity) add("Activity", item.action, item.created_at, () => this.goTo("activity"));
+
+      return items
+        .filter((item) => `${item.type} ${item.label} ${item.detail || ""}`.toLowerCase().includes(query))
+        .filter((item, index, all) => all.findIndex((candidate) => `${candidate.type}|${candidate.label}|${candidate.detail}` === `${item.type}|${item.label}|${item.detail}`) === index)
+        .slice(0, 8);
+    },
+    menuItems() {
+      return [
+        { label: "Home", target: "home", icon: "home", description: "Account summary, services, and recent orders." },
+        ...this.sidebarSections.flatMap((section) => section.items),
+      ];
+    },
+    homePendingOrders() {
+      return (this.store.orders || []).filter((order) => order.status === "pending").length;
+    },
+    homeRecentOrders() {
+      return (this.store.orders || []).slice(0, 4);
+    },
+    activeAdvancedTool() {
+      return this.sidebarSections.flatMap((section) => section.items).find((item) => item.target === this.activePage);
+    },
+    resourceChartPoints() {
+      return this.resourceUsage.samples || [];
+    },
+    latestResourceUsage() {
+      return this.resourceUsage.current || {};
+    },
+    resourceSeries() {
+      return [
+        { key: "cpu_percent", label: "CPU", color: "#15835f", unit: "%", max: 100 },
+        { key: "memory_mb", label: "RAM", color: "#245a97", unit: "MB", max: Math.max(Number(this.latestResourceUsage.memory_limit_mb || 0), ...this.resourceChartPoints.map((point) => Number(point.memory_mb || 0)), 1) },
+        { key: "storage_mb", label: "Storage", color: "#a75d12", unit: "MB", max: Math.max(Number(this.latestResourceUsage.storage_limit_mb || 0), ...this.resourceChartPoints.map((point) => Number(point.storage_mb || 0)), 1) },
+      ];
+    },
+    hostingPlanMetrics() {
+      const account = this.activeAccount || this.home.accounts?.[0] || {};
+      const resources = this.home.resources || {};
+      const latest = this.latestResourceUsage || {};
+      const websitesUsed = this.websites.length;
+      const bandwidthUsedMb = Number(this.analytics?.summary?.bandwidth_bytes || 0) / (1024 * 1024);
+      const bandwidthLimitMb = Number(account.bandwidth_mb || 0);
+
+      const metrics = [
+        {
+          key: "storage",
+          icon: "disk-usage",
+          label: "Disk Space",
+          used: Number(resources.disk_used_mb || 0),
+          limit: Number(resources.disk_limit_mb || account.storage_mb || 0),
+          unit: "mb",
+        },
+        {
+          key: "memory",
+          icon: "analytics",
+          label: "RAM",
+          used: Number(latest.memory_mb || 0),
+          limit: Number(latest.memory_limit_mb || account.memory_mb || 0),
+          unit: "mb",
+        },
+        {
+          key: "cpu",
+          icon: "cpu",
+          label: "CPU Cores",
+          used: Number(latest.cpu_percent || 0),
+          limit: Number(account.cpu_limit || 0) * 100,
+          unit: "percent",
+          value: `${Number(latest.cpu_percent || 0).toFixed(1)}% (${Number(account.cpu_limit || 0)} cores assigned)`,
+        },
+        {
+          key: "inodes",
+          icon: "files",
+          label: "Inodes",
+          used: Number(resources.inodes_used || 0),
+          limit: Number(resources.inodes_limit || account.inode_limit || 0),
+          unit: "count",
+        },
+        {
+          key: "websites",
+          icon: "domains",
+          label: "Addons/Websites",
+          used: websitesUsed,
+          limit: Number(account.max_websites || 0),
+          unit: "count",
+        },
+        {
+          key: "processes",
+          icon: "performance",
+          label: "Max Processes",
+          used: null,
+          limit: Number(account.max_processes || 0),
+          unit: "count",
+          value: `${Number(account.max_processes || 0)} processes assigned`,
+        },
+        {
+          key: "php-workers",
+          icon: "server",
+          label: "PHP Workers",
+          used: null,
+          limit: Number(account.php_workers || 0),
+          unit: "count",
+          value: `${Number(account.php_workers || 0)} workers assigned`,
+        },
+        {
+          key: "bandwidth",
+          icon: "bandwidth",
+          label: "Bandwidth",
+          used: bandwidthUsedMb,
+          limit: bandwidthLimitMb,
+          unit: "mb",
+        },
+      ];
+
+      return metrics.map((metric) => {
+        const percent = this.planUsagePercent(metric.used, metric.limit);
+        const tone = this.planUsageTone(percent);
+        let value = metric.value;
+        if (!value) {
+          if (metric.used != null && metric.limit != null && metric.limit > 0) {
+            value = `${this.formatPlanMetricValue(metric.used, metric.unit)} / ${this.formatPlanMetricValue(metric.limit, metric.unit)}`;
+          } else if (metric.used != null) {
+            value = `${this.formatPlanMetricValue(metric.used, metric.unit)} (Unlimited)`;
+          } else {
+            value = `${this.formatPlanMetricValue(metric.limit, metric.unit)} assigned`;
+          }
+        }
+        const meta = metric.metaOverride || this.planUsageMeta(metric.used, metric.limit, metric.unit, metric.metaLimit);
+        return { ...metric, percent, tone, value, meta };
+      });
+    },
+    // Zeropanel dashboard icon grid — all features
+    ZeropanelTiles() {
+      const tiles = [
+        // Files
+        { label: "File Manager", target: "files", icon: "files", color: "#f59e0b", group: "Files" },
+        { label: "Images", target: "images", icon: "images", color: "#f59e0b", group: "Files" },
+        { label: "Directory Privacy", target: "password-protect-directories", icon: "password-protect", color: "#f59e0b", group: "Files" },
+        { label: "Disk Usage", target: "disk-usage", icon: "disk-usage", color: "#f59e0b", group: "Files" },
+        { label: "FTP Accounts", target: "ftp-accounts", icon: "ftp", color: "#f59e0b", group: "Files" },
+        { label: "Git Version Control", target: "git", icon: "git", color: "#f59e0b", group: "Files" },
+        { label: "Backups", target: "backups", icon: "backup", color: "#f59e0b", group: "Files" },
+        { label: "Fix Permissions", target: "fix-file-ownership", icon: "fix", color: "#f59e0b", group: "Files" },
+
+        // Databases
+        { label: "phpMyAdmin", target: "files", icon: "phpmyadmin", color: "#3b82f6", group: "Databases", action: () => this.launch("phpmyadmin") },
+        { label: "MySQL Databases", target: "databases", icon: "databases", color: "#3b82f6", group: "Databases" },
+        { label: "MySQL Database Wizard", target: "mysql-database-wizard", icon: "databases-wizard", color: "#3b82f6", group: "Databases" },
+        { label: "Remote MySQL", target: "remote-mysql", icon: "remote-mysql", color: "#3b82f6", group: "Databases" },
+        { label: "PostgreSQL Databases", target: "postgresql-databases", icon: "postgresql", color: "#3b82f6", group: "Databases" },
+        { label: "PostgreSQL Database Wizard", target: "postgresql-database-wizard", icon: "postgresql-wizard", color: "#3b82f6", group: "Databases" },
+        { label: "phpPgAdmin", target: "phppgadmin", icon: "phppgadmin", color: "#3b82f6", group: "Databases", action: () => this.launch("phppgadmin") },
+
+        // Domains
+        { label: "Site Builder", target: "site-builder", icon: "site-builder", color: "#8b5cf6", group: "Domains" },
+        { label: "Domains", target: "domains", icon: "domains", color: "#8b5cf6", group: "Domains" },
+        { label: "Subdomains", target: "subdomains", icon: "domains", color: "#8b5cf6", group: "Domains" },
+        { label: "Redirects", target: "redirects", icon: "redirects", color: "#8b5cf6", group: "Domains" },
+        { label: "DNS Zone Editor", target: "dns-zone-editor", icon: "dns", color: "#8b5cf6", group: "Domains" },
+
+        // Email
+        { label: "Email", target: "email", icon: "email", color: "#06b6d4", group: "Email" },
+        { label: "Webmail", target: "email", icon: "webmail", color: "#0891b2", group: "Email", action: () => this.goTo("email") },
+
+        // Metrics
+        { label: "Visitors", target: "visitors", icon: "visitors", color: "#dc2626", group: "Metrics" },
+        { label: "Errors", target: "errors", icon: "errors", color: "#dc2626", group: "Metrics" },
+        { label: "Bandwidth", target: "bandwidth", icon: "bandwidth", color: "#dc2626", group: "Metrics" },
+        { label: "Raw Access", target: "raw-access", icon: "raw-access", color: "#dc2626", group: "Metrics" },
+        { label: "Webalizer", target: "webalizer", icon: "webalizer", color: "#dc2626", group: "Metrics" },
+        { label: "Resource Usage", target: "resource-usage", icon: "resource-usage", color: "#dc2626", group: "Metrics" },
+        { label: "Analytics", target: "analytics", icon: "analytics", color: "#dc2626", group: "Metrics" },
+        { label: "Performance", target: "performance", icon: "performance", color: "#dc2626", group: "Metrics" },
+
+        // Security
+        { label: "SSH Access", target: "ssh-access", icon: "sftp", color: "#065f46", group: "Security" },
+        { label: "IP Blocker", target: "ip-manager", icon: "ip", color: "#065f46", group: "Security" },
+        { label: "API Tokens", target: "api-tokens", icon: "key", color: "#065f46", group: "Security" },
+        { label: "SSL/TLS", target: "ssl-tls", icon: "ssl", color: "#065f46", group: "Security" },
+        { label: "ModSecurity", target: "modsecurity", icon: "shield", color: "#065f46", group: "Security" },
+        { label: "Two-Factor Authentication", target: "two-factor-auth", icon: "totp", color: "#065f46", group: "Security" },
+        { label: "Hotlink Protection", target: "hotlink-protection", icon: "hotlink", color: "#065f46", group: "Security" },
+        { label: "Security", target: "security", icon: "security", color: "#065f46", group: "Security" },
+
+        // Software
+        { label: "App Installer", target: "installer", icon: "wordpress", color: "#2563eb", group: "Software" },
+        { label: "PHP Configuration", target: "php-configuration", icon: "php", color: "#2563eb", group: "Software" },
+        { label: "PHP Info", target: "php-info", icon: "info", color: "#2563eb", group: "Software" },
+
+        // Advanced
+        { label: "Cron Jobs", target: "cron-jobs", icon: "cron", color: "#4b5563", group: "Advanced" },
+        { label: "Cache Manager", target: "cache-manager", icon: "cache", color: "#4b5563", group: "Advanced" },
+        { label: "Folder Index Manager", target: "folder-index-manager", icon: "folder-index", color: "#4b5563", group: "Advanced" },
+        { label: "Fix Permissions", target: "fix-file-ownership", icon: "fix", color: "#4b5563", group: "Advanced" },
+        { label: "Services", target: "services", icon: "services", color: "#4b5563", group: "Advanced" },
+        { label: "Activity Log", target: "activity", icon: "activity", color: "#4b5563", group: "Advanced" },
+      ];
+      const scope = this.home?.collaborator_scope;
+      if (scope && scope.is_collaborator && Array.isArray(scope.allowed_menus)) {
+        const menuMap = {
+          websites: ["website", "redirects", "site-builder", "installer", "php-configuration", "php-info", "cache-manager", "folder-index-manager", "services", "api-tokens"],
+          files: ["files", "disk-usage", "password-protect-directories", "fix-file-ownership", "backups", "git", "images"],
+          databases: ["databases", "mysql-database-wizard", "remote-mysql", "postgresql-databases", "postgresql-database-wizard", "phppgadmin"],
+          ftp: ["ftp-accounts", "ssh-access"],
+          mail: ["email"],
+          dns: ["domains", "dns-zone-editor"],
+          cron: ["cron-jobs"],
+          ssl: ["security", "ssl-tls", "modsecurity", "hotlink-protection", "ip-manager"],
+          analytics: ["analytics", "performance", "activity", "visitors", "errors", "bandwidth", "raw-access", "webalizer", "resource-usage"],
+          collaborators: ["account-sharing"],
+        };
+        const allowedTargets = new Set(["dashboard", "hosting-plan", "two-factor-auth"]);
+        for (const m of scope.allowed_menus) {
+          if (menuMap[m] && m !== "collaborators") {
+            menuMap[m].forEach((t) => allowedTargets.add(t));
+          }
+        }
+        allowedTargets.delete("account-sharing");
+        return tiles.filter((tile) => allowedTargets.has(tile.target));
+      }
+      if (this.hasHostingAccount) return tiles;
+      return tiles.filter((tile) => tile.group === "Domains");
+    },
+    ZeropanelGroups() {
+      const groups = {};
+      for (const tile of this.ZeropanelTiles) {
+        if (!groups[tile.group]) groups[tile.group] = [];
+        groups[tile.group].push(tile);
+      }
+      return groups;
+    },
+    sshInfo() {
+      const account = this.activeAccount || this.home.accounts?.[0] || {};
+      const runtime = account?.runtime || {};
+      let host = window.location.hostname;
+      if (!host || host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0") {
+        if (runtime.sftp_host && runtime.sftp_host !== "127.0.0.1" && runtime.sftp_host !== "0.0.0.0") {
+          host = runtime.sftp_host;
+        } else {
+          host = "seeds.servermango.com";
+        }
+      }
+      return {
+        enabled: this.sshState ? this.sshState.enabled : false,
+        host: host,
+        port: runtime.sftp_port || 18104,
+        user: runtime.sftp_user || (account?.username || "—"),
+        path: account?.base_path || "/home/user",
+      };
+    },
+    ftpInfo() {
+      const account = this.activeAccount || this.home.accounts?.[0] || {};
+      const runtime = account?.runtime || {};
+      return {
+        host: runtime.ftp_host || runtime.public_host || account.node_ip || window.location.hostname,
+        port: runtime.ftp_port || 21,
+        passiveMin: runtime.ftp_passive_min || "—",
+        passiveMax: runtime.ftp_passive_max || "—",
+      };
+    },
+    selectedDomain() {
+      return this.domains.find((d) => String(d.id) === String(this.selectedDomainId)) || null;
+    },
+    selectedDnsZone() {
+      if (!this.selectedDomainId) return null;
+      return this.dnsZones.find((zone) => String(zone.domain_id) === String(this.selectedDomainId)) || null;
+    },
+    filteredDnsRecords() {
+      if (!this.selectedDomainId) return this.dnsRecords;
+      return this.dnsRecords.filter((r) => String(r.domain_id) === String(this.selectedDomainId));
+    },
+    isCloudflareDns() {
+      return this.selectedDomain?.dns_provider === "cloudflare" || this.selectedDomain?.dns_provider_label === "Cloudflare";
+    },
+    canProxyNewDnsRecord() {
+      return ["A", "AAAA", "CNAME"].includes(this.newDnsRecord.type);
+    },
+    dnsRecordTypeMeta() {
+      return this.dnsRecordTypeMetaFor(this.newDnsRecord.type);
+    },
+  },
+  methods: {
+    async recalculateUsage() {
+      this.recalculatingUsage = true;
+      try {
+        const payload = await this.api("/api/client/recalculate_usage", {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        if (payload.resources) {
+          this.home.resources = payload.resources;
+        }
+        await this.loadHome();
+        this.notify(payload.message || "Usage recalculation completed.");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.recalculatingUsage = false;
+      }
+    },
+    openNameserverEditor(domain) {
+      const values = domain.nameservers || [];
+      this.nameserverEditor = { domainId: domain.id, source: domain.nameserver_source || "default", values: [values[0] || "", values[1] || ""] };
+    },
+    async saveNameservers() {
+      const editor = this.nameserverEditor;
+      if (!editor.domainId) return;
+      try {
+        const payload = await this.api(`/api/client/domains/${editor.domainId}/nameservers`, { method: "POST", body: JSON.stringify({ source: editor.source, nameservers: editor.values }) });
+        const index = this.domains.findIndex((domain) => domain.id === editor.domainId);
+        if (index >= 0) this.domains[index] = payload.domain;
+        this.notify("Nameserver change submitted to the registrar");
+        editor.domainId = null;
+      } catch (error) { this.notify(error.message, "error"); }
+    },
+    notify(text, type = "success") {
+      if (type === "error" && String(text || "") === "invalid_access_token") {
+        return;
+      }
+      const id = Date.now() + Math.random();
+      const n = { id, text, type, read: false, time: new Date().toLocaleTimeString(), toastVisible: true };
+      this.notifications.unshift(n);
+      if (this.notifications.length > 50) this.notifications.pop();
+      setTimeout(() => {
+        const idx = this.notifications.findIndex(x => x.id === id);
+        if (idx !== -1) this.notifications[idx].toastVisible = false;
+      }, 5000);
+    },
+    markAllNotificationsRead() {
+      this.notifications.forEach(n => n.read = true);
+    },
+    removeToast(id) {
+      const idx = this.notifications.findIndex(n => n.id === id);
+      if (idx !== -1) this.notifications[idx].toastVisible = false;
+    },
+    featureStatus(target) {
+      const fallback = { status: "functional", label: "Functional" };
+      return this.featureStatuses[target] || this.featureStatuses[normalizedClientTarget(target)] || fallback;
+    },
+    isPlanFeatureEnabled(target) {
+      const plan = this.activeAccount || {};
+      const positive = (key) => Number(plan[key] || 0) > 0;
+      if (["website", "website-details", "domains", "redirects", "site-builder", "installer", "wordpress-manager", "php-configuration", "php-info"].includes(target)) return positive("max_websites");
+      if (target === "subdomains") return positive("max_subdomains");
+      if (["databases", "mysql-database-wizard"].includes(target)) return positive("max_databases");
+      if (target === "email") return positive("max_mailboxes");
+      if (target === "cron-jobs") return positive("max_cron_jobs");
+      if (["files", "disk-usage", "backups", "git", "ftp-accounts", "ssh-access", "ssh-sftp-access"].includes(target)) return positive("storage_mb");
+      return true;
+    },
+    featureStatusClass(target) {
+      return `feature-status-${this.featureStatus(target).status || "functional"}`;
+    },
+    isFeatureDisabled(target) {
+      return this.featureStatus(target).status === "disabled";
+    },
+    jobStatusClass(status) {
+      return `job-status-${status || "queued"}`;
+    },
+    formatJobType(type) {
+      return String(type || "").replace(/_/g, " ");
+    },
+    formatJobDetail(job) {
+      if (job.result?.error) return job.result.error;
+      if (job.artifact?.path) return job.artifact.path;
+      if (job.result?.mode) return job.result.mode;
+      return `${job.target_type || "target"} #${job.target_id || "new"}`;
+    },
+    toggleNotifications() {
+      this.notificationsOpen = !this.notificationsOpen;
+      if (this.notificationsOpen) this.markAllNotificationsRead();
+    },
+    clearSessionState() {
+      localStorage.removeItem("mp_client_token");
+      localStorage.removeItem("mp_selected_account_id");
+      const host = window.location.hostname;
+      const cookieNames = ["mp_client_token", "jwt"];
+      cookieNames.forEach(name => {
+        document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+        document.cookie = `${name}=; path=/; domain=.localhost; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+        document.cookie = `${name}=; path=/; domain=${host}; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+        if (host.includes('.')) {
+          const parts = host.split('.');
+          for (let i = 0; i < parts.length - 1; i++) {
+            const domain = '.' + parts.slice(i).join('.');
+            document.cookie = `${name}=; path=/; domain=${domain}; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+          }
+        }
+      });
+      this.token = "";
+      this.challengeToken = "";
+      this.userMenuOpen = false;
+      this.notificationsOpen = false;
+      this.siteSwitcherOpen = false;
+      this.accountSwitcherOpen = false;
+      this.sessionExpired = true;
+    },
+    handleSessionExpired() {
+      if (this.sessionExpired) {
+        this.clearSessionState();
+        window.location.href = "/login";
+        return;
+      }
+      this.clearSessionState();
+      window.location.href = "/login";
+    },
+    async restartService(serviceId) {
+      if (!confirm(`Are you sure you want to restart this service? It will cause brief downtime.`)) return;
+      this.loadingServices = true;
+      try {
+        const response = await this.api("/api/client/services/restart", {
+          method: "POST",
+          body: JSON.stringify({ service: serviceId }),
+        });
+        if (response.success) {
+          appToast("Service restart job queued successfully.", "success");
+        } else {
+          appToast("Failed to queue restart.", "error");
+        }
+      } catch (e) {
+        appToast(e.message, "error");
+      } finally {
+        this.loadingServices = false;
+      }
+    },
+    serviceStatusFor(serviceId) {
+      return this.serviceStatusMap[serviceId] || { service: serviceId, status: "unknown", health: "unknown", running: false, supported: true };
+    },
+    serviceStatusClass(serviceId) {
+      const service = this.serviceStatusFor(serviceId);
+      if (service.status === "running" || service.health === "healthy") return "ok";
+      if (service.status === "missing" || service.status === "exited") return "danger";
+      if (service.status === "simulated" || service.status === "unknown" || service.status === "docker_unavailable") return "warn";
+      return "neutral";
+    },
+    serviceStatusLabel(serviceId) {
+      const service = this.serviceStatusFor(serviceId);
+      if (service.status === "running" && service.health === "healthy") return "running";
+      if (service.status === "running") return "running";
+      if (service.status === "missing") return "missing";
+      if (service.status === "docker_unavailable") return "unavailable";
+      return service.status || "unknown";
+    },
+    async rebootStack() {
+      if (!confirm("WARNING: This will forcefully restart ALL services and abruptly kill all running processes. Your websites will be completely offline for 10-30 seconds. Are you absolutely sure?")) return;
+      this.loadingServices = true;
+      try {
+        const response = await this.api("/api/client/services/kill-all", {
+          method: "POST",
+          body: "{}",
+        });
+        if (response.success) {
+          appToast("Stack reboot job queued successfully. The environment will restart momentarily.", "success");
+        } else {
+          appToast("Failed to queue reboot.", "error");
+        }
+      } catch (e) {
+        appToast(e.message, "error");
+      } finally {
+        this.loadingServices = false;
+      }
+    },
+    async api(path, options = {}) {
+      const isHomeReq = typeof path === "string" && path.includes("/api/client/home");
+      if (isHomeReq) this.isHomeLoading = true;
+      try {
+        const headers = { Accept: "application/json", ...(options.headers || {}) };
+        if (this.token) headers.Authorization = `Bearer ${this.token}`;
+        let targetAccountId = null;
+        if (this.home && Array.isArray(this.home.accounts) && this.home.accounts.length > 0 && this.selectedAccountId) {
+          const found = this.home.accounts.find((a) => String(a.id) === String(this.selectedAccountId));
+          if (found) targetAccountId = found.id;
+        }
+        if (!targetAccountId && this.activeAccount) targetAccountId = this.activeAccount.id;
+        if (targetAccountId && !headers["X-Hosting-Account-ID"]) {
+          headers["X-Hosting-Account-ID"] = String(targetAccountId);
+        }
+        if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+        const body = options.body && typeof options.body !== "string" ? JSON.stringify(options.body) : options.body;
+        const response = await fetch(path, { ...options, body, headers });
+        const payload = await response.json();
+        if (!response.ok) {
+          if (response.status === 503 && payload.error === "database_busy" && !options._dbRetry) {
+            await new Promise((r) => setTimeout(r, 500));
+            return this.api(path, { ...options, _dbRetry: true });
+          }
+          const error = payload.error || "Request failed";
+          if (error === "invalid_access_token") {
+            this.handleSessionExpired();
+          }
+          throw new Error(payload.detail ? `${error}: ${payload.detail}` : error);
+        }
+        return payload;
+      } finally {
+        if (isHomeReq) this.isHomeLoading = false;
+      }
+    },
+    async loadBackups() {
+      const suffix = this.backupSiteId !== "all" ? `?website_id=${encodeURIComponent(this.backupSiteId)}` : "";
+      const payload = await this.api(`/api/client/backups${suffix}`);
+      this.backups = payload.backups || [];
+    },
+    async loadStore() {
+      this.storeLoading = true;
+      this.storeError = "";
+      try {
+        this.store = { ...this.store, ...(await this.api("/api/client/store")) };
+        if (!this.selectedStoreCategory && this.store.categories.length) this.selectedStoreCategory = String(this.store.categories[0].category.id);
+      } catch (error) {
+        this.storeError = error.message;
+      } finally {
+        this.storeLoading = false;
+      }
+    },
+    async loadMinecraftServers() {
+      try {
+        const payload = await this.api("/api/client/minecraft-servers");
+        this.minecraftServers = payload.servers || [];
+        if (!this.minecraftServers.some((server) => String(server.id) === String(this.selectedMinecraftServerId))) {
+          const requestedRoute = serverRouteFromLocation();
+          this.selectedMinecraftServerId = this.isMinecraftServerPage && requestedRoute
+            ? ""
+            : (this.minecraftServers[0] ? String(this.minecraftServers[0].id) : "");
+        }
+        if (this.isMinecraftServerPage && !this.selectedMinecraftServer) {
+          this.activePage = "servers";
+          window.history.replaceState({}, "", pageUrl("servers"));
+        } else if (this.isMinecraftServerPage && this.selectedMinecraftServer) {
+          await this.loadMinecraftServerDetails();
+        }
+      } catch (error) {
+        this.minecraftServers = [];
+      }
+    },
+    async loadApplicationServers() {
+      try {
+        const payload = await this.api("/api/client/application-servers");
+        this.applicationServers = payload.servers || [];
+      } catch (error) {
+        this.applicationServers = [];
+      }
+    },
+    async loadMinecraftServerDetails() {
+      const server = this.selectedMinecraftServer;
+      if (!server) return;
+      try {
+        const details = await this.api(`/api/client/minecraft-servers/${server.id}`);
+        Object.assign(server, details.server || {});
+        this.minecraftSettings = { ...this.minecraftSettings, ...(details.settings || {}), name: server.name };
+        if (["server-startup", "server-settings"].includes(this.activePage)) {
+          const versions = await this.api(`/api/client/minecraft-servers/${server.id}/versions`);
+          this.minecraftVersions = versions.versions || [];
+          this.minecraftVersionChoice = server.version;
+        }
+        if (["server-console", "server-overview"].includes(this.activePage)) await this.loadMinecraftConsole();
+        if (this.activePage === "server-files") await this.loadMinecraftFiles();
+        if (["server-overview", "server-network"].includes(this.activePage)) await this.loadMinecraftMetrics(true);
+        if (this.activePage === "server-activity") await this.loadMinecraftActivity();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async minecraftAction(action) {
+      const server = this.selectedMinecraftServer;
+      if (!server) return;
+      try {
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}/action`, {
+          method: "POST",
+          body: JSON.stringify({ action }),
+        });
+        Object.assign(server, payload.server || {});
+        await this.loadMinecraftServerDetails();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async loadMinecraftConsole(quiet = false) {
+      const server = this.selectedMinecraftServer;
+      if (!server) return;
+      try {
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}/console`);
+        this.minecraftConsole = payload.output || "";
+        if (this.minecraftConsoleAutoScroll) {
+          this.$nextTick(() => {
+            const output = this.$refs.minecraftConsoleOutput;
+            if (output) output.scrollTop = output.scrollHeight;
+          });
+        }
+      } catch (error) {
+        if (!quiet) this.notify(error.message, "error");
+      }
+    },
+    startMinecraftConsolePolling() {
+      this.stopMinecraftConsolePolling();
+      this.loadMinecraftConsole(true);
+      this.minecraftConsoleTimer = window.setInterval(() => {
+        if (this.activePage === "server-console") this.loadMinecraftConsole(true);
+      }, 2500);
+    },
+    stopMinecraftConsolePolling() {
+      if (this.minecraftConsoleTimer) {
+        window.clearInterval(this.minecraftConsoleTimer);
+        this.minecraftConsoleTimer = null;
+      }
+    },
+    async loadMinecraftMetrics(quiet = false) {
+      const server = this.selectedMinecraftServer;
+      if (!server) return;
+      try {
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}/metrics`);
+        const metrics = payload.metrics || null;
+        const now = Date.now();
+        const previous = this.minecraftPreviousNetworkSample;
+        if (metrics && previous && now > previous.at) {
+          const seconds = (now - previous.at) / 1000;
+          this.minecraftNetworkRates = {
+            rx_bytes_per_second: Math.max(0, Number(metrics.network_rx_bytes || 0) - previous.rx) / seconds,
+            tx_bytes_per_second: Math.max(0, Number(metrics.network_tx_bytes || 0) - previous.tx) / seconds,
+          };
+        }
+        if (metrics) {
+          this.minecraftPreviousNetworkSample = { at: now, rx: Number(metrics.network_rx_bytes || 0), tx: Number(metrics.network_tx_bytes || 0) };
+          this.minecraftRuntimeMetrics = metrics;
+        }
+      } catch (error) {
+        if (!quiet) this.notify(error.message, "error");
+      }
+    },
+    startMinecraftMetricsPolling() {
+      this.stopMinecraftMetricsPolling();
+      this.minecraftPreviousNetworkSample = null;
+      this.minecraftNetworkRates = { rx_bytes_per_second: null, tx_bytes_per_second: null };
+      this.loadMinecraftMetrics(true);
+      this.minecraftMetricsTimer = window.setInterval(() => {
+        if (["server-overview", "server-network"].includes(this.activePage)) this.loadMinecraftMetrics(true);
+      }, 5000);
+    },
+    stopMinecraftMetricsPolling() {
+      if (this.minecraftMetricsTimer) {
+        window.clearInterval(this.minecraftMetricsTimer);
+        this.minecraftMetricsTimer = null;
+      }
+    },
+    formatBytes(bytes) {
+      const value = Number(bytes || 0);
+      if (value < 1024) return `${Math.round(value)} B`;
+      const units = ["KB", "MB", "GB", "TB"];
+      let amount = value;
+      let unit = -1;
+      do { amount /= 1024; unit += 1; } while (amount >= 1024 && unit < units.length - 1);
+      return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`;
+    },
+    formatUptime(seconds) {
+      if (seconds == null) return "—";
+      const days = Math.floor(seconds / 86400);
+      const hours = Math.floor((seconds % 86400) / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      return [days ? `${days}d` : "", `${hours}h`, `${minutes}m`].filter(Boolean).join(" ");
+    },
+    async loadMinecraftActivity() {
+      try {
+        const payload = await this.api("/api/client/activity");
+        this.activity = payload.activity || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    downloadMinecraftConsole() {
+      const blob = new Blob([this.minecraftConsole || ""], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${this.selectedMinecraftServer?.name || "minecraft-server"}-console.log`;
+      link.click();
+      URL.revokeObjectURL(url);
+    },
+    async sendMinecraftCommand() {
+      const server = this.selectedMinecraftServer;
+      if (!server || !this.minecraftCommand.trim()) return;
+      try {
+        await this.api(`/api/client/minecraft-servers/${server.id}/console`, {
+          method: "POST",
+          body: JSON.stringify({ command: this.minecraftCommand }),
+        });
+        this.minecraftCommand = "";
+        await this.loadMinecraftConsole();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async changeMinecraftVersion() {
+      const server = this.selectedMinecraftServer;
+      if (!server || !this.minecraftVersionChoice) return;
+      try {
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}/version`, {
+          method: "PATCH",
+          body: JSON.stringify({ version: this.minecraftVersionChoice }),
+        });
+        Object.assign(server, payload.server || {});
+        this.notify("Server version updated", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async loadMinecraftVersionsForSoftware() {
+      if (!this.minecraftSoftwareChoice) {
+        this.minecraftVersions = [];
+        this.minecraftVersionChoice = "";
+        return;
+      }
+      try {
+        const payload = await this.api(`/api/client/minecraft-servers/versions?type=${this.minecraftSoftwareChoice}`);
+        this.minecraftVersions = payload.versions || [];
+        this.minecraftVersionChoice = this.selectedMinecraftServer?.version || "";
+      } catch (error) {
+        this.notify(error.message, "error");
+        this.minecraftVersions = [];
+      }
+    },
+    async changeMinecraftSoftwareAndVersion() {
+      const server = this.selectedMinecraftServer;
+      if (!server || !this.minecraftSoftwareChoice || !this.minecraftVersionChoice) return;
+      try {
+        this.minecraftSoftwareChanging = true;
+        this.notify("Downloading and installing new server software...", "info");
+        
+        // First update the server type and version
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ 
+            server_type: this.minecraftSoftwareChoice,
+            version: this.minecraftVersionChoice 
+          }),
+        });
+        
+        Object.assign(server, payload.server || {});
+        this.notify("Server software and version updated successfully", "success");
+        
+        // Reload server details
+        await this.loadMinecraftServerDetails();
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.minecraftSoftwareChanging = false;
+      }
+    },
+    async saveMinecraftSettings() {
+      const server = this.selectedMinecraftServer;
+      if (!server) return;
+      try {
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}/settings`, {
+          method: "PATCH",
+          body: JSON.stringify(this.minecraftSettings),
+        });
+        if (payload.server_name) server.name = payload.server_name;
+        this.notify("Server settings saved", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async loadMinecraftFiles() {
+      const server = this.selectedMinecraftServer;
+      if (!server) return;
+      try {
+        const params = new URLSearchParams({ path: this.minecraftFilePath });
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}/files?${params}`);
+        this.minecraftFiles = payload.files || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    navigateMinecraftFiles(name) {
+      if (name === "..") {
+        this.minecraftFilePath = this.minecraftFilePath.split("/").filter(Boolean).slice(0, -1).join("/");
+      } else {
+        this.minecraftFilePath = [this.minecraftFilePath, name].filter(Boolean).join("/");
+      }
+      this.minecraftEditingFile = null;
+      this.loadMinecraftFiles();
+    },
+    navigateMinecraftBreadcrumb(index) {
+      this.minecraftFilePath = this.minecraftPathParts.slice(0, index + 1).join("/");
+      this.minecraftEditingFile = null;
+      this.loadMinecraftFiles();
+    },
+    async openMinecraftFile(file) {
+      const server = this.selectedMinecraftServer;
+      if (!server || file.size > 1_000_000) return;
+      const path = [this.minecraftFilePath, file.name].filter(Boolean).join("/");
+      try {
+        const params = new URLSearchParams({ path });
+        const payload = await this.api(`/api/client/minecraft-servers/${server.id}/files/content?${params}`);
+        this.minecraftEditingFile = { name: file.name, path };
+        this.minecraftFileContent = payload.content || "";
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async saveMinecraftFile() {
+      const server = this.selectedMinecraftServer;
+      if (!server || !this.minecraftEditingFile) return;
+      try {
+        await this.api(`/api/client/minecraft-servers/${server.id}/files/content`, {
+          method: "PUT",
+          body: JSON.stringify({ path: this.minecraftEditingFile.path, content: this.minecraftFileContent }),
+        });
+        this.notify("File saved", "success");
+        await this.loadMinecraftFiles();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async createMinecraftPath(kind) {
+      const label = kind === "directory" ? "folder" : "file";
+      const name = window.prompt(`Name for new ${label}:`, "");
+      if (!name || !name.trim()) return;
+      const path = [this.minecraftFilePath, name.trim()].filter(Boolean).join("/");
+      try {
+        await this.api(`/api/client/minecraft-servers/${this.selectedMinecraftServer.id}/files/create`, {
+          method: "POST",
+          body: { path, kind },
+        });
+        await this.loadMinecraftFiles();
+        this.notify(`${label} created`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async renameMinecraftFile(file) {
+      const name = window.prompt("New name:", file.name);
+      if (!name || name.trim() === file.name) return;
+      const path = [this.minecraftFilePath, file.name].filter(Boolean).join("/");
+      try {
+        await this.api(`/api/client/minecraft-servers/${this.selectedMinecraftServer.id}/files/item`, {
+          method: "PATCH",
+          body: { path, name: name.trim() },
+        });
+        await this.loadMinecraftFiles();
+        this.notify("File renamed", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteMinecraftFile(file) {
+      if (!window.confirm(`Delete ${file.name}${file.directory ? " and all its contents" : ""}?`)) return;
+      const path = [this.minecraftFilePath, file.name].filter(Boolean).join("/");
+      try {
+        await this.api(`/api/client/minecraft-servers/${this.selectedMinecraftServer.id}/files/item`, {
+          method: "DELETE",
+          body: { path },
+        });
+        this.minecraftEditingFile = null;
+        await this.loadMinecraftFiles();
+        this.notify("File deleted", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async uploadMinecraftFiles(event) {
+      const fileList = event?.dataTransfer?.files || event?.target?.files;
+      const files = Array.from(fileList || []);
+      if (!files.length || !this.selectedMinecraftServer) return;
+      this.minecraftFileBusy = true;
+      try {
+        const encodedFiles = await Promise.all(files.map(async (file) => {
+          if (file.size > 64 * 1024 * 1024) throw new Error(`${file.name} exceeds the 64 MB upload limit`);
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          let binary = "";
+          for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+          }
+          return { name: file.name, content_base64: btoa(binary) };
+        }));
+        const path = this.minecraftFilePath;
+        await this.api(`/api/client/minecraft-servers/${this.selectedMinecraftServer.id}/files/upload`, {
+          method: "POST",
+          body: { path, files: encodedFiles },
+        });
+        await this.loadMinecraftFiles();
+        this.notify(`${files.length} file${files.length === 1 ? "" : "s"} uploaded`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.minecraftFileBusy = false;
+        if (event?.target) event.target.value = "";
+      }
+    },
+    async downloadMinecraftFile(file) {
+      const path = [this.minecraftFilePath, file.name].filter(Boolean).join("/");
+      const params = new URLSearchParams({ path });
+      try {
+        const response = await fetch(`/api/client/minecraft-servers/${this.selectedMinecraftServer.id}/files/download?${params}`, {
+          headers: { Authorization: `Bearer ${this.token}` },
+        });
+        if (!response.ok) {
+          const payload = await response.json();
+          throw new Error(payload.error || "download_failed");
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = file.name;
+        link.click();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    formatFileSize(bytes) {
+      const value = Number(bytes || 0);
+      if (value < 1024) return `${value} B`;
+      if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+      return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+    },
+    async placeStoreOrder(plan) {
+      try {
+        const result = await this.api("/api/client/store/orders", {
+          method: "POST",
+          body: JSON.stringify({ store_plan_id: plan.id }),
+        });
+        this.store.orders.unshift(result.order);
+        this.notify(`Order #${result.order.id} submitted for manual review`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    formatCredits(cents, currency = "USD") {
+      return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(cents || 0) / 100);
+    },
+    selectStoreCategory(categoryId) {
+      this.selectedStoreCategory = String(categoryId);
+      this.storeCategoriesOpen = false;
+      this.goTo("billing");
+    },
+    toggleSidebarSection(label) {
+      this.collapsedSidebarSections[label] = !this.collapsedSidebarSections[label];
+      localStorage.setItem("mp_client_collapsed_sections", JSON.stringify(this.collapsedSidebarSections));
+    },
+    isSidebarSectionCollapsed(label) {
+      return Boolean(this.collapsedSidebarSections[label]);
+    },
+    async loadRestoreHistory() {
+      const payload = await this.api("/api/client/restores");
+      this.restoreHistory = payload.restores || [];
+    },
+    async startLogin() {
+      this.notify("", "success");
+      try {
+        const payload = await this.api("/api/client/auth/login", {
+          method: "POST",
+          body: JSON.stringify({ email: this.login.email, password: this.login.password }),
+        });
+        this.challengeToken = payload.challenge_token;
+        this.$nextTick(() => {
+          const el = document.getElementById("totp") || document.querySelector(".totp-input");
+          if (el) el.focus();
+        });
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async finishLogin() {
+      this.notify("", "success");
+      try {
+        const payload = await this.api("/api/client/auth/totp/verify", {
+          method: "POST",
+          body: JSON.stringify({ challenge_token: this.challengeToken, code: this.login.code }),
+        });
+        this.sessionExpired = false;
+        this.token = payload.access_token;
+        localStorage.setItem("mp_client_token", this.token);
+        this.challengeToken = "";
+        await this.load();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async load() {
+      const loadGeneration = (this.loadGeneration || 0) + 1;
+      this.loadGeneration = loadGeneration;
+      this.websitesLoaded = false;
+      this.databasesLoading = true;
+      try {
+        this.featureStatuses = (await this.api("/api/client/feature-status")).features || {};
+        await Promise.all([this.loadStore(), this.loadMinecraftServers(), this.loadApplicationServers()]);
+        const homePayload = await this.api("/api/client/home");
+        if (loadGeneration !== this.loadGeneration) return;
+        this.home = homePayload;
+        this.has2FA = this.home.has_2fa || false;
+        if (this.hasHostingAccount) {
+          const validAccount = this.home.accounts.find((a) => String(a.id) === String(this.selectedAccountId));
+          if (!validAccount) {
+            this.selectedAccountId = String(this.home.accounts[0].id);
+            localStorage.setItem("mp_selected_account_id", this.selectedAccountId);
+          }
+        }
+        if (this.home.hosting_account_suspended) {
+          this.websites = this.home.websites || [];
+          if (this.databaseWebsiteFilter && !this.websites.some((site) => String(site.id) === String(this.databaseWebsiteFilter))) {
+            this.databaseWebsiteFilter = "";
+          }
+          this.websitesLoaded = true;
+          this.databasesLoading = false;
+          if (this.activePage === "settings") await this.loadProfile();
+          return;
+        }
+        const websitesPayload = this.hasHostingAccount ? await this.api("/api/client/websites") : { websites: [] };
+        if (loadGeneration !== this.loadGeneration) return;
+        this.websites = websitesPayload.websites || [];
+        if (this.databaseWebsiteFilter && !this.websites.some((site) => String(site.id) === String(this.databaseWebsiteFilter))) {
+          this.databaseWebsiteFilter = "";
+        }
+        this.websitesLoaded = true;
+        if (this.hasHostingAccount) this.loadActiveWordPressDetection();
+        if (this.hasHostingAccount) {
+          const subdomainPayload = await this.api("/api/client/subdomains");
+          this.subdomains = subdomainPayload.subdomains || [];
+          this.subdomainDomains = subdomainPayload.domains || [];
+          this.subdomainUsage = { used: Number(subdomainPayload.usage || 0), limit: Number(subdomainPayload.limit || 0) };
+        }
+        const domainsPayload = await this.api("/api/client/domains");
+        this.domains = domainsPayload.domains || [];
+        this.registeredDomains = domainsPayload.registered_domains || [];
+        if (!this.hasHostingAccount) {
+          if (!['dashboard', 'domains', 'dns-zone-editor', 'billing'].includes(this.activePage) && !(this.activePage === 'minecraft' && this.hasMinecraftAccess)) this.activePage = 'domains';
+          this.databasesLoading = false;
+          return;
+        }
+        await this.loadDatabases(loadGeneration);
+        if (loadGeneration !== this.loadGeneration) return;
+        if (this.activePage === "hosting-plan" && !this.hostingPlanRangeInitialized) {
+          this.resourceRange = "7d";
+          this.hostingPlanRangeInitialized = true;
+        }
+        await this.loadResourceUsage();
+        await this.loadAnalytics();
+        await this.loadSshState();
+        await this.loadFtpState();
+        this.activity = (await this.api("/api/client/activity")).activity;
+        await this.loadSyncJobs();
+        if (this.activePage === "php-info") {
+          await this.loadPhpInfo();
+        }
+        if (this.activePage === "disk-usage") {
+          await this.loadDiskUsage();
+        }
+        this.mailboxes = (await this.api("/api/client/mailboxes")).mailboxes || [];
+        await this.loadMailRouting();
+        this.cronJobs = (await this.api("/api/client/cron-jobs")).cron_jobs || [];
+        await this.loadBackups();
+        await this.loadRestoreHistory();
+        this.gitDeployments = (await this.api("/api/client/git-deployments")).git_deployments || [];
+        this.ipRules = (await this.api("/api/client/ip-rules")).ip_rules || [];
+        this.protectedDirs = (await this.api("/api/client/protected-directories")).protected_dirs || [];
+        this.redirects = (await this.api("/api/client/redirects")).redirects || [];
+        this.apiTokens = (await this.api("/api/client/api-tokens")).api_tokens || [];
+        this.ftpAccounts = (await this.api("/api/client/ftp-accounts")).ftp_accounts || [];
+        const hotlinkPayload = await this.api("/api/client/hotlink-protection");
+        this.hotlink = { ...this.hotlink, ...(hotlinkPayload.hotlink || {}) };
+        if (this.activePage === "settings") await this.loadProfile();
+        await this.loadInstallerScripts();
+        await this.loadWordPressSites();
+        await this.fetchCollaborators();
+        if (this.activePage === "services") {
+          await this.loadServicesStatus();
+          await this.loadPhpWorkerSettings();
+        }
+        if (this.websites && this.websites.length > 0) {
+          if (!this.selectedWebsiteId || !this.websites.some((site) => String(site.id) === String(this.selectedWebsiteId))) {
+            this.selectedWebsiteId = String(this.websites[0].id);
+          }
+        } else {
+          this.selectedWebsiteId = "";
+        }
+        await this.loadCacheStatus(this.selectedWebsite?.id || null);
+        if (!this.hasHostingAccount && !["dashboard", "domains", "dns-zone-editor"].includes(this.activePage)) {
+          this.activePage = "domains";
+        }
+      } catch (error) {
+        if (loadGeneration === this.loadGeneration) this.databasesLoading = false;
+        this.notify(error.message, "error");
+      }
+    },
+    domainDaysRemaining(domain) {
+      const raw = domain && domain.expiry_at;
+      if (!raw) return null;
+      const value = String(raw).trim();
+      let expiryTimestamp;
+      const slashDate = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (slashDate) {
+        expiryTimestamp = Date.UTC(Number(slashDate[3]), Number(slashDate[1]) - 1, Number(slashDate[2]));
+      } else if (/^\d{9,13}(?:\.\d+)?$/.test(value)) {
+        const numeric = Number(value);
+        expiryTimestamp = numeric < 100000000000 ? numeric * 1000 : numeric;
+      } else {
+        const dateText = value.slice(0, 10);
+        const isoDate = new Date(`${dateText}T00:00:00Z`);
+        expiryTimestamp = isoDate.getTime();
+        if (Number.isNaN(expiryTimestamp)) expiryTimestamp = Date.parse(value);
+      }
+      if (Number.isNaN(expiryTimestamp) || expiryTimestamp == null) return null;
+      const today = new Date();
+      const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+      return Math.ceil((expiryTimestamp - todayUtc) / 86400000);
+    },
+    toggleRegisteredDomainSort(key) {
+      if (this.registeredDomainSort.key === key) {
+        this.registeredDomainSort.direction = this.registeredDomainSort.direction === "asc" ? "desc" : "asc";
+      } else {
+        this.registeredDomainSort = { key, direction: "asc" };
+      }
+    },
+    registeredDomainSortIndicator(key) {
+      if (this.registeredDomainSort.key !== key) return "↕";
+      return this.registeredDomainSort.direction === "asc" ? "↑" : "↓";
+    },
+    async renewRegisteredDomain(domain) {
+      const years = Number(window.prompt(`Renew ${domain.domain_name} for how many year(s)?`, "1"));
+      if (!Number.isInteger(years) || years < 1 || years > 10) return;
+      if (!window.confirm(`Renew ${domain.domain_name} for ${years} year(s)?`)) return;
+      try {
+        await this.api(`/api/client/registered-domains/${encodeURIComponent(domain.domain_name)}/renew`, { method: "POST", body: JSON.stringify({ years }) });
+        const payload = await this.api("/api/client/domains");
+        this.domains = payload.domains || [];
+        this.registeredDomains = payload.registered_domains || [];
+        this.notify(`${domain.domain_name} renewal submitted`, "success");
+      } catch (error) { this.notify(error.message, "error"); }
+    },
+    async showRegisteredWhois(domain) {
+      this.registeredWhoisModal = { ...this.registeredWhoisModal, open: true, loading: true, domain: domain.domain_name, activeTab: "registrant" };
+      try {
+        const payload = await this.api(`/api/client/registered-domains/${encodeURIComponent(domain.domain_name)}/whois`);
+        const source = payload.whois || {};
+        const section = (key) => { const raw = source[key] || source[key.toLowerCase()] || {}; const name = raw.name || [raw.FirstName, raw.LastName].filter(Boolean).join(" ") || raw.Name || ""; return { ...raw, name, organization: raw.organization || raw.Organization || "", email: raw.email || raw.EMail || raw.Email || "", phone: raw.phone || raw.Phone || "", address: raw.address || raw.AddressLine1 || raw.Address1 || "", city: raw.city || raw.City || "", state: raw.state || raw.State || raw.StateProvince || "", postal_code: raw.postal_code || raw.ZipCode || raw.Zip || "", country: raw.country || raw.Country || "" }; };
+        this.registeredWhoisModal = { open: true, loading: false, domain: payload.domain, activeTab: "registrant", form: { registrant: section("registrant"), administrative: section("administrative"), technical: section("technical"), billing: section("billing") }, currentNameservers: payload.nameservers || [], defaultNameservers: payload.default_nameservers || [], nameserverMode: "default", nameservers: [...(payload.nameservers || []), "", ""].slice(0, 2), saving: false };
+        if (!payload.refreshed && payload.refresh_error) this.notify(`Fresh WHOIS pull unavailable: ${payload.refresh_error}`, "error");
+      } catch (error) { this.registeredWhoisModal.loading = false; this.notify(error.message, "error"); }
+    },
+    async saveRegisteredWhois() {
+      const modal = this.registeredWhoisModal;
+      modal.saving = true;
+      try {
+        await this.api(`/api/client/registered-domains/${encodeURIComponent(modal.domain)}/whois-update`, { method: "POST", body: JSON.stringify({ whois: modal.form }) });
+        this.notify("WHOIS contact details saved", "success");
+      } catch (error) { this.notify(error.message, "error"); }
+      finally { modal.saving = false; }
+    },
+    async showRegisteredNameservers(domain) {
+      this.registeredWhoisModal = { ...this.registeredWhoisModal, open: true, loading: true, domain: domain.domain_name, activeTab: "nameservers" };
+      try {
+        const payload = await this.api(`/api/client/registered-domains/${encodeURIComponent(domain.domain_name)}/whois`);
+        this.registeredWhoisModal = { ...this.registeredWhoisModal, loading: false, domain: payload.domain, currentNameservers: payload.nameservers || [], defaultNameservers: payload.default_nameservers || [], nameservers: [...(payload.nameservers || []), "", ""].slice(0, 2), nameserverMode: "default" };
+      } catch (error) { this.registeredWhoisModal.loading = false; this.notify(error.message, "error"); }
+    },
+    async saveRegisteredNameservers() {
+      const modal = this.registeredWhoisModal;
+      const nameservers = modal.nameservers.filter((value) => String(value || "").trim());
+      if (modal.nameserverMode === "custom" && nameservers.length < 2) { this.notify("Enter at least two custom nameservers", "error"); return; }
+      modal.saving = true;
+      try {
+        const payload = await this.api(`/api/client/registered-domains/${encodeURIComponent(modal.domain)}/nameservers`, { method: "POST", body: JSON.stringify({ mode: modal.nameserverMode, nameservers }) });
+        modal.currentNameservers = payload.nameservers || nameservers;
+        modal.nameservers = [...modal.currentNameservers, "", ""].slice(0, 2);
+        this.notify("Nameservers updated", "success");
+      } catch (error) { this.notify(error.message, "error"); }
+      finally { modal.saving = false; }
+    },
+    async applyDatabasePayload(payload, loadGeneration = null) {
+      if (loadGeneration !== null && loadGeneration !== this.loadGeneration) return;
+      this.databases = payload.databases || [];
+      this.databaseUsers = payload.database_users || [];
+      this.databaseGrants = payload.database_grants || [];
+      try {
+        const pgPayload = await this.api("/api/client/pg-databases");
+        if (loadGeneration !== null && loadGeneration !== this.loadGeneration) return;
+        this.pgDatabases = pgPayload.pg_databases || [];
+        this.pgUsers = pgPayload.pg_users || [];
+        this.pgGrants = pgPayload.pg_grants || [];
+      } catch (e) {}
+    },
+    async fetchCollaborators() {
+      if (!this.token) return;
+      try {
+        const res = await this.api("/api/client/collaborators");
+        if (res) {
+          this.collaborators = res.collaborators || [];
+          this.sharedAccounts = res.shared_accounts || [];
+        }
+      } catch (err) {}
+    },
+    openShareModal() {
+      this.editingCollabId = null;
+      this.emailCheckStatus = null;
+      this.existingUserData = null;
+      this.shareForm = {
+        id: null,
+        email: "",
+        name: "",
+        newPassword: "",
+        enableTotp: false,
+        all_websites: true,
+        website_ids: [],
+        all_subdomains: false,
+        subdomain_ids: [],
+        all_databases: true,
+        database_ids: [],
+        allowed_menus: ["websites", "files", "databases", "ftp", "mail", "dns", "cron", "ssl", "analytics"],
+        can_create_websites: false,
+        can_create_subdomains: false,
+        can_edit_subdomains: true,
+        can_delete_subdomains: false,
+        can_edit_websites: true,
+        can_delete_websites: false,
+        can_create_databases: false,
+        can_edit_databases: true,
+        can_delete_databases: false,
+        can_create_ftp: false,
+        can_create_mail: false,
+        can_edit_files: true,
+      };
+      this.shareModalOpen = true;
+    },
+    closeShareModal() {
+      this.shareModalOpen = false;
+      this.editingCollabId = null;
+      this.emailCheckStatus = null;
+    },
+    async checkShareEmail() {
+      const email = this.shareForm.email.trim();
+      if (!email || !email.includes("@")) return;
+      this.checkingEmail = true;
+      this.emailCheckStatus = null;
+      try {
+        const res = await this.api("/api/client/collaborators/check-email", {
+          method: "POST",
+          body: JSON.stringify({ email }),
+        });
+        this.checkingEmail = false;
+        if (res && res.exists) {
+          this.emailCheckStatus = "found";
+          this.existingUserData = res.user;
+          if (!this.shareForm.name && res.user.full_name) {
+            this.shareForm.name = res.user.full_name;
+          }
+        } else {
+          this.emailCheckStatus = "not_found";
+          this.existingUserData = null;
+        }
+      } catch (e) {
+        this.checkingEmail = false;
+      }
+    },
+    async saveSharePermissions() {
+      const email = this.shareForm.email.trim();
+      const name = this.shareForm.name.trim();
+      if (!email) {
+        this.notify("Please enter a collaborator email address.", "error");
+        return;
+      }
+      this.savingCollab = true;
+
+      const doSaveCollaborator = async () => {
+        const payload = {
+          id: this.shareForm.id,
+          invited_email: email,
+          invited_name: name,
+          permissions: {
+            all_websites: this.shareForm.all_websites,
+            website_ids: this.shareForm.website_ids,
+            all_subdomains: this.shareForm.all_subdomains,
+            subdomain_ids: this.shareForm.subdomain_ids,
+            all_databases: this.shareForm.all_databases,
+            database_ids: this.shareForm.database_ids,
+            allowed_menus: this.shareForm.allowed_menus,
+            can_create_websites: this.shareForm.can_create_websites,
+            can_create_subdomains: this.shareForm.can_create_subdomains,
+            can_edit_subdomains: this.shareForm.can_edit_subdomains,
+            can_delete_subdomains: this.shareForm.can_delete_subdomains,
+            can_edit_websites: this.shareForm.can_edit_websites,
+            can_delete_websites: this.shareForm.can_delete_websites,
+            can_create_databases: this.shareForm.can_create_databases,
+            can_edit_databases: this.shareForm.can_edit_databases,
+            can_delete_databases: this.shareForm.can_delete_databases,
+            can_create_ftp: this.shareForm.can_create_ftp,
+            can_create_mail: this.shareForm.can_create_mail,
+            can_edit_files: this.shareForm.can_edit_files,
+          },
+        };
+        try {
+          await this.api("/api/client/collaborators", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          this.savingCollab = false;
+          this.notify("Collaborator access permissions saved successfully.", "success");
+          this.closeShareModal();
+          await this.fetchCollaborators();
+        } catch (err) {
+          this.savingCollab = false;
+          this.notify(err.message || "Failed to save collaborator permissions", "error");
+        }
+      };
+
+      if (this.emailCheckStatus === "not_found" && !this.editingCollabId) {
+        if (!this.shareForm.newPassword || this.shareForm.newPassword.length < 6) {
+          this.notify("Please set a password of at least 6 characters for the new user.", "error");
+          this.savingCollab = false;
+          return;
+        }
+        try {
+          await this.api("/api/client/collaborators/create-user", {
+            method: "POST",
+            body: JSON.stringify({
+              email,
+              full_name: name || "Collaborator",
+              password: this.shareForm.newPassword,
+              enable_totp: this.shareForm.enableTotp,
+            }),
+          });
+          await doSaveCollaborator();
+        } catch (err) {
+          this.savingCollab = false;
+          this.notify(err.message || "Failed to create user account", "error");
+        }
+      } else {
+        await doSaveCollaborator();
+      }
+    },
+    editCollaborator(c) {
+      this.editingCollabId = c.id;
+      this.emailCheckStatus = "found";
+      this.existingUserData = { email: c.invited_email, full_name: c.invited_name };
+      const perms = c.permissions || {};
+      this.shareForm = {
+        id: c.id,
+        email: c.invited_email,
+        name: c.invited_name || "",
+        newPassword: "",
+        enableTotp: false,
+        all_websites: perms.all_websites !== false,
+        website_ids: perms.website_ids || [],
+        all_subdomains: perms.all_subdomains === true,
+        subdomain_ids: perms.subdomain_ids || [],
+        all_databases: perms.all_databases !== false,
+        database_ids: perms.database_ids || [],
+        allowed_menus: perms.allowed_menus || ["websites", "files", "databases", "ftp", "mail", "dns", "cron", "ssl", "analytics"],
+        can_create_websites: !!perms.can_create_websites,
+        can_create_subdomains: !!perms.can_create_subdomains,
+        can_edit_subdomains: perms.can_edit_subdomains !== false,
+        can_delete_subdomains: !!perms.can_delete_subdomains,
+        can_edit_websites: perms.can_edit_websites !== false,
+        can_delete_websites: !!perms.can_delete_websites,
+        can_create_databases: !!perms.can_create_databases,
+        can_edit_databases: perms.can_edit_databases !== false,
+        can_delete_databases: !!perms.can_delete_databases,
+        can_create_ftp: !!perms.can_create_ftp,
+        can_create_mail: !!perms.can_create_mail,
+        can_edit_files: perms.can_edit_files !== false,
+      };
+      this.shareModalOpen = true;
+    },
+    async revokeCollaborator(id) {
+      if (!confirm("Are you sure you want to revoke access for this collaborator?")) return;
+      try {
+        await this.api(`/api/client/collaborators/${id}`, { method: "DELETE" });
+        this.notify("Collaborator access revoked.", "success");
+        await this.fetchCollaborators();
+      } catch (err) {
+        this.notify(err.message || "Failed to revoke access", "error");
+      }
+    },
+    async switchAccount(accId) {
+      try {
+        await this.api("/api/client/collaborators/switch-account", {
+          method: "POST",
+          body: JSON.stringify({ account_id: accId }),
+        });
+        this.selectedAccountId = String(accId);
+        localStorage.setItem("mp_selected_account_id", this.selectedAccountId);
+        this.loadGeneration = (this.loadGeneration || 0) + 1;
+        this.notify("Switched active account context.", "success");
+        await this.loadHome();
+        await this.fetchCollaborators();
+      } catch (err) {
+        this.notify(err.message || "Failed to switch account", "error");
+      }
+    },
+    async leaveSharedAccount(collabId) {
+      if (!confirm("Are you sure you want to remove yourself from this shared account? You will lose access immediately.")) return;
+      try {
+        await this.api(`/api/client/collaborators/${collabId}`, { method: "DELETE" });
+        this.notify("You have removed yourself from the shared account.", "success");
+        await this.fetchCollaborators();
+      } catch (err) {
+        this.notify(err.message || "Failed to remove access", "error");
+      }
+    },
+    async loadDatabases(loadGeneration = null) {
+      const requestSequence = (this.databaseLoadSequence || 0) + 1;
+      this.databaseLoadSequence = requestSequence;
+      this.databasesLoading = true;
+      try {
+        const payload = await this.api("/api/client/databases");
+        await this.applyDatabasePayload(payload, loadGeneration);
+      } finally {
+        if (requestSequence === this.databaseLoadSequence) this.databasesLoading = false;
+      }
+    },
+    async loadHome() {
+      await this.load();
+    },
+    async loadSyncJobs() {
+      if (!this.token) return;
+      try {
+        this.syncJobs = (await this.api("/api/client/sync-jobs")).jobs || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async loadServicesStatus() {
+      try {
+        const payload = await this.api("/api/client/services/status");
+        const services = payload.services || [];
+        this.serviceStatusMap = services.reduce((acc, service) => {
+          acc[service.service] = service;
+          return acc;
+        }, {});
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async loadPhpWorkerSettings() {
+      try {
+        const payload = await this.api("/api/client/services/php-workers");
+        this.phpWorkers = { ...this.phpWorkers, ...payload, websites: payload.websites || [] };
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async savePhpWorkerSettings() {
+      this.phpWorkers.loading = true;
+      try {
+        const payload = {
+          mode: this.phpWorkers.mode,
+          max_workers: Number(this.phpWorkers.max_workers || this.phpWorkers.plan_default_workers || 1),
+          website_workers: this.phpWorkers.mode === "per_site" ? this.phpWorkers.websites.map((site) => ({ website_id: site.id, workers: Number(site.workers || 1) })) : [],
+        };
+        const result = await this.api("/api/client/services/php-workers", { method: "POST", body: JSON.stringify(payload) });
+        appToast(result.status === "queued" ? "PHP worker settings saved and applying now." : "PHP worker settings saved.", "success");
+      } catch (error) {
+        appToast(error.message, "error");
+      } finally {
+        this.phpWorkers.loading = false;
+      }
+    },
+    async loadInstallerScripts() {
+      try {
+        const payload = await this.api("/api/client/installer/scripts");
+        this.installer.scripts = payload.scripts?.length ? payload.scripts : DEFAULT_INSTALLER_SCRIPTS;
+      } catch (err) {
+        console.error("Failed to load scripts:", err);
+        this.installer.scripts = DEFAULT_INSTALLER_SCRIPTS;
+      }
+    },
+    async loadWordPressSites() {
+      if (!this.hasHostingAccount) {
+        this.wordpressSites = [];
+        this.wordpressSitesLoaded = true;
+        this.wordpressManagerLoading = false;
+        return;
+      }
+      this.wordpressManagerLoading = true;
+      try {
+        const payload = await this.api("/api/client/wordpress/installs");
+        this.wordpressSites = payload.sites || [];
+        await this.loadActiveWordPressDetection();
+      } catch (error) {
+        console.error("Failed to load WordPress sites:", error);
+      } finally {
+        this.wordpressManagerLoading = false;
+        this.wordpressSitesLoaded = true;
+      }
+    },
+    async loadActiveWordPressDetection() {
+      try {
+        const activeDetection = await this.api("/api/client/wordpress/detect/active");
+        if (activeDetection.active) {
+          this.wordpressDetectionRun = { ...activeDetection.run, tasks: activeDetection.tasks || [] };
+          if (!this.wordpressDetectionPoller) this.startWordPressDetectionPolling(activeDetection.run.id);
+        }
+      } catch (error) {
+        console.error("Failed to load active WordPress detection:", error);
+      }
+    },
+    openWordPressInstaller() {
+      this.openSiteWizard();
+      this.siteWizard.type = "wordpress";
+    },
+    async detectWordPress() {
+      if (this.wordpressDetecting) return;
+      this.wordpressDetecting = true;
+      try {
+        const payload = await this.api("/api/client/wordpress/detect", { method: "POST", body: JSON.stringify({}) });
+        this.wordpressDetectionRun = {
+          id: payload.run_id,
+          status: payload.status || "queued",
+          total_sites: payload.total_sites || 0,
+          completed_sites: payload.completed_sites || 0,
+          current_domain: null,
+          tasks: [],
+        };
+        this.notify(`WordPress detection queued for ${payload.total_sites || 0} site${payload.total_sites === 1 ? "" : "s"}.`, "info");
+        this.startWordPressDetectionPolling(payload.run_id);
+        await this.loadWordPressSites();
+      } catch (error) {
+        this.notify(error.message, "error");
+        this.wordpressDetecting = false;
+      } finally {
+        // The batch remains active until the status endpoint reports completion.
+      }
+    },
+    startWordPressDetectionPolling(runId) {
+      this.stopWordPressDetectionPolling();
+      this.wordpressDetecting = true;
+      this.pollWordPressDetection(runId);
+      this.wordpressDetectionPoller = window.setInterval(() => this.pollWordPressDetection(runId), 1000);
+    },
+    async pollWordPressDetection(runId) {
+      if (this.wordpressDetectionPolling) return;
+      this.wordpressDetectionPolling = true;
+      try {
+        const payload = await this.api(`/api/client/wordpress/detect/status/${runId}`);
+        this.wordpressDetectionRun = { ...payload.run, tasks: payload.tasks || [] };
+        await this.loadWordPressSites();
+        if (["completed", "completed_with_errors", "failed"].includes(payload.run.status)) {
+          this.stopWordPressDetectionPolling();
+          this.notify(payload.run.status === "completed" ? "WordPress detection completed." : "WordPress detection completed with errors.", payload.run.status === "completed" ? "success" : "error");
+        }
+      } catch (error) {
+        console.error("Failed to poll WordPress detection:", error);
+      } finally {
+        this.wordpressDetectionPolling = false;
+      }
+    },
+    stopWordPressDetectionPolling() {
+      if (this.wordpressDetectionPoller) window.clearInterval(this.wordpressDetectionPoller);
+      this.wordpressDetectionPoller = null;
+      this.wordpressDetectionPolling = false;
+      this.wordpressDetecting = false;
+    },
+    async loginToWordPress(site) {
+      try {
+        const payload = await this.api(`/api/client/wordpress/${site.website_id}/launch`);
+        if (payload.launch_url) window.open(payload.launch_url, "_blank", "noopener,noreferrer");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async toggleWordPressCron(site) {
+      const enabled = Boolean(site.Zeropanel_cron_enabled);
+      try {
+        site.wordpress_task_job_id = null;
+        const payload = await this.api(`/api/client/wordpress/${site.website_id}/cron`, {
+          method: "POST",
+          body: JSON.stringify({ enabled }),
+        });
+        site.Zeropanel_cron_enabled = enabled ? 1 : 0;
+        site.wordpress_task_job_id = payload.job_id;
+        this.notify(enabled ? "ZeroPanel WordPress cron enabled (every 5 minutes)." : "ZeroPanel WordPress cron disabled.", "success");
+      } catch (error) {
+        site.Zeropanel_cron_enabled = enabled ? 0 : 1;
+        this.notify(error.message, "error");
+      }
+    },
+    async loadMailRouting() {
+      try {
+        const payload = await this.api("/api/client/mail-routing");
+        this.mailRouting = {
+          mail_domains: payload.mail_domains || [],
+          mail_aliases: payload.mail_aliases || [],
+          mail_forwarders: payload.mail_forwarders || [],
+          mail_autoresponders: payload.mail_autoresponders || [],
+          mail_edge_routes: payload.mail_edge_routes || [],
+          mail_delivery_logs: payload.mail_delivery_logs || [],
+        };
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    normalizeMailAddress(value) {
+      return String(value || "").trim().toLowerCase();
+    },
+    mailAuthPillClass(status) {
+      const value = String(status || "").toLowerCase();
+      if (value === "ok") return "ok";
+      if (value === "warning") return "warning";
+      if (value === "missing") return "danger";
+      return "active";
+    },
+    mailRuleStatusClass(status) {
+      const value = String(status || "").toLowerCase();
+      return value === "active" ? "active" : "danger";
+    },
+    mailEdgeRouteForDomain(domain) {
+      return (this.mailRouting.mail_edge_routes || []).find((route) => (
+        String(route.mail_domain_id) === String(domain.mail_domain_id)
+        || String(route.domain_id) === String(domain.domain_id)
+        || String(route.domain) === String(domain.name)
+      )) || null;
+    },
+    openMailDomainEditor(domain) {
+      this.mailDomainEditor = {
+        isOpen: true,
+        isSaving: false,
+        mailDomainId: domain.mail_domain_id,
+        dkim_selector: domain.dkim_selector || "mango",
+        spf_policy: domain.spf_policy || "",
+        dmarc_policy: domain.dmarc_policy || "",
+        catch_all_enabled: Boolean(domain.catch_all_enabled),
+        catch_all_destination: domain.catch_all_destination || "",
+        status: domain.mail_status || "active",
+        regenerate_dkim: false,
+      };
+    },
+    closeMailDomainEditor() {
+      if (this.mailDomainEditor.isSaving) return;
+      this.mailDomainEditor.isOpen = false;
+    },
+    async saveMailDomainEditor() {
+      if (this.mailDomainEditor.isSaving) return;
+      try {
+        this.mailDomainEditor.isSaving = true;
+        await this.api(`/api/client/mail-domains/${this.mailDomainEditor.mailDomainId}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            dkim_selector: this.mailDomainEditor.dkim_selector,
+            spf_policy: this.mailDomainEditor.spf_policy,
+            dmarc_policy: this.mailDomainEditor.dmarc_policy,
+            catch_all_enabled: this.mailDomainEditor.catch_all_enabled,
+            catch_all_destination: this.mailDomainEditor.catch_all_destination,
+            status: this.mailDomainEditor.status,
+            regenerate_dkim: this.mailDomainEditor.regenerate_dkim,
+          }),
+        });
+        this.mailDomainEditor.isSaving = false;
+        this.mailDomainEditor.isOpen = false;
+        await this.loadMailRouting();
+        this.notify("Mail domain updated", "success");
+      } catch (error) {
+        this.mailDomainEditor.isSaving = false;
+        this.notify(error.message, "error");
+      }
+    },
+    async rotateMailDomainDkim(domain) {
+      try {
+        await this.api(`/api/client/mail-domains/${domain.mail_domain_id}/dkim/rotate`, { method: "POST" });
+        await this.loadMailRouting();
+        this.notify(`DKIM rotated for ${domain.name}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    openMailAliasEditor(alias = null) {
+      this.mailAliasEditor = {
+        isOpen: true,
+        isSaving: false,
+        aliasId: alias?.id || null,
+        source_email: alias?.source_email || "",
+        destination_email: alias?.destination_email || "",
+        status: alias?.status || "active",
+      };
+    },
+    closeMailAliasEditor() {
+      if (this.mailAliasEditor.isSaving) return;
+      this.mailAliasEditor.isOpen = false;
+    },
+    async saveMailAliasEditor() {
+      if (this.mailAliasEditor.isSaving) return;
+      const payload = {
+        source_email: this.normalizeMailAddress(this.mailAliasEditor.source_email),
+        destination_email: this.normalizeMailAddress(this.mailAliasEditor.destination_email),
+        status: this.mailAliasEditor.status,
+      };
+      try {
+        this.mailAliasEditor.isSaving = true;
+        if (this.mailAliasEditor.aliasId) {
+          await this.api(`/api/client/mail-aliases/${this.mailAliasEditor.aliasId}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+        } else {
+          await this.api("/api/client/mail-aliases", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+        }
+        this.mailAliasEditor.isSaving = false;
+        this.mailAliasEditor.isOpen = false;
+        await this.loadMailRouting();
+        this.notify("Mail alias saved", "success");
+      } catch (error) {
+        this.mailAliasEditor.isSaving = false;
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteMailAlias(alias) {
+      if (!window.confirm(`Delete mail alias ${alias.source_email}?`)) return;
+      try {
+        await this.api(`/api/client/mail-aliases/${alias.id}`, { method: "DELETE" });
+        await this.loadMailRouting();
+        this.notify("Mail alias deleted", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    openMailForwarderEditor(forwarder = null) {
+      this.mailForwarderEditor = {
+        isOpen: true,
+        isSaving: false,
+        forwarderId: forwarder?.id || null,
+        source_email: forwarder?.source_email || "",
+        destination_email: forwarder?.destination_email || "",
+        status: forwarder?.status || "active",
+      };
+    },
+    closeMailForwarderEditor() {
+      if (this.mailForwarderEditor.isSaving) return;
+      this.mailForwarderEditor.isOpen = false;
+    },
+    async saveMailForwarderEditor() {
+      if (this.mailForwarderEditor.isSaving) return;
+      const payload = {
+        source_email: this.normalizeMailAddress(this.mailForwarderEditor.source_email),
+        destination_email: this.normalizeMailAddress(this.mailForwarderEditor.destination_email),
+        status: this.mailForwarderEditor.status,
+      };
+      try {
+        this.mailForwarderEditor.isSaving = true;
+        if (this.mailForwarderEditor.forwarderId) {
+          await this.api(`/api/client/mail-forwarders/${this.mailForwarderEditor.forwarderId}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+        } else {
+          await this.api("/api/client/mail-forwarders", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+        }
+        this.mailForwarderEditor.isSaving = false;
+        this.mailForwarderEditor.isOpen = false;
+        await this.loadMailRouting();
+        this.notify("Mail forwarder saved", "success");
+      } catch (error) {
+        this.mailForwarderEditor.isSaving = false;
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteMailForwarder(forwarder) {
+      if (!window.confirm(`Delete mail forwarder ${forwarder.source_email}?`)) return;
+      try {
+        await this.api(`/api/client/mail-forwarders/${forwarder.id}`, { method: "DELETE" });
+        await this.loadMailRouting();
+        this.notify("Mail forwarder deleted", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    openMailAutoresponderEditor(autoresponder = null) {
+      this.mailAutoresponderEditor = {
+        isOpen: true,
+        isSaving: false,
+        autoresponderId: autoresponder?.id || null,
+        mailbox_id: autoresponder?.mailbox_id || "",
+        subject: autoresponder?.subject || "Auto-reply",
+        body: autoresponder?.body || "",
+        enabled: autoresponder ? Boolean(autoresponder.enabled) : true,
+      };
+    },
+    closeMailAutoresponderEditor() {
+      if (this.mailAutoresponderEditor.isSaving) return;
+      this.mailAutoresponderEditor.isOpen = false;
+    },
+    async saveMailAutoresponderEditor() {
+      if (this.mailAutoresponderEditor.isSaving) return;
+      const payload = {
+        mailbox_id: Number(this.mailAutoresponderEditor.mailbox_id),
+        subject: String(this.mailAutoresponderEditor.subject || "").trim() || "Auto-reply",
+        body: String(this.mailAutoresponderEditor.body || "").trim(),
+        enabled: Boolean(this.mailAutoresponderEditor.enabled),
+      };
+      try {
+        this.mailAutoresponderEditor.isSaving = true;
+        if (this.mailAutoresponderEditor.autoresponderId) {
+          await this.api(`/api/client/mail-autoresponders/${this.mailAutoresponderEditor.autoresponderId}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+        } else {
+          await this.api("/api/client/mail-autoresponders", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+        }
+        this.mailAutoresponderEditor.isSaving = false;
+        this.mailAutoresponderEditor.isOpen = false;
+        await this.loadMailRouting();
+        this.notify("Autoresponder saved", "success");
+      } catch (error) {
+        this.mailAutoresponderEditor.isSaving = false;
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteMailAutoresponder(autoresponder) {
+      if (!window.confirm(`Delete autoresponder for ${autoresponder.mailbox_email}?`)) return;
+      try {
+        await this.api(`/api/client/mail-autoresponders/${autoresponder.id}`, { method: "DELETE" });
+        await this.loadMailRouting();
+        this.notify("Autoresponder deleted", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    async loadSiteBuilderTemplates() {
+      try {
+        const res = await this.api("/api/client/site-builder/templates");
+        this.siteBuilderTemplates = res.templates || [];
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async installSiteBuilder(templateId) {
+      if (!this.siteBuilderDomain) {
+        this.notify("Please select a domain first.", "error");
+        return;
+      }
+      try {
+        const payload = await this.api("/api/client/site-builder/install", { method: "POST", body: { domain: this.siteBuilderDomain, template_id: templateId } });
+        this.notify(`Site Builder synced in development mode (job #${payload.job_id})`, "success");
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async optimizeImages() {
+      if (!this.imagesPath) {
+        this.notify("Please enter a path to optimize.", "error");
+        return;
+      }
+      try {
+        const payload = await this.api("/api/client/images/optimize", { method: "POST", body: { path: this.imagesPath } });
+        this.notify(`Image optimization synced in development mode (job #${payload.job_id})`, "success");
+        this.imagesPath = "";
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async toggleModSecurity(site) {
+      try {
+        const newVal = site.modsec_enabled ? 0 : 1;
+        await this.api(`/api/client/websites/${site.id}/modsec`, { method: "POST", body: { enabled: !!newVal } });
+        site.modsec_enabled = newVal;
+        this.notify(`ModSecurity ${newVal ? 'enabled' : 'disabled'} for ${site.domain}`, "success");
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async loadRemoteMysqlHosts() {
+      try {
+        const res = await this.api("/api/client/remote-mysql");
+        this.remoteMysqlHosts = res.remote_mysql_hosts || [];
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async addRemoteMysqlHost() {
+      if (!this.newRemoteHost) return;
+      try {
+        await this.api("/api/client/remote-mysql", { method: "POST", body: { host_ip: this.newRemoteHost } });
+        this.notify("Remote MySQL host added.", "success");
+        this.newRemoteHost = "";
+        this.loadRemoteMysqlHosts();
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async deleteRemoteMysqlHost(id) {
+      try {
+        await this.api(`/api/client/remote-mysql/${id}`, { method: "DELETE" });
+        this.notify("Remote MySQL host removed.", "success");
+        this.loadRemoteMysqlHosts();
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async downloadRawLogs(domain) {
+      try {
+        const res = await this.api(`/api/client/logs/raw?domain=${domain}`);
+        if (res.download_url) {
+          window.open(res.download_url, "_blank", "noopener,noreferrer");
+        }
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+
+    async loadResourceUsage() {
+      if (!this.token) return;
+      this.resourceUsageLoading = true;
+      try {
+        this.resourceUsage = await this.api(`/api/client/resource-usage?range=${encodeURIComponent(this.resourceRange)}`);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.resourceUsageLoading = false;
+      }
+    },
+    async refreshResourceUsage() {
+      await this.loadResourceUsage();
+    },
+    async loadPhpInfo() {
+      if (!this.token) return;
+      try {
+        const siteId = this.selectedWebsite?.id || "";
+        this.phpInfo = await this.api(`/api/client/php-info?website_id=${encodeURIComponent(siteId)}`);
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async changeResourceRange(range) {
+      this.resourceRange = range;
+      await this.loadResourceUsage();
+    },
+    async loadAnalytics() {
+      if (!this.token) return;
+      this.isAnalyticsLoading = true;
+      try {
+        const siteId = this.selectedWebsite?.id || "";
+        this.analytics = await this.api(`/api/client/analytics?website_id=${encodeURIComponent(siteId)}&filter=${encodeURIComponent(this.analytics.filter)}`);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.isAnalyticsLoading = false;
+      }
+    },
+    async toggleAnalyticsTracking(site) {
+      if (!site || site.savingAnalytics) return;
+      site.savingAnalytics = true;
+      const nextValue = Number(site.analytics_enabled) ? 0 : 1;
+      const previousValue = Number(site.analytics_enabled) ? 1 : 0;
+      site.analytics_enabled = nextValue;
+      if (this.selectedWebsite && String(this.selectedWebsite.id) === String(site.id)) {
+        this.analytics.analytics_enabled = !!nextValue;
+      }
+      try {
+        const payload = await this.api(`/api/client/websites/${site.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ analytics_enabled: nextValue }),
+        });
+        const idx = this.websites.findIndex((item) => String(item.id) === String(site.id));
+        if (idx !== -1) {
+          Object.assign(this.websites[idx], payload.website, { savingAnalytics: false });
+        }
+        site.savingAnalytics = false;
+        this.analytics.analytics_enabled = !!payload.website.analytics_enabled;
+        if (this.activePage === "analytics") {
+          await this.loadAnalytics();
+        }
+        this.notify(`Analytics tracking ${payload.website.analytics_enabled ? "enabled" : "paused"} for ${site.domain}`, "success");
+      } catch (error) {
+        site.analytics_enabled = previousValue;
+        const idx = this.websites.findIndex((item) => String(item.id) === String(site.id));
+        if (idx !== -1) {
+          this.websites[idx].analytics_enabled = previousValue;
+          this.websites[idx].savingAnalytics = false;
+        }
+        if (this.selectedWebsite && String(this.selectedWebsite.id) === String(site.id)) {
+          this.analytics.analytics_enabled = !!previousValue;
+        }
+        this.notify(error.message || String(error), "error");
+      } finally {
+        site.savingAnalytics = false;
+        const target = this.websites.find((item) => String(item.id) === String(site.id));
+        if (target) target.savingAnalytics = false;
+      }
+    },
+    async changeAnalyticsFilter(filter) {
+      this.analytics.filter = filter;
+      await this.loadAnalytics();
+    },
+    async loadDnsRecords() {
+      if (!this.token) return;
+      try {
+        const qs = this.selectedDomainId ? `?domain_id=${encodeURIComponent(this.selectedDomainId)}` : "";
+        const payload = await this.api(`/api/client/dns-records${qs}`);
+        this.dnsRecords = payload.dns_records || [];
+        this.dnsZones = payload.dns_zones || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async loadDnsProviderOptions() {
+      try {
+        const payload = await this.api("/api/client/dns/provider-options");
+        this.dnsProviderOptions = payload.dns_provider_options || this.dnsProviderOptions;
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async openDnsProviderModal(domain) {
+      if (!domain) return;
+      if (!this.dnsProviderOptions.providers.length) await this.loadDnsProviderOptions();
+      this.dnsProviderModal = {
+        open: true,
+        domain,
+        provider_key: domain.dns_provider || this.dnsProviderOptions.default_provider || "local_powerdns",
+        provider_account_id: domain.dns_provider_account_id || this.dnsProviderOptions.default_provider_account_id || "",
+      };
+      if (!this.dnsProviderModal.provider_key || !this.dnsProviderOptions.providers.some((provider) => provider.key === this.dnsProviderModal.provider_key)) {
+        this.dnsProviderModal.provider_key = this.dnsProviderOptions.default_provider || (this.dnsProviderOptions.providers[0] || {}).key || "";
+        this.onDnsProviderModalProviderChange();
+      }
+    },
+    closeDnsProviderModal() {
+      this.dnsProviderModal = { open: false, domain: null, provider_key: "", provider_account_id: "" };
+    },
+    dnsProviderAccountsForModal() {
+      return this.dnsProviderOptions.accounts || [];
+    },
+    onDnsProviderModalProviderChange() {
+      if (this.dnsProviderModal.provider_key !== "cloudflare") this.dnsProviderModal.provider_account_id = "";
+      else if (!this.dnsProviderModal.provider_account_id) this.dnsProviderModal.provider_account_id = this.dnsProviderOptions.default_provider_account_id || (this.dnsProviderAccountsForModal()[0] || {}).id || "";
+    },
+    async submitDnsProviderModal() {
+      const modal = this.dnsProviderModal;
+      if (!modal.domain || !modal.provider_key) return;
+      if (modal.provider_key === "cloudflare" && !modal.provider_account_id) {
+        this.notify("Select a Cloudflare account for this domain.", "error");
+        return;
+      }
+      try {
+        const payload = await this.api(`/api/client/domains/${modal.domain.id}/dns/migrate-provider`, {
+          method: "POST",
+          body: JSON.stringify({ dns_provider: modal.provider_key, dns_provider_account_id: modal.provider_key === "cloudflare" ? Number(modal.provider_account_id) : null }),
+        });
+        this.notify(`${modal.domain.name} DNS provider migration queued (job #${payload.job_id})`, "success");
+        this.closeDnsProviderModal();
+        const domainsRes = await this.api("/api/client/domains");
+        if (domainsRes && domainsRes.domains) this.domains = domainsRes.domains;
+        if (this.selectedDomainId) await this.loadDnsRecords();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async createDnsRecord() {
+      if (!this.newDnsRecord.domain_id || !this.newDnsRecord.value) {
+        this.notify("Please select a domain and enter a value.", "error");
+        return;
+      }
+      try {
+        const payload = await this.api("/api/client/dns-records", {
+          method: "POST",
+          body: JSON.stringify(this.newDnsRecord),
+        });
+        this.dnsRecords = payload.dns_records || this.dnsRecords;
+        this.dnsZones = payload.dns_zones || this.dnsZones;
+        this.notify(`DNS record synced in development mode (job #${payload.job_id})`, "success");
+        this.newDnsRecord = { domain_id: this.newDnsRecord.domain_id, type: "A", name: "@", value: "", ttl: 300, priority: null, proxied: true };
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    dnsRecordTypeMetaFor(type) {
+      const metadata = {
+        A: { label: "IPv4 address", description: "Point a hostname to an IPv4 address.", valueLabel: "IPv4 address", placeholder: "203.0.113.10", valueHelp: "Example: 203.0.113.10" },
+        AAAA: { label: "IPv6 address", description: "Point a hostname to an IPv6 address.", valueLabel: "IPv6 address", placeholder: "2001:db8::10", valueHelp: "Example: 2001:db8::10" },
+        CNAME: { label: "Canonical name", description: "Alias one hostname to another hostname.", valueLabel: "Target hostname", placeholder: "target.example.com", valueHelp: "Use a hostname, not an IP address." },
+        MX: { label: "Mail server", description: "Choose where email for this domain is delivered.", valueLabel: "Mail server", placeholder: "mail.example.com", valueHelp: "Priority is required for mail delivery." },
+        TXT: { label: "Text", description: "Store verification, SPF, DKIM, or other text data.", valueLabel: "Text value", placeholder: "v=spf1 include:example.com ~all", valueHelp: "Keep the complete value on one line." },
+        NS: { label: "Nameserver", description: "Delegate a hostname to an authoritative nameserver.", valueLabel: "Nameserver hostname", placeholder: "ns1.example.com", valueHelp: "Use a fully qualified hostname." },
+        SRV: { label: "Service", description: "Publish the location of a network service.", valueLabel: "Service target", placeholder: "10 5 443 service.example.com", valueHelp: "Enter weight, port, and target separated by spaces." },
+        CAA: { label: "Certificate authority", description: "Control which certificate authorities may issue certificates.", valueLabel: "CAA value", placeholder: "0 issue letsencrypt.org", valueHelp: "Enter flags, tag, and value separated by spaces." },
+      };
+      return metadata[type] || metadata.A;
+    },
+    handleDnsTypeChange() {
+      if (!["MX", "SRV"].includes(this.newDnsRecord.type)) this.newDnsRecord.priority = null;
+      if (!this.canProxyNewDnsRecord) this.newDnsRecord.proxied = false;
+    },
+    async toggleDnsProxy(record) {
+      if (!this.isCloudflareDns || !["A", "AAAA", "CNAME"].includes(record.type) || this.dnsProxySaving[record.id]) return;
+      this.dnsProxySaving[record.id] = true;
+      try {
+        const payload = await this.api(`/api/client/dns-records/${record.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ proxied: !record.proxied }),
+        });
+        this.dnsRecords = payload.dns_records || this.dnsRecords;
+        this.dnsZones = payload.dns_zones || this.dnsZones;
+        this.notify(`${record.name} is now ${record.proxied ? "DNS only" : "Cloudflare proxied"}.`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.dnsProxySaving[record.id] = false;
+      }
+    },
+    async deleteDnsRecord(record) {
+      if (!window.confirm(`Delete ${record.type} record "${record.name}"?`)) return;
+      const domainKey = String(record.domain_id || this.selectedDomainId || "all");
+      const previous = this.dnsDeleteQueues[domainKey] || Promise.resolve();
+      this.dnsDeleteSaving[record.id] = true;
+      const operation = previous.catch(() => {}).then(async () => {
+        try {
+          const payload = await this.api(`/api/client/dns-records/${record.id}`, { method: "DELETE" });
+          this.dnsRecords = payload.dns_records || this.dnsRecords.filter((r) => r.id !== record.id);
+          this.dnsZones = payload.dns_zones || this.dnsZones;
+          this.notify(`DNS record removed from development zone (job #${payload.job_id})`, "success");
+        } catch (error) {
+          this.notify(error.message, "error");
+        } finally {
+          this.dnsDeleteSaving[record.id] = false;
+        }
+      });
+      const cleanup = operation.finally(() => {
+        if (this.dnsDeleteQueues[domainKey] === cleanup) delete this.dnsDeleteQueues[domainKey];
+      });
+      this.dnsDeleteQueues[domainKey] = cleanup;
+    },
+    dnsRecordLocked(record) {
+      return Boolean(record.locked || record.system_record || (record.type === "NS" && record.name === "@") || record.type === "SOA");
+    },
+    async rebuildDnsZone() {
+      if (!this.selectedDomainId) return;
+      try {
+        const payload = await this.api(`/api/client/domains/${this.selectedDomainId}/dns/rebuild`, { method: "POST", body: "{}" });
+        this.notify(`DNS rebuild queued (job #${payload.job_id})`, "success");
+        this.domains = (await this.api("/api/client/domains")).domains;
+        await this.loadDnsRecords();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async pullDnsProviderRecords() {
+      if (!this.selectedDomainId || this.dnsPulling) return;
+      this.dnsPulling = true;
+      try {
+        const payload = await this.api(`/api/client/domains/${this.selectedDomainId}/dns/pull-provider-records`, { method: "POST", body: "{}" });
+        await this.loadDnsRecords();
+        this.notify(`${payload.remote_record_count} provider record(s) found; ${payload.imported_count} new record(s) imported. Sync queued (job #${payload.job_id})`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.dnsPulling = false;
+      }
+    },
+    async verifyDnsZone() {
+      if (!this.selectedDomainId) return;
+      try {
+        const payload = await this.api(`/api/client/domains/${this.selectedDomainId}/dns/verify-nameservers`, { method: "POST", body: "{}" });
+        this.notify(payload.verification.message, payload.verification.status === "active" ? "success" : "error");
+        this.domains = (await this.api("/api/client/domains")).domains;
+        await this.loadDnsRecords();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async exportDnsZone() {
+      if (!this.selectedDomainId) return;
+      try {
+        const payload = await this.api(`/api/client/domains/${this.selectedDomainId}/dns/export`);
+        this.notify(`${payload.dns_zone_export.domain.name} DNS zone export saved`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async setDefaultDnsRecords() {
+      if (!this.selectedDomainId || this.settingDefaultDns) return;
+      const domainId = this.selectedDomainId;
+      this.settingDefaultDns = true;
+      try {
+        const payload = await this.api(`/api/client/domains/${domainId}/dns/set-default-records`, {
+          method: "POST",
+          body: "{}",
+        });
+        this.selectedDomainId = domainId;
+        await this.loadDnsRecords();
+        this.notify(`Default DNS records (A, CNAME, MX, SPF) generated for ${payload.domain.name}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.settingDefaultDns = false;
+      }
+    },
+    async migrateDomainProvider(domain, providerKey) {
+      if (!domain) return;
+      const targetName = providerKey === "cloudflare" ? "Cloudflare" : "Local DNS";
+      try {
+        const payload = await this.api(`/api/client/domains/${domain.id}/dns/migrate-provider`, {
+          method: "POST",
+          body: JSON.stringify({ dns_provider: providerKey }),
+        });
+        this.notify(`${domain.name} DNS provider migration to ${targetName} queued (job #${payload.job_id})`, "success");
+        if (typeof this.loadWebsites === "function") await this.loadWebsites();
+        const domainsRes = await this.api("/api/client/domains");
+        if (domainsRes && domainsRes.domains) this.domains = domainsRes.domains;
+        if (this.selectedDomainId) await this.loadDnsRecords();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async migrateWebsiteDnsProvider(site) {
+      if (!site) return;
+      try {
+        if (!this.domains || !this.domains.length) {
+          const domainsRes = await this.api("/api/client/domains");
+          if (domainsRes && domainsRes.domains) this.domains = domainsRes.domains;
+        }
+        const domain = (this.domains || []).find((d) => d.name === site.domain || d.linked_website_id === site.id || d.id === site.domain_id) || { id: site.domain_id, name: site.domain, dns_provider: site.dns_provider };
+        const domainId = domain ? domain.id : site.domain_id;
+        if (!domainId) {
+          this.notify("Domain record for website not found", "error");
+          return;
+        }
+        const targetProvider = (site.dns_provider === "cloudflare" || site.dns_provider_label === "Cloudflare") ? "local_powerdns" : "cloudflare";
+        const targetName = targetProvider === "cloudflare" ? "Cloudflare" : "Local DNS";
+        const payload = await this.api(`/api/client/domains/${domainId}/dns/migrate-provider`, {
+          method: "POST",
+          body: JSON.stringify({ dns_provider: targetProvider }),
+        });
+        this.notify(`${site.domain} DNS provider migration to ${targetName} queued (job #${payload.job_id})`, "success");
+        if (typeof this.loadWebsites === "function") await this.loadWebsites();
+        const domainsRes = await this.api("/api/client/domains");
+        if (domainsRes && domainsRes.domains) this.domains = domainsRes.domains;
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // PHP Switcher
+    async switchPhpVersion(site, version) {
+      if (site.php_version === version) return;
+      this.phpSwitching = { ...this.phpSwitching, [site.id]: true };
+      this.phpSwitchTarget = { ...this.phpSwitchTarget, [site.id]: version };
+      this.phpSwitchCountdowns = { ...this.phpSwitchCountdowns, [site.id]: 60 };
+      if (this.phpSwitchTimers[site.id]) window.clearInterval(this.phpSwitchTimers[site.id]);
+      const timer = window.setInterval(() => {
+        const remaining = Number(this.phpSwitchCountdowns[site.id] || 0);
+        if (remaining <= 0) return;
+        this.phpSwitchCountdowns = { ...this.phpSwitchCountdowns, [site.id]: remaining - 1 };
+      }, 1000);
+      this.phpSwitchTimers = { ...this.phpSwitchTimers, [site.id]: timer };
+      try {
+        const payload = await this.api(`/api/client/websites/${site.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ php_version: version }),
+        });
+        const idx = this.websites.findIndex((s) => s.id === site.id);
+        if (idx !== -1) this.websites[idx] = { ...this.websites[idx], ...payload.website };
+        this.notify(`PHP version updated to ${version} for ${site.domain}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        if (this.phpSwitchTimers[site.id]) window.clearInterval(this.phpSwitchTimers[site.id]);
+        const countdowns = { ...this.phpSwitchCountdowns };
+        delete countdowns[site.id];
+        this.phpSwitchCountdowns = countdowns;
+        const targets = { ...this.phpSwitchTarget };
+        delete targets[site.id];
+        this.phpSwitchTarget = targets;
+        const timers = { ...this.phpSwitchTimers };
+        delete timers[site.id];
+        this.phpSwitchTimers = timers;
+        const s = { ...this.phpSwitching };
+        delete s[site.id];
+        this.phpSwitching = s;
+      }
+    },
+    // Cache Manager
+    async loadCacheStatus(websiteId = null) {
+      const query = websiteId ? `?website_id=${encodeURIComponent(websiteId)}` : "";
+      try {
+        const payload = await this.api(`/api/client/cache/status${query}`);
+        this.cacheStatus = { ...this.cacheStatus, ...(payload.cache_status || {}) };
+        if (this.cachePendingTimer) window.clearTimeout(this.cachePendingTimer);
+        if (Object.keys(this.cacheStatus.pending || {}).length) {
+          this.cachePendingTimer = window.setTimeout(() => {
+            this.loadCacheStatus(this.selectedWebsite?.id || null);
+          }, 1500);
+        } else {
+          this.cachePendingTimer = null;
+        }
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    cachePending(type) {
+      return Boolean(this.cacheStatus.pending && this.cacheStatus.pending[type]);
+    },
+    async purgeCache(websiteId) {
+      this.cachePurging = true;
+      try {
+        const payload = await this.api("/api/client/cache/purge", {
+          method: "POST",
+          body: JSON.stringify(websiteId ? { website_id: websiteId } : {}),
+        });
+        this.notify(`Cache purge queued (job #${payload.job_id})`, "success");
+        this.cacheStatus = { ...this.cacheStatus, last_purged: new Date().toLocaleString() };
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.cachePurging = false;
+      }
+    },
+    async purgeCloudflareCache(websiteId) {
+      this.cachePurging = true;
+      try {
+        const payload = await this.api("/api/client/cache/cloudflare/purge", {
+          method: "POST",
+          body: JSON.stringify(websiteId ? { website_id: websiteId } : {}),
+        });
+        this.notify(`Cloudflare cache purge queued (job #${payload.job_id})`, "success");
+        this.cacheStatus = { ...this.cacheStatus, last_cloudflare_purged: new Date().toLocaleString() };
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.cachePurging = false;
+      }
+    },
+    async resetOpcodeCache(websiteId) {
+      this.cachePurging = true;
+      try {
+        const payload = await this.api("/api/client/cache/opcache/reset", {
+          method: "POST",
+          body: JSON.stringify(websiteId ? { website_id: websiteId } : {}),
+        });
+        this.notify(`OPcache reset queued (job #${payload.job_id})`, "success");
+        this.cacheStatus = { ...this.cacheStatus, last_purged: new Date().toLocaleString() };
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.cachePurging = false;
+      }
+    },
+    async flushObjectCache(websiteId) {
+      this.cachePurging = true;
+      try {
+        const payload = await this.api("/api/client/cache/object-cache/flush", {
+          method: "POST",
+          body: JSON.stringify(websiteId ? { website_id: websiteId } : {}),
+        });
+        this.notify(`Object cache flush queued (job #${payload.job_id})`, "success");
+        this.cacheStatus = { ...this.cacheStatus, last_purged: new Date().toLocaleString() };
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.cachePurging = false;
+      }
+    },
+    async toggleCache(type, enabled) {
+      this.cachePurging = true;
+      try {
+        const endpoint = type === "cloudflare" ? "/api/client/cache/cloudflare/toggle" : "/api/client/cache/toggle";
+        const global = type === "object" || type === "reverse_proxy";
+        const body = type === "cloudflare"
+          ? { enabled, website_id: this.selectedWebsite?.id }
+          : { type, enabled, ...(global ? {} : { website_id: this.selectedWebsite?.id }) };
+        const payload = await this.api(endpoint, { method: "POST", body: JSON.stringify(body) });
+        const fields = {
+          opcache: ["opcache_enabled", "opcode_cache", "OPcache"],
+          object: ["object_cache_enabled", "object_cache", "Object cache"],
+          reverse_proxy: ["reverse_proxy_cache_enabled", "reverse_proxy", "Reverse-Proxy Cache"],
+          litespeed: ["litespeed_cache_enabled", "litespeed", "LiteSpeed Cache"],
+          cloudflare: ["cloudflare_cache_enabled", "cloudflare_cache", "Cloudflare Cache"],
+        }[type];
+        if (!fields) return;
+        const pending = { ...(this.cacheStatus.pending || {}), [type]: { job_id: payload.job_id, status: "queued" } };
+        this.cacheStatus = { ...this.cacheStatus, [fields[0]]: enabled, [fields[1]]: "pending", pending };
+        await this.loadCacheStatus(this.selectedWebsite?.id || null);
+        this.notify(`${fields[2]} ${enabled ? "enable" : "disable"} queued (job #${payload.job_id})`, "success");
+      } catch (error) { this.notify(error.message, "error"); }
+      finally { this.cachePurging = false; }
+    },
+    // IP Manager
+    async createIpRule() {
+      if (!this.newIpRule.ip) return;
+      try {
+        const rule = await this.api("/api/client/ip-rules", {
+          method: "POST",
+          body: JSON.stringify(this.newIpRule),
+        });
+        this.ipRules = [...this.ipRules, rule];
+        this.notify(`IP rule added: ${rule.type} ${rule.ip}`, "success");
+        this.newIpRule = { ip: "", type: "block" };
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteIpRule(rule) {
+      if (!window.confirm(`Remove IP rule for ${rule.ip}?`)) return;
+      try {
+        await this.api(`/api/client/ip-rules/${rule.id}`, { method: "DELETE" });
+        this.ipRules = this.ipRules.filter((r) => r.id !== rule.id);
+        this.notify(`IP rule removed: ${rule.ip}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // Hotlink Protection
+    async saveHotlinkProtection() {
+      this.hotlink.saving = true;
+      try {
+        const payload = await this.api("/api/client/hotlink-protection", {
+          method: "POST",
+          body: JSON.stringify({ enabled: this.hotlink.enabled, allowed_domains: this.hotlink.allowed_domains }),
+        });
+        this.hotlink = { ...this.hotlink, ...(payload.hotlink || {}) };
+        this.notify(`Hotlink protection synced in development mode (job #${payload.job_id})`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.hotlink.saving = false;
+      }
+    },
+    // Fix Permissions
+    async fixFileOwnership() {
+      const selectedSite = this.websites.find(w => String(w.id) === String(this.fixOwnershipWebsiteId));
+      const targetLabel = selectedSite ? `website "${selectedSite.domain}"` : "all websites and account files";
+      if (!window.confirm(`Run Fix Permissions for ${targetLabel}? This will reset ownership and fix permissions (755 for directories, 644 for files).`)) return;
+      this.fixOwnershipRunning = true;
+      this.fixOwnershipResult = null;
+      try {
+        const payload = await this.api("/api/client/fix-ownership", {
+          method: "POST",
+          body: JSON.stringify({
+            website_id: (this.fixOwnershipWebsiteId && this.fixOwnershipWebsiteId !== "all") ? Number(this.fixOwnershipWebsiteId) : null
+          })
+        });
+        const msg = selectedSite
+          ? `Job queued (#${payload.job_id}). Permission repair running for website ${selectedSite.domain}.`
+          : `Job queued (#${payload.job_id}). File permissions and ownership repair is running in the background for all sites.`;
+        this.fixOwnershipResult = { success: true, message: msg };
+        this.notify(`Fix permissions job queued (#${payload.job_id})`, "success");
+      } catch (error) {
+        this.fixOwnershipResult = { success: false, message: error.message };
+        this.notify(error.message, "error");
+      } finally {
+        this.fixOwnershipRunning = false;
+      }
+    },
+    // Password Protect Directories
+    async addProtectedDir() {
+      if (!this.newProtectedDir.path || !this.newProtectedDir.username || !this.newProtectedDir.password) {
+        this.notify("Please fill all fields.", "error");
+        return;
+      }
+      try {
+        const payload = await this.api("/api/client/protected-directories", {
+          method: "POST",
+          body: JSON.stringify(this.newProtectedDir),
+        });
+        this.protectedDirs = [...this.protectedDirs, { ...this.newProtectedDir, id: payload.id }];
+        this.newProtectedDir = { path: "", username: "", password: "" };
+        this.notify(`Directory protection added for ${payload.path}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async removeProtectedDir(dir) {
+      if (!window.confirm(`Remove protection from ${dir.path}?`)) return;
+      try {
+        await this.api(`/api/client/protected-directories/${dir.id}`, { method: "DELETE" });
+        this.protectedDirs = this.protectedDirs.filter((d) => d.id !== dir.id);
+        this.notify(`Directory protection removed from ${dir.path}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // Redirects
+    async addRedirect() {
+      try {
+        const payload = await this.api("/api/client/redirects", {
+          method: "POST",
+          body: JSON.stringify(this.newRedirect),
+        });
+        const domain = this.websites.find(w => w.id === this.newRedirect.website_id)?.domain;
+        this.redirects = [...this.redirects, { ...this.newRedirect, id: payload.id, domain: domain }];
+        this.newRedirect = { website_id: "", source_path: "/", target_url: "", type: "301", match_type: "exact" };
+        this.notify(`Redirect created successfully.`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteRedirect(id) {
+      if (!window.confirm(`Delete this redirect?`)) return;
+      try {
+        await this.api(`/api/client/redirects/${id}`, { method: "DELETE" });
+        this.redirects = this.redirects.filter((r) => r.id !== id);
+        this.notify(`Redirect deleted.`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // Disk Usage
+    async loadDiskUsage() {
+      try {
+        const payload = await this.api("/api/client/disk-usage");
+        this.diskUsage = payload.usage || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // Folder Index Manager
+    async toggleFolderIndex(site) {
+      site.savingIndex = true;
+      try {
+        const payload = await this.api(`/api/client/websites/${site.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ index_enabled: site.index_enabled ? 0 : 1 }),
+        });
+        const idx = this.websites.findIndex((s) => s.id === site.id);
+        if (idx !== -1) {
+          this.websites[idx] = { ...this.websites[idx], ...payload.website };
+        }
+        this.notify(`Directory listing ${payload.website.index_enabled ? "enabled" : "disabled"} for ${site.domain}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        site.savingIndex = false;
+      }
+    },
+    // ModSecurity
+    async toggleModSec(site) {
+      site.savingModsec = true;
+      try {
+        const current = site.modsec_enabled === undefined ? 1 : site.modsec_enabled;
+        const payload = await this.api(`/api/client/websites/${site.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ modsec_enabled: current ? 0 : 1 }),
+        });
+        const idx = this.websites.findIndex((s) => s.id === site.id);
+        if (idx !== -1) {
+          this.websites[idx] = { ...this.websites[idx], ...payload.website };
+        }
+        this.notify(`ModSecurity ${payload.website.modsec_enabled ? "enabled" : "disabled"} for ${site.domain}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        site.savingModsec = false;
+      }
+    },
+    // API Tokens
+    async createApiToken() {
+      try {
+        const payload = await this.api("/api/client/api-tokens", {
+          method: "POST",
+          body: JSON.stringify({ name: this.newApiTokenName }),
+        });
+        this.apiTokens = [{ id: payload.id, name: payload.name, created_at: new Date().toISOString() }, ...this.apiTokens];
+        this.newApiTokenName = "";
+        this.newApiTokenRaw = payload.token;
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteApiToken(id) {
+      if (!window.confirm("Revoke this token? It will stop working immediately.")) return;
+      try {
+        await this.api(`/api/client/api-tokens/${id}`, { method: "DELETE" });
+        this.apiTokens = this.apiTokens.filter((t) => t.id !== id);
+        this.notify("API token revoked.", "success");
+        this.newApiTokenRaw = "";
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // FTP Accounts
+    async createFtpAccount() {
+      try {
+        const payload = await this.api("/api/client/ftp-accounts", {
+          method: "POST",
+          body: JSON.stringify({
+            username: this.newFtpUsername,
+            password: this.newFtpPassword,
+            path: this.newFtpPath
+          })
+        });
+        this.ftpAccounts.push(payload.ftp_account);
+        this.newFtpUsername = "";
+        this.newFtpPassword = "";
+        this.newFtpPath = "public_html";
+        this.notify("FTP Account created. Please wait up to a minute for it to sync.", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    openPhpIniModal(site) {
+      let phpIni = {};
+      if (site.php_ini) {
+        try {
+          phpIni = typeof site.php_ini === "string" ? JSON.parse(site.php_ini) : site.php_ini;
+        } catch (error) {
+          phpIni = {};
+        }
+      }
+      this.editingPhpIniSite = site;
+      this.phpIniForm = {
+        memory_limit: phpIni.memory_limit || "",
+        max_execution_time: phpIni.max_execution_time || site.php_timeout || (this.phpInfo && this.phpInfo.directives ? this.phpInfo.directives.php_timeout : "") || "120",
+        upload_max_filesize: phpIni.upload_max_filesize || "",
+        post_max_size: phpIni.post_max_size || "",
+        max_input_vars: phpIni.max_input_vars || "",
+        custom: phpIni.custom || "",
+      };
+    },
+    sitePhpTimeout(site) {
+      if (site.php_timeout) return site.php_timeout;
+      if (site.php_ini) {
+        try {
+          const ini = typeof site.php_ini === "string" ? JSON.parse(site.php_ini) : site.php_ini;
+          if (ini.max_execution_time) return ini.max_execution_time;
+        } catch (e) {}
+      }
+      return (this.phpInfo && this.phpInfo.directives && this.phpInfo.directives.php_timeout) || 120;
+    },
+    async savePhpIni() {
+      if (!this.editingPhpIniSite) return;
+      this.phpIniSaving = true;
+      try {
+        const payload = await this.api(`/api/client/websites/${this.editingPhpIniSite.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            php_ini: this.phpIniForm,
+            php_timeout: this.phpIniForm.max_execution_time ? Number(this.phpIniForm.max_execution_time) : null,
+          }),
+        });
+        const idx = this.websites.findIndex((site) => site.id === this.editingPhpIniSite.id);
+        if (idx !== -1) {
+          this.websites[idx] = { ...this.websites[idx], ...payload.website };
+        }
+        this.editingPhpIniSite = null;
+        this.notify(`PHP INI updated for ${payload.website.domain}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.phpIniSaving = false;
+      }
+    },
+    async deleteFtpAccount(id) {
+      if (!window.confirm("Delete this FTP account?")) return;
+      try {
+        await this.api(`/api/client/ftp-accounts/${id}`, { method: "DELETE" });
+        this.ftpAccounts = this.ftpAccounts.filter((f) => f.id !== id);
+        this.notify("FTP account deleted. Allow up to a minute for changes to take effect.", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    copyValue(value) {
+      navigator.clipboard.writeText(String(value)).then(() => this.notify("Copied to clipboard", "success"));
+    },
+    // 2FA
+    async loadSiteBuilderTemplates() {
+      try {
+        const res = await this.api("/api/client/site-builder/templates");
+        this.siteBuilderTemplates = res.templates || [];
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    async installCustomSsl() {
+      if (!this.selectedWebsiteId) {
+        this.notify("Please select a website first.", "error");
+        return;
+      }
+      try {
+        await this.api("/api/client/ssl/custom", {
+          method: "POST",
+          body: JSON.stringify({
+            website_id: this.selectedWebsiteId,
+            crt: this.customSslCrt,
+            key: this.customSslKey
+          })
+        });
+        this.notify("Custom SSL Certificate installed successfully. Web server is reloading.", "success");
+        this.customSslCrt = "";
+        this.customSslKey = "";
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    async loadResourceHistory() {
+      try {
+        const res = await this.api(`/api/client/resource-usage/history`);
+        this.resourceHistory = res.history || [];
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+
+    async loadRawLogs() {
+      if (!this.selectedWebsiteId) {
+        this.notify("Please select a website first.", "error");
+        return;
+      }
+      try {
+        const res = await this.api(`/api/client/logs/raw?website_id=${this.selectedWebsiteId}`);
+        this.rawAccessLogs = res.files || [];
+      } catch (e) {
+        this.notify(e.message, "error");
+      }
+    },
+    downloadRawLog(filename) {
+      if (!this.selectedWebsiteId) return;
+      window.location.href = `/api/client/logs/download?website_id=${this.selectedWebsiteId}&file=${encodeURIComponent(filename)}`;
+    },
+
+    async optimizeImages() {
+      if (!this.selectedWebsiteId) {
+        this.notify("Please select a website first.", "error");
+        return;
+      }
+      try {
+        const payload = await this.api("/api/client/images/optimize", {
+          method: "POST",
+          body: JSON.stringify({ website_id: this.selectedWebsiteId, directory: this.imageOptimizeDir })
+        });
+        this.notify(`Image optimization synced in development mode (job #${payload.job_id})`, "success");
+        this.imageOptimizeDir = "";
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    async installSiteTemplate(templateId) {
+      if (!this.selectedWebsiteId) {
+        this.notify("Please select a website first.", "error");
+        return;
+      }
+      if (!window.confirm("WARNING: Installing a template will extract files into your website directory, potentially overwriting existing files. Continue?")) return;
+      try {
+        await this.api("/api/client/site-builder/install", {
+          method: "POST",
+          body: JSON.stringify({ website_id: this.selectedWebsiteId, template_id: templateId })
+        });
+        this.notify("Template installed successfully. Allow up to a minute for changes to take effect.", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    async generate2FA() {
+      try {
+        const payload = await this.api("/api/client/2fa/generate", { method: "POST" });
+        this.tfaSetup.secret = payload.secret;
+        this.tfaSetup.uri = payload.uri;
+        this.tfaSetup.code = "";
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async enable2FA() {
+      try {
+        await this.api("/api/client/2fa/enable", {
+          method: "POST",
+          body: JSON.stringify({ secret: this.tfaSetup.secret, code: this.tfaSetup.code })
+        });
+        this.has2FA = true;
+        this.tfaSetup = { secret: null, uri: "", code: "" };
+        this.notify("Two-Factor Authentication enabled successfully.", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async disable2FA() {
+      if (!window.confirm("Are you sure you want to disable 2FA? This will reduce the security of your account.")) return;
+      try {
+        await this.api("/api/client/2fa/disable", {
+          method: "POST",
+          body: JSON.stringify({
+            code: this.tfaDisableCode,
+            totp_code: this.tfaDisableCode,
+            current_password: this.tfaDisablePassword,
+          })
+        });
+        this.has2FA = false;
+        this.tfaDisableCode = "";
+        this.tfaDisablePassword = "";
+        this.notify("Two-Factor Authentication has been disabled.", "success");
+        this.handleSessionExpired();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    resourcePath(key, maxValue) {
+      const points = this.resourceChartPoints;
+      if (!points.length) return "";
+      const width = 720;
+      const height = 220;
+      const max = Math.max(Number(maxValue || 1), 1);
+      return points
+        .map((point, index) => {
+          const x = points.length === 1 ? width : (index / (points.length - 1)) * width;
+          const value = Math.max(0, Math.min(max, Number(point[key] || 0)));
+          const y = height - (value / max) * height;
+          return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+        })
+        .join(" ");
+    },
+    resourceFillPath(key, maxValue) {
+      const line = this.resourcePath(key, maxValue);
+      if (!line || !this.resourceChartPoints.length) return "";
+      return `${line} L 720 220 L 0 220 Z`;
+    },
+    formatResource(value, unit) {
+      const number = Number(value || 0);
+      if (unit === "%") return `${number.toFixed(1)}%`;
+      if (number >= 1024) return `${(number / 1024).toFixed(2)} GB`;
+      return `${number.toFixed(1)} MB`;
+    },
+    planUsagePercent(used, limit) {
+      const usedNumber = Number(used);
+      const limitNumber = Number(limit);
+      if (!Number.isFinite(usedNumber) || !Number.isFinite(limitNumber) || limitNumber <= 0) return null;
+      return Math.max(0, Math.min(100, (usedNumber / limitNumber) * 100));
+    },
+    planUsageTone(percent) {
+      if (percent == null) return "neutral";
+      if (percent <= 20) return "low";
+      if (percent <= 50) return "warn";
+      if (percent <= 70) return "elevated";
+      return "critical";
+    },
+    formatPlanMetricValue(value, unit) {
+      if (value == null || Number.isNaN(Number(value))) return "Not tracked";
+      const number = Number(value);
+      if (unit === "percent") return `${number.toFixed(1)}%`;
+      if (unit === "count") return `${Math.round(number)}`;
+      return this.formatResource(number, "MB");
+    },
+    planUsageMeta(used, limit, unit, limitLabel = null) {
+      if (limit == null || Number(limit) <= 0) return "Unlimited";
+      if (used == null || Number.isNaN(Number(used))) {
+        return limitLabel ? `${limitLabel} available` : "Not tracked";
+      }
+      return `${this.formatPlanMetricValue(used, unit)} used of ${limitLabel || this.formatPlanMetricValue(limit, unit)}`;
+    },
+    formatSampleTime(value) {
+      if (!value) return "";
+      return new Date(Number(value) * 1000).toLocaleString();
+    },
+    formatBytes(value) {
+      const bytes = Number(value || 0);
+      if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+      if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+      if (bytes >= 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+      return `${bytes} B`;
+    },
+    phpVersionBadgeClass(version) {
+      const major = parseInt((version || "8").split(".")[0]);
+      if (major >= 8) return "php-badge php-badge--8";
+      if (major === 7) return "php-badge php-badge--7";
+      return "php-badge";
+    },
+    openSubdomainWizard(prefill = {}) {
+      this.subdomainWizard = {
+        open: true,
+        label: prefill.label || "",
+        parent_domain_id: prefill.parent_domain_id || this.subdomainDomains[0]?.id || "",
+        hosting_mode: "separate",
+        path: "",
+        configure_dns: false,
+        submitting: false,
+        building: false,
+        complete: false,
+        createdSubdomain: null,
+        error: "",
+      };
+    },
+    closeSubdomainWizard() {
+      if (!this.subdomainWizard.submitting) this.subdomainWizard.open = false;
+    },
+    async createSubdomain() {
+      const form = this.subdomainWizard;
+      if (form.submitting) return;
+      form.submitting = true;
+      form.building = true;
+      form.complete = false;
+      form.error = "";
+      try {
+        const startedAt = Date.now();
+        const payload = await this.api("/api/client/subdomains", { method: "POST", body: JSON.stringify({
+          subdomain: form.label,
+          parent_domain_id: form.parent_domain_id,
+          hosting_mode: form.hosting_mode,
+          path: form.path,
+          configure_dns: form.configure_dns,
+        }) });
+        const remainingAnimationMs = Math.max(0, 900 - (Date.now() - startedAt));
+        if (remainingAnimationMs) await new Promise((resolve) => setTimeout(resolve, remainingAnimationMs));
+        form.createdSubdomain = payload.subdomain;
+        form.building = false;
+        form.complete = true;
+        this.notify(`Subdomain ${form.label} created, DNS queued, and SSL issuance started`, "success");
+        await this.load();
+      } catch (error) {
+        form.building = false;
+        form.error = error.message || String(error);
+        this.notify(form.error, "error");
+      } finally {
+        form.submitting = false;
+      }
+    },
+    async deleteSubdomain(subdomain) {
+      if (!window.confirm(`Delete subdomain ${subdomain.domain}? Its hosted files will be removed by the normal website cleanup flow.`)) return;
+      try {
+        await this.api(`/api/client/subdomains/${subdomain.id}`, { method: "DELETE" });
+        this.notify(`${subdomain.domain} deleted`, "success");
+        await this.load();
+      } catch (error) { this.notify(error.message, "error"); }
+    },
+    async issueSubdomainSsl(subdomain) {
+      try {
+        await this.api("/api/client/ssl/issue", { method: "POST", body: JSON.stringify({ website_id: subdomain.id }) });
+        this.notify(`SSL issuance queued for ${subdomain.domain}`, "success");
+      } catch (error) { this.notify(error.message, "error"); }
+    },
+    // Website Creation Wizard
+    openSiteWizard() {
+      Object.assign(this.siteWizard, {
+        isOpen: true,
+        step: 1,
+        type: 'blank',
+        domain: '',
+        site_title: 'My Site',
+        admin_username: 'admin',
+        admin_email: this.currentUserEmail,
+        admin_password: '',
+        allow_overwrite: false,
+        createdWebsite: null,
+        createdDomainNameservers: [],
+        dnsPreview: null,
+        dnsCheckResult: null,
+        dnsAction: 'keep',
+        isCheckingDns: false,
+        loadingDnsPreview: false,
+        isSubmitting: false,
+        isBuilding: false,
+        errorMessage: "",
+        dnsTab: 'records',
+      });
+      this.siteWizard.isOpen = true;
+    },
+    closeSiteWizard() {
+      this.siteWizard.isOpen = false;
+      this.siteWizard.errorMessage = "";
+    },
+    findSubdomainParent(domain) {
+      const normalizedDomain = String(domain || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\.$/, "");
+      if (!normalizedDomain || !normalizedDomain.includes(".")) return null;
+
+      const websiteNames = new Set((this.websites || []).map((site) => String(site.domain || "").toLowerCase().replace(/\.$/, "")));
+      return (this.subdomainDomains || [])
+        .filter((parent) => {
+          const parentName = String(parent.name || "").toLowerCase().replace(/\.$/, "");
+          return parentName && websiteNames.has(parentName) && normalizedDomain.endsWith(`.${parentName}`);
+        })
+        .sort((left, right) => String(right.name || "").length - String(left.name || "").length)
+        .map((parent) => {
+          const parentName = String(parent.name).toLowerCase().replace(/\.$/, "");
+          return {
+            parent_domain_id: parent.id,
+            label: normalizedDomain.slice(0, -(parentName.length + 1)),
+          };
+        })
+        .find((match) => match.label);
+    },
+    onWizardDomainChange() {
+      this.siteWizard.dnsCheckResult = null;
+      this.siteWizard.errorMessage = "";
+      this.siteWizard.hasReviewedDns = false;
+      if (this._domainCheckTimer) clearTimeout(this._domainCheckTimer);
+
+      const subdomainParent = this.findSubdomainParent(this.siteWizard.domain);
+      if (subdomainParent) {
+        this.closeSiteWizard();
+        this.openSubdomainWizard(subdomainParent);
+        return;
+      }
+
+      if (this.siteWizard.domain && this.siteWizard.domain.includes(".")) {
+        this._domainCheckTimer = setTimeout(() => {
+          this.checkDomainDns();
+        }, 500);
+      }
+    },
+    async checkDomainDns() {
+      if (!this.siteWizard.domain) return true;
+      this.siteWizard.isCheckingDns = true;
+      this.siteWizard.errorMessage = "";
+      try {
+        const checkResult = await this.api("/api/client/dns/check-domain", {
+          method: "POST",
+          body: JSON.stringify({ domain: this.siteWizard.domain })
+        });
+        this.siteWizard.dnsCheckResult = checkResult;
+        if (checkResult.exists && checkResult.blocked) {
+          this.siteWizard.errorMessage = checkResult.error_message || "This website can't be added to this account because it already exists on another account on this hosting. Kindly contact support";
+          return false;
+        }
+        return true;
+      } catch (err) {
+        if (err && err.message) {
+          this.siteWizard.errorMessage = err.message;
+        }
+        return false;
+      } finally {
+        this.siteWizard.isCheckingDns = false;
+      }
+    },
+    async fetchDnsPreview() {
+      if (!this.siteWizard.domain) return;
+      this.siteWizard.loadingDnsPreview = true;
+      try {
+        const payload = await this.api("/api/client/dns/preview-website", {
+          method: "POST",
+          body: JSON.stringify({ domain: this.siteWizard.domain }),
+        });
+        this.siteWizard.dnsPreview = payload;
+      } catch (err) {
+        console.error("DNS Preview error:", err);
+      } finally {
+        this.siteWizard.loadingDnsPreview = false;
+      }
+    },
+    async nextSiteWizardStep() {
+      if (this.siteWizard.isCheckingDns) return;
+      if (this.siteWizard.step === 2) {
+        if (!this.siteWizard.domain) return;
+        const ok = await this.checkDomainDns();
+        if (!ok) return;
+        if (
+          this.siteWizard.dnsCheckResult &&
+          this.siteWizard.dnsCheckResult.exists &&
+          this.siteWizard.dnsCheckResult.dns_provider === 'cloudflare' &&
+          !this.siteWizard.hasReviewedDns
+        ) {
+          this.siteWizard.hasReviewedDns = true;
+          return;
+        }
+        if (this.siteWizard.type === 'blank') {
+          await this.finishSiteWizard();
+          return;
+        }
+      }
+      this.siteWizard.step++;
+    },
+    prevSiteWizardStep() {
+      this.siteWizard.step--;
+    },
+    async finishSiteWizard() {
+      if (this.siteWizard.isSubmitting || this.siteWizard.isCheckingDns) return;
+      if (this.siteWizard.step === 2) {
+        const ok = await this.checkDomainDns();
+        if (!ok) return;
+      }
+      this.siteWizard.isSubmitting = true;
+      this.siteWizard.isBuilding = true;
+      try {
+        this.siteWizard.errorMessage = "";
+        this.notify("Creating website...", "success");
+        const sitePayload = await this.api("/api/client/websites", {
+          method: "POST",
+          body: JSON.stringify({
+            domain: this.siteWizard.domain,
+            dns_action: this.siteWizard.dnsAction
+          })
+        });
+        const website = sitePayload.website;
+        this.siteWizard.createdWebsite = website;
+        this.siteWizard.createdDomainNameservers = website.nameservers || [];
+        const followupIssues = [];
+        
+        try {
+          this.notify("Issuing SSL certificate...", "success");
+          await this.api("/api/client/ssl/issue", {
+            method: "POST",
+            body: JSON.stringify({ website_id: website.id })
+          });
+        } catch (sslErr) {
+          console.error("SSL Issue failed:", sslErr);
+          followupIssues.push(`SSL issuance issue: ${sslErr.message || sslErr}`);
+        }
+
+        if (this.siteWizard.type !== 'blank') {
+          try {
+            this.notify(`Installing ${this.siteWizard.type}...`, "success");
+            await this.api("/api/client/installer/install", {
+              method: "POST",
+              body: JSON.stringify({
+                script_id: this.siteWizard.type,
+                website_id: website.id,
+                site_title: this.siteWizard.site_title,
+                admin_username: this.siteWizard.admin_username,
+                admin_email: this.siteWizard.admin_email,
+                admin_password: this.siteWizard.admin_password,
+                allow_overwrite: this.siteWizard.allow_overwrite
+              })
+            });
+          } catch (installErr) {
+            console.error("Installer setup failed:", installErr);
+            followupIssues.push(`Installer issue: ${installErr.message || installErr}`);
+          }
+          if (followupIssues.length) {
+            this.notify(`Website created. ${followupIssues.join(" ")}`, "warning");
+          } else {
+            this.notify(`Website added, SSL issued, and ${this.siteWizard.type} installation started!`, "success");
+          }
+        } else {
+          if (followupIssues.length) {
+            this.notify(`Website created. ${followupIssues.join(" ")}`, "warning");
+          } else {
+            this.notify("Website added and SSL issued successfully!", "success");
+          }
+        }
+
+        this.siteWizard.step = 4; // Website Added step
+        // The create request has already committed the website.  A transient
+        // error while refreshing the list must not turn that successful
+        // creation into a misleading "Failed to fetch" message.
+        try {
+          await this.refresh();
+        } catch (refreshErr) {
+          console.warn("Website created, but refreshing the website list failed:", refreshErr);
+          this.notify("Website created. The list will update when it reconnects.", "warning");
+        }
+      } catch (err) {
+        // A proxy or browser connection can close after the API has committed
+        // the row. Reconcile once before reporting a hard failure so a
+        // successful create is not retried and shown as an error.
+        const errorText = String(err && (err.message || err) || "");
+        const mayHaveCommitted = /failed to fetch|network|empty response|unexpected end/i.test(errorText);
+        let recovered = false;
+        if (mayHaveCommitted) {
+          try {
+            await this.refresh();
+            const requestedDomain = String(this.siteWizard.domain || "").trim().toLowerCase();
+            const existing = this.websites.find((site) => String(site.domain || "").trim().toLowerCase() === requestedDomain);
+            if (existing) {
+              this.siteWizard.createdWebsite = existing;
+              this.siteWizard.createdDomainNameservers = existing.nameservers || [];
+              this.siteWizard.step = 4;
+              this.notify("Website created. Provisioning will continue in the background.", "success");
+              recovered = true;
+            }
+          } catch (reconcileErr) {
+            console.warn("Unable to reconcile website creation after a connection error:", reconcileErr);
+          }
+        }
+        if (!recovered) {
+          this.siteWizard.errorMessage = errorText;
+          this.notify(errorText, "error");
+        }
+      } finally {
+        this.siteWizard.isSubmitting = false;
+        this.siteWizard.isBuilding = false;
+      }
+    },
+    async createWebsite() {
+      this.openSiteWizard();
+    },
+    async deleteWebsite(site) {
+      if (!window.confirm(`Delete website ${site.domain}? This removes the panel record and queues the stack to sync.`)) return;
+      try {
+        await this.api(`/api/client/websites/${site.id}`, { method: "DELETE" });
+        this.websites = this.websites.filter((item) => item.id !== site.id);
+        if (String(this.selectedWebsiteId) === String(site.id)) this.selectedWebsiteId = "";
+        await this.load();
+        this.notify(`Website ${site.domain} deleted`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    openWebsiteDetails(site) {
+      if (!site) return;
+      this.selectedWebsiteId = site.id;
+      this.goTo("website-details");
+    },
+    openWebsiteFiles(site) {
+      if (!site) return;
+      this.selectedWebsiteId = String(site.id);
+      const domainName = site.domain || (this.selectedWebsite && this.selectedWebsite.domain) || "";
+      this.launch("files", domainName ? "/domains/" + domainName : "/domains");
+    },
+    openWebsitePhpConfiguration(site) {
+      this.selectedWebsiteId = site.id;
+      this.goTo("php-configuration");
+    },
+    openWebsiteDatabases(site) {
+      if (!site) return;
+      this.selectedWebsiteId = site.id;
+      this.databaseWebsiteFilter = String(site.id);
+      this.dbTab = "databases";
+      this.goTo("databases");
+    },
+    openWebsiteDns(site) {
+      this.selectedWebsiteId = site.id;
+      const domain = this.domains.find((item) => String(item.name).toLowerCase() === String(site.domain).toLowerCase());
+      if (!domain) {
+        this.notify("DNS information is not available for this website.", "error");
+        return;
+      }
+      this.selectedDomainId = domain.id;
+      this.newDnsRecord.domain_id = domain.id;
+      this.goTo("dns-zone-editor");
+    },
+    // Database Modals
+    openDbModal(type) {
+      this.dbSubmitting = false;
+      this.dbModal = type;
+      this.newDatabase = { name: "", username: "", website_id: this.databaseWebsiteFilter || "" };
+      this.newDatabaseUser = { username: "", password: "" };
+      this.newDatabaseGrant = { database_id: "", user_id: "", selectedPrivileges: ["ALL"] };
+    },
+    closeDbModal() {
+      if (this.dbSubmitting) return;
+      this.dbModal = null;
+      this.editingDatabase = null;
+      this.databaseAssignmentWebsiteId = "";
+      this.editingDatabaseUser = null;
+      this.editingDatabaseGrant = null;
+      this.dbSubmitting = false;
+    },
+    refresh() {
+      return this.load();
+    },
+    openEditDbModal(database) {
+      this.dbSubmitting = false;
+      this.editingDatabase = { ...database };
+      this.dbModal = 'edit_database';
+    },
+    openAssignWebsiteModal(database) {
+      this.dbSubmitting = false;
+      this.editingDatabase = { ...database };
+      this.databaseAssignmentWebsiteId = "";
+      this.dbModal = 'assign_website';
+    },
+    async saveDatabaseWebsiteAssignment() {
+      if (!this.editingDatabase || !this.databaseAssignmentWebsiteId || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        const payload = await this.api(`/api/client/databases/${this.editingDatabase.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ website_id: this.databaseAssignmentWebsiteId }),
+        });
+        this.applyDatabasePayload(payload);
+        this.notify(`Database ${this.editingDatabase.name} assigned to the website`, "success");
+        this.closeDbModal();
+      } catch (error) {
+        this.notify(String(error), "error");
+      } finally {
+        this.dbSubmitting = false;
+      }
+    },
+    async saveEditDatabase() {
+      if (!this.editingDatabase || !this.editingDatabase.name || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        await this.api(`/api/client/databases/${this.editingDatabase.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: this.editingDatabase.name,
+            status: this.editingDatabase.status
+          })
+        });
+        this.notify("Database updated successfully", "success");
+        this.dbSubmitting = false;
+        this.closeDbModal();
+        await this.refresh();
+      } catch (err) {
+        this.dbSubmitting = false;
+        this.notify(String(err), "error");
+      }
+    },
+    openChangePasswordModal(user) {
+      this.dbSubmitting = false;
+      this.editingDatabaseUser = { ...user, newPassword: "" };
+      this.dbModal = 'change_password';
+    },
+    async saveChangePassword() {
+      if (!this.editingDatabaseUser || !this.editingDatabaseUser.newPassword || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        await this.api(`/api/client/database-users/${this.editingDatabaseUser.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            username: this.editingDatabaseUser.username,
+            status: this.editingDatabaseUser.status,
+            password: this.editingDatabaseUser.newPassword
+          })
+        });
+        this.notify("User password updated successfully", "success");
+        this.dbSubmitting = false;
+        this.closeDbModal();
+        await this.refresh();
+      } catch (err) {
+        this.dbSubmitting = false;
+        this.notify(String(err), "error");
+      }
+    },
+    openEditGrantModal(grant) {
+      this.dbSubmitting = false;
+      this.editingDatabaseGrant = { ...grant, selectedPrivileges: this.privilegeSelection(grant.privileges) };
+      this.dbModal = 'edit_grant';
+    },
+    async saveEditGrant() {
+      if (!this.editingDatabaseGrant || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        await this.api(`/api/client/database-grants/${this.editingDatabaseGrant.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            privileges: this.serializeDatabasePrivileges(this.editingDatabaseGrant.selectedPrivileges),
+            status: this.editingDatabaseGrant.status
+          })
+        });
+        this.notify("Privileges updated successfully", "success");
+        this.dbSubmitting = false;
+        this.closeDbModal();
+        await this.refresh();
+      } catch (err) {
+        this.dbSubmitting = false;
+        this.notify(String(err), "error");
+      }
+    },
+
+    // PostgreSQL Databases
+    async createPgDatabase() {
+      try {
+        await this.api("/api/client/pg-databases", {
+          method: "POST",
+          body: JSON.stringify({ name: this.newDbName })
+        });
+        this.notify("PostgreSQL Database created.", "success");
+        this.newDbName = "";
+        await this.loadHome();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deletePgDatabase(id) {
+      if (!window.confirm("Are you sure you want to delete this PostgreSQL database?")) return;
+      try {
+        await this.api(`/api/client/pg-databases/${id}`, { method: "DELETE" });
+        this.notify("Database deleted.", "success");
+        await this.loadHome();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async createPgUser() {
+      try {
+        await this.api("/api/client/pg-databases/users", {
+          method: "POST",
+          body: JSON.stringify({ username: this.newDbUser, password: this.newDbPassword })
+        });
+        this.notify("PostgreSQL User created.", "success");
+        this.newDbUser = "";
+        this.newDbPassword = "";
+        await this.loadHome();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deletePgUser(id) {
+      if (!window.confirm("Are you sure you want to delete this user?")) return;
+      try {
+        await this.api(`/api/client/pg-databases/users/${id}`, { method: "DELETE" });
+        this.notify("User deleted.", "success");
+        await this.loadHome();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async changePgUserPassword() {
+      try {
+        await this.api("/api/client/pg-databases/users/password", {
+          method: "POST",
+          body: JSON.stringify({ user_id: this.changeDbUserPasswordId, password: this.changeDbUserPasswordValue })
+        });
+        this.notify("Password updated successfully.", "success");
+        this.changeDbUserPasswordId = null;
+        this.changeDbUserPasswordValue = "";
+        this.showChangeDbPasswordModal = false;
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async addPgGrant() {
+      try {
+        await this.api("/api/client/pg-databases/users/grants", {
+          method: "POST",
+          body: JSON.stringify({ database_id: this.grantDbId, user_id: this.grantUserId })
+        });
+        this.notify("User added to database successfully.", "success");
+        this.grantDbId = "";
+        this.grantUserId = "";
+        await this.loadHome();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async removePgGrant(id) {
+      if (!window.confirm("Revoke this user's privileges from the database?")) return;
+      try {
+        await this.api(`/api/client/pg-databases/users/grants/${id}`, { method: "DELETE" });
+        this.notify("Privileges revoked.", "success");
+        await this.loadHome();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    async createDatabase() {
+      if (!this.newDatabase.name || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        await this.api("/api/client/databases", { method: "POST", body: JSON.stringify(this.newDatabase) });
+        this.notify("Database created successfully", "success");
+        this.dbSubmitting = false;
+        this.closeDbModal();
+        await this.refresh();
+      } catch (err) {
+        this.dbSubmitting = false;
+        this.notify(String(err), "error");
+      }
+    },
+    async createDatabaseUser() {
+      if (!this.newDatabaseUser.username || !this.newDatabaseUser.password || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        await this.api("/api/client/database-users", { method: "POST", body: JSON.stringify(this.newDatabaseUser) });
+        this.notify("Database user created successfully", "success");
+        this.dbSubmitting = false;
+        this.closeDbModal();
+        await this.refresh();
+      } catch (err) {
+        this.dbSubmitting = false;
+        this.notify(String(err), "error");
+      }
+    },
+    async createDatabaseGrant() {
+      if (!this.newDatabaseGrant.database_id || !this.newDatabaseGrant.user_id || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        await this.api("/api/client/database-grants", { method: "POST", body: JSON.stringify({ ...this.newDatabaseGrant, privileges: this.serializeDatabasePrivileges(this.newDatabaseGrant.selectedPrivileges) }) });
+        this.notify("Privileges granted successfully", "success");
+        this.dbSubmitting = false;
+        this.closeDbModal();
+        await this.refresh();
+      } catch (err) {
+        this.dbSubmitting = false;
+        this.notify(String(err), "error");
+      }
+    },
+    privilegeSelection(value) {
+      const raw = String(value || "ALL").toUpperCase();
+      if (raw === "ALL") return ["ALL"];
+      if (raw === "READ") return ["SELECT"];
+      if (raw === "READ_WRITE") return ["SELECT", "INSERT", "UPDATE", "DELETE"];
+      return raw.split(",").map((item) => item.trim()).filter(Boolean);
+    },
+    serializeDatabasePrivileges(selected) {
+      const values = Array.isArray(selected) ? selected.filter(Boolean) : [];
+      return values.includes("ALL") || !values.length ? "ALL" : values.join(", ");
+    },
+    normalizePrivilegeSelection(form, changedPrivilege) {
+      if (!Array.isArray(form.selectedPrivileges)) form.selectedPrivileges = [];
+      if (changedPrivilege && changedPrivilege !== "ALL" && form.selectedPrivileges.includes("ALL")) {
+        form.selectedPrivileges = [changedPrivilege];
+      } else if (form.selectedPrivileges.includes("ALL") && form.selectedPrivileges.length > 1) {
+        form.selectedPrivileges = form.selectedPrivileges.filter((item) => item === "ALL");
+      }
+    },
+    openDatabaseWizard() {
+      this.dbSubmitting = false;
+      this.databaseWizard = { name: "", username: "", password: "", website_id: this.databaseWebsiteFilter || "", selectedPrivileges: ["ALL"] };
+      this.dbModal = "wizard";
+    },
+    async submitDatabaseWizard() {
+      const form = this.databaseWizard;
+      if (!form.name || !form.username || !form.password || this.dbSubmitting) return;
+      this.dbSubmitting = true;
+      try {
+        await this.api("/api/client/database-wizard", { method: "POST", body: JSON.stringify({ name: form.name, username: form.username, password: form.password, website_id: form.website_id, privileges: this.serializeDatabasePrivileges(form.selectedPrivileges) }) });
+        this.notify("Database, user, and access grant created successfully", "success");
+        this.closeDbModal();
+        await this.refresh();
+      } catch (err) {
+        this.notify(String(err), "error");
+      } finally {
+        this.dbSubmitting = false;
+      }
+    },
+    // DB Wizard
+    async wizardNextStep() {
+      if (this.dbWizardSubmitting) return;
+      if (this.dbWizardStep === 1 && !this.wizardDbName) return;
+      if (this.dbWizardStep === 2 && (!this.wizardDbUser || !this.wizardDbPass)) return;
+      this.dbWizardSubmitting = true;
+      try {
+        if (this.dbWizardStep === 1) {
+          this.dbWizardStep = 2;
+        } else if (this.dbWizardStep === 2) {
+          this.dbWizardStep = 3;
+        } else if (this.dbWizardStep === 3) {
+          await this.api("/api/client/database-wizard", { method: "POST", body: JSON.stringify({ name: this.wizardDbName, username: this.wizardDbUser, password: this.wizardDbPass, website_id: this.wizardWebsiteId, privileges: "ALL" }) });
+          await this.refresh();
+          this.dbWizardStep = 4;
+        }
+      } catch (err) {
+        this.notify(String(err), "error");
+      } finally {
+        this.dbWizardSubmitting = false;
+      }
+    },
+    resetDbWizard() {
+      this.dbWizardSubmitting = false;
+      this.dbWizardStep = 1;
+      this.wizardDbName = "";
+      this.wizardDbUser = "";
+      this.wizardDbPass = "";
+      this.wizardWebsiteId = "";
+      this.activePage = "databases";
+    },
+    // Backup Wizard
+    openBackupWizard() {
+      this.backupWizard = { isOpen: true, step: 1, isRunning: false, progressText: '', websiteId: this.backupSiteId || 'all' };
+    },
+    closeBackupWizard() {
+      this.backupWizard.isOpen = false;
+    },
+    async pollBackupStatus(backupId) {
+      if (!this.backupWizard.isOpen || !this.backupWizard.isRunning) return;
+      try {
+        const payload = await this.api("/api/client/backups");
+        const backups = payload.backups || [];
+        const backup = backups.find(b => b.id === backupId);
+        if (backup) {
+          if (backup.status === 'completed') {
+            this.backupWizard.progressText = 'Backup completed successfully!';
+            this.backupWizard.isRunning = false;
+            this.backupWizard.step = 2;
+            await this.load();
+          } else if (backup.status === 'failed') {
+            this.backupWizard.progressText = 'Backup failed: ' + (backup.error || 'Unknown error');
+            this.backupWizard.isRunning = false;
+            await this.load();
+          } else if (backup.status === 'running') {
+            this.backupWizard.progressText = 'Backup is running. Archiving files and databases...';
+            setTimeout(() => this.pollBackupStatus(backupId), 1500);
+          } else {
+            this.backupWizard.progressText = 'Backup is queued. Waiting for agent...';
+            setTimeout(() => this.pollBackupStatus(backupId), 1500);
+          }
+        } else {
+          setTimeout(() => this.pollBackupStatus(backupId), 1500);
+        }
+      } catch (err) {
+        this.backupWizard.progressText = 'Error checking backup status: ' + err.message;
+        setTimeout(() => this.pollBackupStatus(backupId), 2000);
+      }
+    },
+    async startBackupWizard() {
+      this.backupWizard.step = 2;
+      this.backupWizard.isRunning = true;
+      this.backupWizard.progressText = 'Enqueuing backup job...';
+      try {
+        const body = this.backupWizard.websiteId !== "all" ? { website_id: Number(this.backupWizard.websiteId) } : {};
+        const payload = await this.api("/api/client/backups", { method: "POST", body: JSON.stringify(body) });
+        this.backupWizard.progressText = `Job #${payload.job_id} queued. Starting process...`;
+        this.pollBackupStatus(payload.backup_id);
+      } catch (err) {
+        this.backupWizard.isRunning = false;
+        this.backupWizard.progressText = 'Failed to start backup: ' + err.message;
+      }
+    },
+    async updateDatabase(database) {
+      try {
+        const payload = await this.api(`/api/client/databases/${database.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: database.name, status: database.status }),
+        });
+        this.applyDatabasePayload(payload);
+        this.notify(`Database ${database.name} updated`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteDatabase(database) {
+      if (!window.confirm(`Delete database ${database.name}? Grants will be removed too.`)) return;
+      try {
+        const payload = await this.api(`/api/client/databases/${database.id}`, { method: "DELETE" });
+        this.applyDatabasePayload(payload);
+        this.notify(`Database ${database.name} deleted`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async updateDatabaseUser(user) {
+      try {
+        const payload = await this.api(`/api/client/database-users/${user.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ username: user.username, status: user.status, password: user.newPassword || "" }),
+        });
+        this.applyDatabasePayload(payload);
+        user.newPassword = "";
+        this.notify(`Database user ${user.username} updated`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteDatabaseUser(user) {
+      if (!window.confirm(`Delete database user ${user.username}? Grants will be removed too.`)) return;
+      try {
+        const payload = await this.api(`/api/client/database-users/${user.id}`, { method: "DELETE" });
+        this.applyDatabasePayload(payload);
+        this.notify(`Database user ${user.username} deleted`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async updateDatabaseGrant(grant) {
+      try {
+        const payload = await this.api(`/api/client/database-grants/${grant.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ privileges: grant.privileges, status: grant.status }),
+        });
+        this.applyDatabasePayload(payload);
+        this.notify("Database user access updated", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteDatabaseGrant(grant) {
+      try {
+        const payload = await this.api(`/api/client/database-grants/${grant.id}`, { method: "DELETE" });
+        this.applyDatabasePayload(payload);
+        this.notify("Database user access removed", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async issueSsl(site) {
+      try {
+        await this.api("/api/client/ssl/issue", {
+          method: "POST",
+          body: JSON.stringify({ website_id: site.id }),
+        });
+        this.notify(`Local SSL issued for ${site.domain}`, "success");
+        await this.load();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    openConnectWizard(site) {
+      this.connectWizard = { isOpen: true, website: site, method: "nameservers", auto_update_dns: Boolean(site.registrar_assigned), checking: false, result: null };
+    },
+    closeConnectWizard() {
+      if (!this.connectWizard.checking) this.connectWizard.isOpen = false;
+    },
+    async verifyWebsiteConnection() {
+      const wizard = this.connectWizard;
+      if (!wizard.website) return;
+      wizard.checking = true;
+      wizard.result = null;
+      try {
+        const payload = await this.api(`/api/client/websites/${wizard.website.id}/connection-check`, { method: "POST", body: JSON.stringify({ auto_update_dns: Boolean(wizard.auto_update_dns) }) });
+        wizard.result = payload;
+        if (payload.verified) {
+          this.notify("Connection verified. AutoSSL has been queued.", "success");
+          await this.load();
+        } else {
+          this.notify(payload.message || "DNS is not pointing to this hosting account yet.", "warning");
+        }
+      } catch (error) { wizard.result = { verified: false, message: error.message }; this.notify(error.message, "error"); }
+      finally { wizard.checking = false; }
+    },
+    async launch(tool, subpath = "") {
+      const paths = {
+        files: "/api/client/files/launch",
+        phpmyadmin: "/api/client/phpmyadmin/launch",
+        phppgadmin: "/api/client/phppgadmin/launch",
+      };
+      try {
+        let endpoint = paths[tool];
+        if (tool === "files" && subpath) {
+          endpoint += `?path=${encodeURIComponent(subpath)}`;
+        }
+        const payload = await this.api(endpoint);
+        if (payload.launch_url) {
+          window.open(payload.launch_url, "_blank", "noopener,noreferrer");
+        }
+        this.notify(`Launch URL: ${payload.launch_url || "not available until the stack is provisioned"}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async createBackup() {
+      try {
+        const body = this.backupSiteId !== "all" ? { website_id: Number(this.backupSiteId) } : {};
+        const payload = await this.api("/api/client/backups", { method: "POST", body: JSON.stringify(body) });
+        this.notify(`Backup #${payload.backup_id} queued`, "success");
+        await this.load();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async createBackupNow() {
+      await this.createBackup();
+    },
+    async downloadBackup(backupId) {
+      try {
+        const response = await fetch(`/api/client/backups/${backupId}/download`, {
+          headers: {
+            Accept: "application/gzip",
+            ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          },
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || "download_failed");
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `backup-${backupId}.tar.gz`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        this.notify("Backup download started.", "success");
+      } catch (err) {
+        this.notify(err.message, "error");
+      }
+    },
+    async restoreBackup(backupId) {
+      if (!confirm("Are you sure you want to restore this backup? This will overwrite your current files and databases.")) return;
+      const includeDatabase = confirm("Restore the databases from this backup too? Choose Cancel to restore website files only.");
+      try {
+        const payload = await this.api(`/api/client/backups/${backupId}/restore`, { method: "POST", body: JSON.stringify({ include_database: includeDatabase }) });
+        this.notify(`Restore job #${payload.job_id} queued`, "success");
+        setTimeout(() => this.load(), 2000);
+      } catch (err) {
+        this.notify(String(err), "error");
+      }
+    },
+    // Mailbox methods
+    openMailboxWizard() {
+      const firstDomain = (this.mailRouting.mail_domains || []).find((domain) => domain.mail_domain_id) || (this.mailRouting.mail_domains || [])[0];
+      this.mailboxWizard = { isOpen: true, mode: "create", step: 1, isCreating: false, createdMailbox: null, mailboxId: null, local_part: "", domain: firstDomain?.name || "", email: "", quota_mb: 1024, password: "", confirm_password: "", configure_dns: false, status: "active" };
+    },
+    closeMailboxWizard() {
+      if (this.mailboxWizard.isCreating) return;
+      this.mailboxWizard.isOpen = false;
+    },
+    openMailboxEditor(mailbox) {
+      this.mailboxEditor = {
+        isOpen: true,
+        isSaving: false,
+        mailboxId: mailbox.id,
+        email: mailbox.email,
+        quota_mb: mailbox.quota_mb,
+        status: mailbox.status,
+        password: "",
+        confirm_password: "",
+      };
+    },
+    async openMailboxWebmail(mailbox) {
+      if (this.launchingMailboxId) return;
+      this.launchingMailboxId = mailbox.id;
+      try {
+        const payload = await this.api(`/api/client/mailboxes/${mailbox.id}/webmail/launch`);
+        if (!payload.launch_url) {
+          throw new Error("webmail_launch_unavailable");
+        }
+        window.location.assign(payload.launch_url);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.launchingMailboxId = null;
+      }
+    },
+    openMailboxLogin(mailbox) {
+      const url = mailbox.webmail_login_url || mailbox.mailbox_login_url || mailbox.webmail_url;
+      if (!url) {
+        this.notify("Direct mailbox login is unavailable for this mailbox.", "warning");
+        return;
+      }
+      window.location.assign(url);
+    },
+    closeMailboxEditor() {
+      if (this.mailboxEditor.isSaving) return;
+      this.mailboxEditor.isOpen = false;
+    },
+    async saveMailboxEditor() {
+      if (this.mailboxEditor.isSaving) return;
+      try {
+        this.mailboxEditor.isSaving = true;
+        const payload = {
+          email: this.mailboxEditor.email,
+          quota_mb: this.mailboxEditor.quota_mb,
+          status: this.mailboxEditor.status,
+        };
+        if (this.mailboxEditor.password) {
+          payload.password = this.mailboxEditor.password;
+          payload.confirm_password = this.mailboxEditor.confirm_password;
+        }
+        const response = await this.api(`/api/client/mailboxes/${this.mailboxEditor.mailboxId}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+        Object.assign(this.mailboxEditor, { isSaving: false });
+        const idx = this.mailboxes.findIndex((mailbox) => mailbox.id === this.mailboxEditor.mailboxId);
+        if (idx !== -1 && response.mailbox) {
+          this.mailboxes.splice(idx, 1, response.mailbox);
+        } else {
+          this.mailboxes = (await this.api("/api/client/mailboxes")).mailboxes || [];
+        }
+        this.notify(`Mailbox ${this.mailboxEditor.email} updated`, "success");
+        this.mailboxEditor.isOpen = false;
+      } catch (error) {
+        this.mailboxEditor.isSaving = false;
+        this.notify(error.message, "error");
+      }
+    },
+    prevMailboxWizardStep() {
+      if (this.mailboxWizard.step > 1 && !this.mailboxWizard.isCreating) {
+        this.mailboxWizard.step -= 1;
+      }
+    },
+    nextMailboxWizardStep() {
+      if (this.mailboxWizard.isCreating) return;
+      if (this.mailboxWizard.step === 1) {
+        if (!this.mailboxWizard.local_part || !this.mailboxWizard.domain || !this.mailboxWizard.quota_mb) return;
+        this.mailboxWizard.email = `${this.mailboxWizard.local_part}@${this.mailboxWizard.domain}`;
+        this.mailboxWizard.step = 2;
+        return;
+      }
+      if (this.mailboxWizard.step === 2) {
+        if (!this.mailboxWizard.password || this.mailboxWizard.password.length < 10) return;
+        if (this.mailboxWizard.password !== this.mailboxWizard.confirm_password) return;
+        this.mailboxWizard.step = 3;
+      }
+    },
+    async createMailbox() {
+      if (this.mailboxWizard.isCreating) return;
+      if (!this.mailboxWizard.local_part || !this.mailboxWizard.domain || !this.mailboxWizard.password) return;
+      this.mailboxWizard.email = `${this.mailboxWizard.local_part}@${this.mailboxWizard.domain}`;
+      try {
+        this.mailboxWizard.isCreating = true;
+        const payload = {
+          email: this.mailboxWizard.email,
+          quota_mb: this.mailboxWizard.quota_mb,
+          password: this.mailboxWizard.password,
+          confirm_password: this.mailboxWizard.confirm_password,
+          configure_dns: this.mailboxWizard.configure_dns && !this.mailboxWizardDnsReady,
+        };
+        const response = await this.api("/api/client/mailboxes", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        this.notify(`Mailbox ${this.mailboxWizard.email} created`, "success");
+        this.mailboxWizard.isCreating = false;
+        this.mailboxWizard.createdMailbox = { id: response.mailbox_id, email: this.mailboxWizard.email };
+        this.mailboxWizard.step = 4;
+        this.mailboxWizard.password = "";
+        this.mailboxWizard.confirm_password = "";
+        this.mailboxes = (await this.api("/api/client/mailboxes")).mailboxes || [];
+        await this.loadSyncJobs();
+      } catch (error) {
+        this.mailboxWizard.isCreating = false;
+        this.notify(error.message, "error");
+      }
+    },
+    async toggleMailboxStatus(mailbox) {
+      const newStatus = mailbox.status === "suspended" ? "active" : "suspended";
+      try {
+        const payload = await this.api(`/api/client/mailboxes/${mailbox.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: newStatus }),
+        });
+        Object.assign(mailbox, payload.mailbox);
+        this.notify(`Mailbox ${mailbox.email} ${newStatus}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteMailbox(mailbox) {
+      if (!window.confirm(`Delete mailbox ${mailbox.email}? This cannot be undone.`)) return;
+      try {
+        await this.api(`/api/client/mailboxes/${mailbox.id}`, { method: "DELETE" });
+        this.mailboxes = this.mailboxes.filter((m) => m.id !== mailbox.id);
+        this.notify(`Mailbox ${mailbox.email} deleted`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // Cron job methods
+    async createCronJob() {
+      if (!this.newCronJob.command) return;
+      try {
+        const command = this.cronMode === "php" ? `php ${this.newCronJob.command.trim()}` : this.newCronJob.command.trim();
+        await this.api("/api/client/cron-jobs", {
+          method: "POST",
+          body: JSON.stringify({ schedule: this.composedCronSchedule, command }),
+        });
+        this.notify("Cron job created", "success");
+        this.newCronJob = { schedule: this.composedCronSchedule, command: "" };
+        this.cronJobs = (await this.api("/api/client/cron-jobs")).cron_jobs || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    viewCronOutput(job) {
+      this.cronOutputJob = job;
+    },
+    async toggleCronStatus(job) {
+      const newStatus = job.status === "disabled" ? "enabled" : "disabled";
+      try {
+        await this.api(`/api/client/cron-jobs/${job.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: newStatus }),
+        });
+        this.cronJobs = (await this.api("/api/client/cron-jobs")).cron_jobs || [];
+        this.notify(`Cron job ${newStatus}`, "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteCronJob(job) {
+      if (!window.confirm(`Delete this cron job? (${job.schedule} ${job.command})`)) return;
+      try {
+        await this.api(`/api/client/cron-jobs/${job.id}`, { method: "DELETE" });
+        this.cronJobs = this.cronJobs.filter((c) => c.id !== job.id);
+        this.notify("Cron job deleted", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    // Git deployment methods
+    async createGitDeployment() {
+      if (!this.newGitDeployment.repository_url || !this.newGitDeployment.website_id) return;
+      try {
+        await this.api("/api/client/git-deployments", {
+          method: "POST",
+          body: JSON.stringify(this.newGitDeployment),
+        });
+        this.notify(`Repository ${this.newGitDeployment.repository_url} connected`, "success");
+        this.newGitDeployment = { website_id: "", repository_url: "", branch: "main", access_key: "", deploy_path: "" };
+        this.gitDeployments = (await this.api("/api/client/git-deployments")).git_deployments || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async updateGitDeployment(dep) {
+      try {
+        dep.status = "updating";
+        await this.api(`/api/client/git-deployments/${dep.id}/update`, { method: "POST" });
+        this.notify(`Update queued for ${dep.repository_url}`, "success");
+        this.gitDeployments = (await this.api("/api/client/git-deployments")).git_deployments || [];
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async deleteGitDeployment(dep) {
+      if (!window.confirm(`Disconnect repository ${dep.repository_url}?`)) return;
+      try {
+        await this.api(`/api/client/git-deployments/${dep.id}`, { method: "DELETE" });
+        this.gitDeployments = this.gitDeployments.filter((d) => d.id !== dep.id);
+        this.notify("Git deployment disconnected", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    async rollbackGitDeployment(dep) {
+      if (!window.confirm(`Rollback repository ${dep.repository_url} to the previous commit?`)) return;
+      try {
+        await this.api(`/api/client/git-deployments/${dep.id}/rollback`, { method: "POST" });
+        this.gitDeployments = (await this.api("/api/client/git-deployments")).git_deployments || [];
+        this.notify("Git deployment rolled back", "success");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+    goTo(target) {
+      const isServerPage = SERVER_PAGE_TARGETS.has(target);
+      if (!isServerPage && this.isFeatureDisabled(target)) {
+        this.notify(`${this.featureStatus(target).label}: ${target}`, "error");
+        return;
+      }
+      target = normalizedClientTarget(target);
+      if (!SERVER_PAGE_TARGETS.has(target) && this.hasHostingAccount && !this.isPlanFeatureEnabled(target)) {
+        this.notify("This service is not included in your active plan", "error");
+        return;
+      }
+      if (SERVER_PAGE_TARGETS.has(target) && !this.selectedMinecraftServer) {
+        this.notify("Select an active Minecraft server first", "error");
+        return;
+      }
+      if (!this.hasHostingAccount && !["dashboard", "servers", "domains", "dns-zone-editor", "billing"].includes(target) && !(target === "minecraft" && this.hasMinecraftAccess) && !SERVER_PAGE_TARGETS.has(target)) {
+        target = "domains";
+      }
+
+      this.activePage = target;
+      this.userMenuOpen = false;
+      if (target === "hosting-plan") {
+        if (!this.hostingPlanRangeInitialized) {
+          this.resourceRange = "7d";
+          this.hostingPlanRangeInitialized = true;
+        }
+        this.loadResourceUsage();
+        if (this.resourcePoll) { window.clearInterval(this.resourcePoll); this.resourcePoll = null; }
+      } else if (target === "performance") {
+        this.refreshResourceUsage();
+        if (!this.resourcePoll) this.resourcePoll = window.setInterval(() => this.loadResourceUsage(), 10000);
+      } else if (target === "analytics") {
+        this.loadAnalytics();
+        if (this.resourcePoll) { window.clearInterval(this.resourcePoll); this.resourcePoll = null; }
+      } else if (target === "php-info") {
+        this.loadPhpInfo();
+        if (this.resourcePoll) { window.clearInterval(this.resourcePoll); this.resourcePoll = null; }
+      } else if (target === "disk-usage") {
+        this.loadDiskUsage();
+        if (this.resourcePoll) { window.clearInterval(this.resourcePoll); this.resourcePoll = null; }
+      } else if (target === "dns-zone-editor") {
+        if (!this.selectedDomainId && this.domains.length) this.selectedDomainId = this.domains[0].id;
+        this.newDnsRecord.domain_id = this.selectedDomainId;
+        this.loadDnsRecords();
+        this.loadDnsProviderOptions();
+        if (this.resourcePoll) { window.clearInterval(this.resourcePoll); this.resourcePoll = null; }
+      } else if (target === "account-sharing") {
+        this.fetchCollaborators();
+        if (this.resourcePoll) { window.clearInterval(this.resourcePoll); this.resourcePoll = null; }
+      } else {
+        if (this.resourcePoll) { window.clearInterval(this.resourcePoll); this.resourcePoll = null; }
+      }
+      window.history.pushState({}, "", pageUrl(target, this.selectedMinecraftServerId));
+      if (SERVER_PAGE_TARGETS.has(target)) {
+        if (target === "server-console") this.startMinecraftConsolePolling();
+        else this.stopMinecraftConsolePolling();
+        if (["server-overview", "server-network"].includes(target)) this.startMinecraftMetricsPolling();
+        else this.stopMinecraftMetricsPolling();
+        this.loadMinecraftServerDetails();
+        return;
+      }
+      this.stopMinecraftConsolePolling();
+    },
+    focusSearchBar() {
+      this.$nextTick(() => {
+        const searchInput = this.$refs.globalSearchInput;
+        if (searchInput) searchInput.focus();
+      });
+    },
+    chooseSearchResult(result) {
+      result.action();
+      this.searchQuery = "";
+    },
+    chooseSite(siteId) {
+      this.selectedWebsiteId = siteId;
+      this.siteSwitcherOpen = false;
+      this.siteSearchQuery = "";
+      if (this.activePage === "analytics") this.loadAnalytics();
+      if (this.activePage === "php-info") this.loadPhpInfo();
+      if (this.activePage === "cache-manager") this.loadCacheStatus(this.selectedWebsite?.id || null);
+    },
+    chooseServer(service) {
+      this.siteSwitcherOpen = false;
+      this.siteSearchQuery = "";
+      if (!service) {
+        this.selectedWebsiteId = "";
+        this.selectedMinecraftServerId = "";
+        this.selectedDatabaseId = "";
+        this.selectedApplicationServerId = "";
+        this.goTo("servers");
+        return;
+      }
+      if (service.type === "website") {
+        this.selectedWebsiteId = String(service.primary);
+        this.selectedMinecraftServerId = "";
+        this.selectedDatabaseId = "";
+        this.selectedApplicationServerId = "";
+        this.goTo("website-details");
+        return;
+      }
+      if (service.type === "minecraft") {
+        this.selectedMinecraftServerId = String(service.primary);
+        this.selectedWebsiteId = "";
+        this.selectedDatabaseId = "";
+        this.selectedApplicationServerId = "";
+        this.goTo("server-overview");
+        return;
+      }
+      if (service.type === "database") {
+        this.selectedDatabaseId = String(service.primary);
+        this.selectedWebsiteId = "";
+        this.selectedMinecraftServerId = "";
+        this.selectedApplicationServerId = "";
+        this.goTo("databases");
+        return;
+      }
+      if (service.type === "application_server") {
+        this.selectedApplicationServerId = String(service.primary);
+        this.selectedWebsiteId = "";
+        this.selectedMinecraftServerId = "";
+        this.selectedDatabaseId = "";
+        this.goTo("app-server-overview");
+        return;
+      }
+    },
+    toggleAccountSwitcher() {
+      this.accountSwitcherOpen = !this.accountSwitcherOpen;
+      if (this.accountSwitcherOpen) {
+        this.siteSwitcherOpen = false;
+        this.userMenuOpen = false;
+      }
+    },
+    async selectAccount(accountId) {
+      const nextAccountId = String(accountId);
+      if (nextAccountId === String(this.activeAccount && this.activeAccount.id)) {
+        this.accountSwitcherOpen = false;
+        this.userMenuOpen = false;
+        return;
+      }
+      try {
+        await this.api("/api/client/collaborators/switch-account", {
+          method: "POST",
+          body: JSON.stringify({ account_id: Number(accountId) }),
+        });
+        this.selectedAccountId = nextAccountId;
+        localStorage.setItem("mp_selected_account_id", nextAccountId);
+        this.loadGeneration = (this.loadGeneration || 0) + 1;
+        this.accountSwitcherOpen = false;
+        this.userMenuOpen = false;
+        await this.load();
+      } catch (error) {
+        this.notify(error.message || "Failed to switch account", "error");
+      }
+    },
+    toggleSiteSwitcher() {
+      this.siteSwitcherOpen = !this.siteSwitcherOpen;
+      this.userMenuOpen = false;
+      this.accountSwitcherOpen = false;
+    },
+    toggleUserMenu() {
+      this.userMenuOpen = !this.userMenuOpen;
+      this.siteSwitcherOpen = false;
+      this.accountSwitcherOpen = false;
+    },
+    openInstallerModal(script) {
+      this.installer.selectedScript = script;
+      this.installer.isSubmitting = false;
+      const form = {
+        website_id: "",
+        allow_overwrite: false,
+      };
+      if (script.required_fields) {
+        for (const field of script.required_fields) {
+          if (field.name === "admin_email") {
+            form[field.name] = this.currentUserEmail || field.default || "";
+          } else {
+            form[field.name] = field.default || "";
+          }
+        }
+      }
+      this.installer.form = form;
+    },
+    closeInstallerModal() {
+      this.installer.selectedScript = null;
+      this.installer.isSubmitting = false;
+    },
+    async loadSshState() {
+      try {
+        const payload = await this.api("/api/client/ssh");
+        this.sshState.enabled = !!payload.enabled;
+        this.sshState.hasPassword = !!payload.has_password;
+        this.sshState.loaded = true;
+      } catch (err) {
+        console.error("Failed to load SSH state:", err);
+      }
+    },
+    async loadFtpState() {
+      try {
+        const payload = await this.api("/api/client/ftp-access");
+        this.ftpState.enabled = !!payload.enabled;
+        this.ftpState.loaded = true;
+      } catch (err) {
+        console.error("Failed to load FTP state:", err);
+      }
+    },
+    async toggleFtpAccess() {
+      if (this.ftpState.toggling) return;
+      this.ftpState.toggling = true;
+      const targetState = !this.ftpState.enabled;
+      try {
+        const payload = await this.api("/api/client/ftp-access/toggle", {
+          method: "POST",
+          body: JSON.stringify({ enabled: targetState }),
+        });
+        this.ftpState.enabled = !!payload.enabled;
+        this.notify(targetState ? "FTP access enabled" : "FTP access disabled", "success");
+      } catch (err) {
+        this.notify(err.message || String(err), "error");
+      } finally {
+        this.ftpState.toggling = false;
+      }
+    },
+    async toggleSshAccess() {
+      if (this.sshState.toggling) return;
+      this.sshState.toggling = true;
+      const targetState = !this.sshState.enabled;
+      try {
+        const payload = await this.api("/api/client/ssh/toggle", {
+          method: "POST",
+          body: JSON.stringify({ enabled: targetState }),
+        });
+        this.sshState.enabled = !!payload.enabled;
+        this.notify(targetState ? "SSH/SFTP access enabled" : "SSH/SFTP access disabled", "success");
+      } catch (err) {
+        this.notify(String(err), "error");
+      } finally {
+        this.sshState.toggling = false;
+      }
+    },
+    async generateSshPassword() {
+      if (this.sshState.settingPassword) return;
+      this.sshState.settingPassword = true;
+      this.sshState.newPassword = null;
+      try {
+        const payload = await this.api("/api/client/ssh/password", { method: "POST", body: JSON.stringify({}) });
+        this.sshState.newPassword = payload.password;
+        this.sshState.hasPassword = true;
+        this.notify("SSH password generated successfully", "success");
+      } catch (err) {
+        this.notify("Failed to generate SSH password: " + (err.message || err), "error");
+      } finally {
+        this.sshState.settingPassword = false;
+      }
+    },
+    openSshPasswordModal() {
+      this.sshState.passwordInput = "";
+      this.sshState.passwordError = "";
+      this.sshState.passwordModal = true;
+    },
+    // Application Server methods
+    async appServerAction(action) {
+      if (!this.selectedApplicationServerId) return;
+      try {
+        const payload = await this.api(`/api/client/application-servers/${this.selectedApplicationServerId}/action`, {
+          method: "POST",
+          body: JSON.stringify({ action }),
+        });
+        this.notify(`Server ${action} successful`, "success");
+        await this.loadApplicationServers();
+      } catch (err) {
+        this.notify(err.message || String(err), "error");
+      }
+    },
+    async loadAppServerConsole() {
+      if (!this.selectedApplicationServerId) return;
+      try {
+        const payload = await this.api(`/api/client/application-servers/${this.selectedApplicationServerId}/console`);
+        this.appServerConsole = payload.logs?.map(log => `[${log.timestamp}] ${log.level}: ${log.message}`).join("\n") || "";
+      } catch (err) {
+        this.notify(err.message || String(err), "error");
+      }
+    },
+    async loadAppServerStats() {
+      if (!this.selectedApplicationServerId) return;
+      try {
+        const payload = await this.api(`/api/client/application-servers/${this.selectedApplicationServerId}/stats`);
+        this.appServerStats = payload;
+      } catch (err) {
+        this.appServerStats = null;
+      }
+    },
+    async sendAppServerCommand() {
+      if (!this.selectedApplicationServerId || !this.appServerCommand.trim()) return;
+      try {
+        await this.api(`/api/client/application-servers/${this.selectedApplicationServerId}/console`, {
+          method: "POST",
+          body: JSON.stringify({ command: this.appServerCommand }),
+        });
+        this.appServerCommand = "";
+        this.notify("Command sent", "success");
+      } catch (err) {
+        this.notify(err.message || String(err), "error");
+      }
+    },
+    async downloadAppServerConsole() {
+      if (!this.appServerConsole) {
+        this.notify("No console output to download", "error");
+        return;
+      }
+      const blob = new Blob([this.appServerConsole], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `app-server-${this.selectedApplicationServerId}-console.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+    async saveAppServerStartup() {
+      if (!this.selectedApplicationServerId || this.appServerStartupSaving) return;
+      this.appServerStartupSaving = true;
+      try {
+        await this.api(`/api/client/application-servers/${this.selectedApplicationServerId}/startup`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            runtime: this.appServerStartup.runtime,
+            main_file: this.appServerStartup.main_file,
+            install_command: this.appServerStartup.install_command,
+            start_command: this.appServerStartup.start_command,
+            build_command: this.appServerStartup.build_command,
+            environment: this.appServerStartup.environment,
+          }),
+        });
+        this.notify("Startup configuration saved", "success");
+        await this.loadApplicationServers();
+      } catch (err) {
+        this.notify(err.message || String(err), "error");
+      } finally {
+        this.appServerStartupSaving = false;
+      }
+    },
+    addAppServerEnvVar() {
+      if (!this.newEnvVarKey.trim()) {
+        this.notify("Variable name is required", "error");
+        return;
+      }
+      this.appServerStartup.environment[this.newEnvVarKey.trim()] = this.newEnvVarValue;
+      this.newEnvVarKey = "";
+      this.newEnvVarValue = "";
+    },
+    deleteAppServerEnvVar(key) {
+      delete this.appServerStartup.environment[key];
+    },
+    async saveAppServerSettings() {
+      if (!this.selectedApplicationServerId || this.appServerSettingsSaving) return;
+      this.appServerSettingsSaving = true;
+      try {
+        await this.api(`/api/client/application-servers/${this.selectedApplicationServerId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: this.appServerSettings.name }),
+        });
+        this.notify("Settings saved", "success");
+        await this.loadApplicationServers();
+      } catch (err) {
+        this.notify(err.message || String(err), "error");
+      } finally {
+        this.appServerSettingsSaving = false;
+      }
+    },
+    async loadAppServerActivity() {
+      // Activity loading will be implemented in future update
+      this.notify("Activity tracking coming soon", "info");
+    },
+    closeSshPasswordModal() {
+      this.sshState.passwordModal = false;
+      this.sshState.passwordInput = "";
+      this.sshState.passwordError = "";
+    },
+    async submitSshPassword() {
+      if (this.sshState.settingPassword || !this.sshState.passwordInput) return;
+      if (this.sshState.passwordInput.length < 8 || this.sshState.passwordInput.length > 64) {
+        this.sshState.passwordError = "Password must be 8–64 characters.";
+        return;
+      }
+      this.sshState.settingPassword = true;
+      this.sshState.passwordError = "";
+      try {
+        const payload = await this.api("/api/client/ssh/password", {
+          method: "POST",
+          body: JSON.stringify({ password: this.sshState.passwordInput }),
+        });
+        this.sshState.newPassword = payload.password;
+        this.sshState.hasPassword = true;
+        this.closeSshPasswordModal();
+        this.notify("SSH password updated successfully", "success");
+      } catch (err) {
+        this.sshState.passwordError = err.message || String(err);
+      } finally {
+        this.sshState.settingPassword = false;
+      }
+    },
+    copySshPassword() {
+      if (!this.sshState.newPassword) return;
+      navigator.clipboard.writeText(this.sshState.newPassword).then(() => {
+        this.notify("Password copied to clipboard", "success");
+      }).catch(() => {});
+    },
+
+    openSiteSslModal(website) {
+      if (!website) return;
+      this.siteSslModal.website = website;
+      this.siteSslModal.isOpen = true;
+    },
+    openWebsiteErrorModal(website) {
+      if (!website) return;
+      const error = String(website.dns_last_error || website.provider_state?.last_error || website.error || "DNS provider sync failed");
+      this.websiteErrorModal = { isOpen: true, website, error };
+    },
+    closeWebsiteErrorModal() {
+      this.websiteErrorModal = { isOpen: false, website: null, error: "" };
+    },
+    closeSiteSslModal() {
+      this.siteSslModal.isOpen = false;
+      this.siteSslModal.website = null;
+    },
+    installFreeSslFromSiteModal() {
+      const website = this.siteSslModal.website;
+      if (!website) return;
+      this.closeSiteSslModal();
+      return this.issueFreeSsl(website);
+    },
+    openCustomSslFromSiteModal() {
+      const website = this.siteSslModal.website;
+      if (!website) return;
+      this.closeSiteSslModal();
+      this.openCustomSslModal(website);
+    },
+    checkSiteSslDnsFromModal() {
+      const website = this.siteSslModal.website;
+      if (!website) return;
+      this.closeSiteSslModal();
+      return this.checkDomainSslDns(website);
+    },
+
+    openCustomSslModal(website) {
+      this.sslModal.website_id = website ? website.id : (this.websites[0]?.id || "");
+      this.sslModal.crt = "";
+      this.sslModal.key = "";
+      this.sslModal.errorMessage = "";
+      this.sslModal.isSubmitting = false;
+      this.sslModal.isOpen = true;
+    },
+    closeCustomSslModal() {
+      this.sslModal.isOpen = false;
+    },
+    async submitCustomSsl() {
+      if (!this.sslModal.website_id || !this.sslModal.crt || !this.sslModal.key || this.sslModal.isSubmitting) return;
+      this.sslModal.isSubmitting = true;
+      this.sslModal.errorMessage = "";
+      try {
+        const payload = await this.api("/api/client/ssl/custom", {
+          method: "POST",
+          body: JSON.stringify({
+            website_id: this.sslModal.website_id,
+            crt: this.sslModal.crt,
+            key: this.sslModal.key,
+          }),
+        });
+        this.notify("Custom SSL certificate installed successfully", "success");
+        this.closeCustomSslModal();
+        await this.refresh();
+      } catch (err) {
+        this.sslModal.errorMessage = String(err);
+        this.notify(String(err), "error");
+      } finally {
+        this.sslModal.isSubmitting = false;
+      }
+    },
+    async issueFreeSsl(website) {
+      if (this.issuingSsl[website.id]) return;
+      this.$set ? this.$set(this.issuingSsl, website.id, true) : (this.issuingSsl[website.id] = true);
+      try {
+        const payload = await this.api("/api/client/ssl/issue", {
+          method: "POST",
+          body: JSON.stringify({ website_id: website.id }),
+        });
+        this.notify(`Free SSL certificate queued/issued for ${website.domain}`, "success");
+        await this.refresh();
+      } catch (err) {
+        this.notify(`SSL Notice: ${err.message || err}`, "error");
+      } finally {
+        this.$set ? this.$set(this.issuingSsl, website.id, false) : (this.issuingSsl[website.id] = false);
+      }
+    },
+    async checkDomainSslDns(website) {
+      if (this.issuingSsl[website.id]) return;
+      this.$set ? this.$set(this.issuingSsl, website.id, true) : (this.issuingSsl[website.id] = true);
+      try {
+        const payload = await this.api(`/api/client/websites/${website.id}/connection-check`, {
+          method: "POST",
+        });
+        if (payload.verified) {
+          this.notify(`DNS is verified! AutoSSL queued for ${website.domain}`, "success");
+        } else {
+          this.notify(`DNS Notice for ${website.domain}: ${payload.message || "Domain DNS is not pointing to this server yet."}`, "error");
+        }
+        await this.refresh();
+      } catch (err) {
+        this.notify(String(err), "error");
+      } finally {
+        this.$set ? this.$set(this.issuingSsl, website.id, false) : (this.issuingSsl[website.id] = false);
+      }
+    },
+    async submitInstallScript() {
+      if (!this.installer.form.website_id || this.installer.isSubmitting) return;
+      const script = this.installer.selectedScript;
+      this.installer.isSubmitting = true;
+      try {
+        const body = {
+          script_id: script.id,
+          website_id: this.installer.form.website_id,
+          site_title: this.installer.form.site_title,
+          admin_username: this.installer.form.admin_username,
+          admin_email: this.installer.form.admin_email,
+          admin_password: this.installer.form.admin_password,
+          allow_overwrite: this.installer.form.allow_overwrite,
+        };
+        const payload = await this.api("/api/client/installer/install", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        this.notify(`${script.name} installation started (Job #${payload.job_id})`, "success");
+        this.installer.isSubmitting = false;
+        this.closeInstallerModal();
+        await this.refresh();
+      } catch (err) {
+        this.installer.isSubmitting = false;
+        this.notify(String(err), "error");
+      }
+    },
+    tileCick(tile) {
+      if (this.isFeatureDisabled(tile.target)) {
+        this.notify(`${tile.label} is not available yet.`, "error");
+        return;
+      }
+      if (tile.action) { tile.action(); return; }
+      this.goTo(tile.target);
+    },
+    async logout() {
+      const token = this.token || localStorage.getItem("mp_client_token") || "";
+      // Do not make navigation depend on the control-plane request completing.
+      // The server cleanup is best-effort; local credentials are cleared first.
+      const cleanup = fetch("/api/client/auth/logout", {
+        method: "POST",
+        keepalive: true,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: "same-origin",
+      });
+      this.clearSessionState();
+      window.location.href = "/login";
+      cleanup.catch((err) => console.error("API logout cleanup failed:", err));
+    },
+    async loadProfile() {
+      this.profileLoading = true;
+      try {
+        const payload = await this.api("/api/client/profile");
+        this.profileForm = payload.profile;
+        const timezone = await this.api("/api/client/settings/timezone");
+        this.accountTimezone = timezone.timezone || "UTC";
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.profileLoading = false;
+      }
+    },
+    async saveTimezone() {
+      this.timezoneSaving = true;
+      try {
+        await this.api("/api/client/settings/timezone", { method: "PATCH", body: JSON.stringify({ timezone: this.accountTimezone }) });
+        this.notify("Account timezone saved.", "success");
+        await this.loadActivity();
+      } catch (error) { this.notify(error.message, "error"); }
+      finally { this.timezoneSaving = false; }
+    },
+    async saveProfile() {
+      const emailChanged = String(this.profileForm.email || "").trim().toLowerCase() !== String(this.home?.user?.email || "").trim().toLowerCase();
+      if (emailChanged && !this.settingsForm.current_password) {
+        this.notify("Your current password is required to change the login email.", "error");
+        return;
+      }
+      if (emailChanged && this.has2FA && String(this.settingsForm.totp_code || "").trim().length !== 6) {
+        this.notify("Your current authenticator code is required to change the login email.", "error");
+        return;
+      }
+      this.profileSaving = true;
+      try {
+        const payload = await this.api("/api/client/profile", {
+          method: "PATCH",
+          body: JSON.stringify({
+            full_name: this.profileForm.full_name,
+            email: this.profileForm.email,
+            billing: this.profileForm.billing,
+            current_password: this.settingsForm.current_password,
+            totp_code: this.settingsForm.totp_code,
+          }),
+        });
+        this.profileForm = payload.profile;
+        if (this.home && this.home.user) {
+          this.home.user.full_name = payload.profile.full_name;
+          this.home.user.email = payload.profile.email;
+        }
+        this.settingsForm.current_password = "";
+        this.settingsForm.totp_code = "";
+        this.notify("Profile and billing details saved.", "success");
+        if (payload.reauth_required) this.handleSessionExpired();
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.profileSaving = false;
+      }
+    },
+    switchTheme(themeName) {
+      this.activeTheme = themeName;
+      localStorage.setItem("mp_theme", themeName);
+      const themeLink = document.getElementById("theme-style");
+      if (themeLink) {
+        themeLink.setAttribute("href", "/assets/" + themeName + ".css");
+      }
+      appToast("Theme changed to " + themeName, "success");
+    },
+    async updatePassword() {
+      const form = this.settingsForm;
+      if (!form.current_password || !form.new_password || !form.confirm_password) {
+        appToast("All password fields are required.", "error");
+        return;
+      }
+      if (form.new_password !== form.confirm_password) {
+        appToast("New password and confirm password do not match.", "error");
+        return;
+      }
+      if (form.new_password.length < 10) {
+        appToast("New password must be at least 10 characters long.", "error");
+        return;
+      }
+      if (this.has2FA && String(form.totp_code || "").trim().length !== 6) {
+        appToast("Enter your current authenticator code to change the password.", "error");
+        return;
+      }
+      this.isChangingPassword = true;
+      try {
+        const payload = await this.api("/api/client/settings/change-password", {
+          method: "POST",
+          body: JSON.stringify({
+            current_password: form.current_password,
+            new_password: form.new_password,
+            totp_code: form.totp_code,
+          }),
+        });
+        if (payload.success) {
+          appToast("Password changed successfully.", "success");
+          form.current_password = "";
+          form.new_password = "";
+          form.confirm_password = "";
+          form.totp_code = "";
+          this.handleSessionExpired();
+        }
+      } catch (err) {
+        appToast(err.message, "error");
+      } finally {
+        this.isChangingPassword = false;
+      }
+    },
+  },
+  watch: {
+    cronPreset(newVal) {
+      if (!newVal) return;
+      const [minute, hour, day, month, weekday] = newVal.split(" ");
+      this.cronSchedule = { minute, hour, day, month, weekday };
+    },
+    backupSiteId() {
+      if (this.token && this.hasHostingAccount) this.loadBackups();
+    },
+    "login.code"(newVal) {
+      const clean = String(newVal || "").trim();
+      if (clean.length === 6 && this.challengeToken) {
+        this.finishLogin();
+      }
+    },
+    challengeToken(newVal) {
+      if (newVal && String(this.login.code || "").trim().length === 6) {
+        this.$nextTick(() => {
+          this.finishLogin();
+        });
+      }
+    },
+    activePage(newVal) {
+      this.focusSearchBar();
+      const newUrl = pageUrl(newVal);
+      if (window.location.pathname !== newUrl) {
+        window.history.pushState(null, "", newUrl);
+      }
+      if (newVal === "remote-mysql" && this.remoteMysqlHosts.length === 0) {
+        this.loadRemoteMysqlHosts();
+      }
+      if (newVal === "services") {
+        if (Object.keys(this.serviceStatusMap).length === 0) {
+          this.loadServicesStatus();
+        }
+        this.loadPhpWorkerSettings();
+      }
+      if (newVal === "cache-manager") {
+        this.loadCacheStatus(this.selectedWebsite?.id || null);
+      }
+      if (newVal === "site-builder" && this.siteBuilderTemplates.length === 0) {
+        this.loadSiteBuilderTemplates();
+      }
+      if (newVal === "disk-usage" && this.diskUsage.length === 0) {
+        this.loadDiskUsage();
+      }
+      if (newVal === "php-info") {
+        this.loadPhpInfo();
+      }
+      if (newVal === "settings") {
+        this.loadProfile();
+      }
+    }
+  }
+});
+
+function setupClientTooltips() {
+  let tooltip = null;
+  let activeTarget = null;
+
+  const hide = () => {
+    if (tooltip) tooltip.remove();
+    tooltip = null;
+    activeTarget = null;
+  };
+
+  const show = (target) => {
+    const text = target.dataset.tooltip;
+    if (!text) return;
+    hide();
+    tooltip = document.createElement("div");
+    tooltip.className = "client-js-tooltip";
+    tooltip.textContent = text;
+    document.body.appendChild(tooltip);
+    activeTarget = target;
+    const rect = target.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = Math.min(
+      Math.max(8, rect.left + (rect.width - tooltipRect.width) / 2),
+      window.innerWidth - tooltipRect.width - 8,
+    );
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${Math.max(8, rect.bottom + 8)}px`;
+  };
+
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target.closest?.("[data-tooltip]");
+    if (target && target !== activeTarget) show(target);
+  });
+  document.addEventListener("mouseout", (event) => {
+    const target = event.target.closest?.("[data-tooltip]");
+    if (target && !target.contains(event.relatedTarget)) hide();
+  });
+  document.addEventListener("focusin", (event) => {
+    const target = event.target.closest?.("[data-tooltip]");
+    if (target) show(target);
+  });
+  document.addEventListener("focusout", (event) => {
+    if (!event.relatedTarget || !event.relatedTarget.closest?.("[data-tooltip]")) hide();
+  });
+  window.addEventListener("scroll", hide, true);
+  window.addEventListener("resize", hide);
+}
+
+async function initClientPortal() {
+  const urlHashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const impersonationToken = urlHashParams.get("mp_impersonation_token") || urlHashParams.get("mp_access_token");
+  if (impersonationToken) {
+    localStorage.removeItem("mp_selected_account_id");
+    try {
+      const response = await fetch("/api/client/auth/exchange-impersonation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ impersonation_token: impersonationToken }),
+      });
+      const data = await response.json();
+      if (response.ok && data.access_token) {
+        localStorage.setItem("mp_client_token", data.access_token);
+      } else {
+        localStorage.setItem("mp_client_token", impersonationToken);
+      }
+    } catch (err) {
+      console.error("Exchange impersonation token failed:", err);
+      localStorage.setItem("mp_client_token", impersonationToken);
+    } finally {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+  }
+
+  const vm = app.mount("#client-app");
+  setupClientTooltips();
+  window.appToast = function(msg, type) { vm.notify(msg, type); };
+}
+
+initClientPortal();

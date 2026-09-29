@@ -1,0 +1,2489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZeroPanel Documentation · Shared Hosting Control Plane</title>
+    <meta name="description" content="Complete single-page documentation for ZeroPanel: Installation, System Requirements, Basic Setup, Hosting Plans, Client Provisioning, Cloudflare DNS, Server Migration, and Architecture.">
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon-client.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0b0f19;
+            --surface: #151d30;
+            --surface-2: #1e2942;
+            --surface-elevated: #263556;
+            
+            --text: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --muted: #94a3b8;
+            --line: #222f4c;
+            --line-hover: #33446b;
+            
+            --brand: #fdb528;
+            --brand-strong: #e8a417;
+            --brand-ink: #8a5800;
+            --brand-tint: rgba(253, 181, 40, 0.12);
+            --brand-glow: rgba(253, 181, 40, 0.22);
+            
+            --accent: #2c3136;
+            --accent-dark: #1e2528;
+            
+            --success: #22c55e;
+            --success-ink: #86efac;
+            --success-tint: rgba(34, 197, 94, 0.12);
+            
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            --info-tint: rgba(59, 130, 246, 0.12);
+            
+            --shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+            --shadow-premium: 0 20px 45px -10px rgba(0, 0, 0, 0.5);
+            --transition: all 0.2s ease-in-out;
+            
+            --font-body: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Top Header */
+        header {
+            height: 64px;
+            padding: 0 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(21, 29, 48, 0.9);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--line);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text);
+        }
+
+        .brand-mark {
+            width: 34px;
+            height: 34px;
+            background: var(--brand);
+            color: var(--accent-dark);
+            font-weight: 800;
+            font-size: 18px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 3px 10px var(--brand-glow);
+        }
+
+        .brand-text strong {
+            font-size: 1.1rem;
+            font-weight: 800;
+        }
+
+        .brand-text small {
+            color: var(--brand);
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-left: 6px;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .btn-nav {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.45rem 0.85rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: var(--transition);
+            border: 1px solid var(--line);
+            background: var(--surface-2);
+            color: var(--text);
+        }
+
+        .btn-nav:hover {
+            border-color: var(--brand);
+            color: var(--brand);
+        }
+
+        .btn-nav-primary {
+            background: var(--brand);
+            color: var(--accent-dark);
+            border-color: var(--brand-strong);
+        }
+
+        .btn-nav-primary:hover {
+            background: var(--brand-strong);
+            color: var(--accent-dark);
+        }
+
+        /* Documentation Layout */
+        .docs-container {
+            display: grid;
+            grid-template-columns: 280px minmax(0, 1fr);
+            min-height: calc(100vh - 64px);
+        }
+
+        /* Sidebar Navigation */
+        .docs-sidebar {
+            position: sticky;
+            top: 64px;
+            height: calc(100vh - 64px);
+            overflow-y: auto;
+            background: var(--surface);
+            border-right: 1px solid var(--line);
+            padding: 1.5rem 1rem;
+        }
+
+        .docs-search {
+            margin-bottom: 1.25rem;
+            position: relative;
+        }
+
+        .docs-search input {
+            width: 100%;
+            padding: 0.55rem 0.75rem;
+            background: var(--bg);
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 0.85rem;
+            font-family: var(--font-body);
+            outline: none;
+        }
+
+        .docs-search input:focus {
+            border-color: var(--brand);
+        }
+
+        .nav-group-title {
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--brand);
+            margin: 1.25rem 0.5rem 0.5rem;
+        }
+
+        .nav-menu {
+            list-style: none;
+        }
+
+        .nav-menu li a {
+            display: block;
+            padding: 0.42rem 0.65rem;
+            color: var(--muted);
+            text-decoration: none;
+            font-size: 0.86rem;
+            font-weight: 500;
+            border-radius: 6px;
+            transition: var(--transition);
+            line-height: 1.3;
+        }
+
+        .nav-menu li a:hover,
+        .nav-menu li a.active {
+            color: var(--text);
+            background: var(--surface-2);
+        }
+
+        .nav-menu li a.active {
+            color: var(--brand);
+            font-weight: 700;
+            border-left: 2px solid var(--brand);
+            border-radius: 0 6px 6px 0;
+        }
+
+        /* Main Content Area */
+        .docs-content {
+            padding: 2.5rem 4rem 6rem;
+            max-width: 960px;
+        }
+
+        .docs-section {
+            margin-bottom: 4rem;
+            padding-bottom: 2.5rem;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .docs-section:last-child {
+            border-bottom: none;
+        }
+
+        .docs-section h1 {
+            font-size: 2.5rem;
+            font-weight: 800;
+            letter-spacing: -0.025em;
+            margin-bottom: 1rem;
+            color: var(--text);
+        }
+
+        .docs-section h2 {
+            font-size: 1.75rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin: 2rem 0 1rem;
+            color: var(--text);
+        }
+
+        .docs-section h3 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin: 1.5rem 0 0.75rem;
+            color: var(--brand);
+        }
+
+        .docs-section h4 {
+            font-size: 1rem;
+            font-weight: 700;
+            margin: 1.2rem 0 0.5rem;
+            color: var(--text);
+        }
+
+        .docs-section p {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            line-height: 1.7;
+        }
+
+        .docs-section ul, .docs-section ol {
+            margin: 0.5rem 0 1.25rem 1.5rem;
+            color: var(--text-secondary);
+        }
+
+        .docs-section li {
+            margin-bottom: 0.4rem;
+            line-height: 1.6;
+        }
+
+        /* Callout Cards & Badges */
+        .callout {
+            padding: 1.2rem 1.4rem;
+            border-radius: 10px;
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-left: 4px solid var(--brand);
+            margin: 1.25rem 0;
+        }
+
+        .callout-title {
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--brand);
+            margin-bottom: 0.4rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .callout p {
+            margin-bottom: 0;
+            font-size: 0.92rem;
+            color: var(--text-secondary);
+        }
+
+        .callout-info { border-left-color: var(--info); }
+        .callout-info .callout-title { color: var(--info); }
+
+        .callout-warning { border-left-color: var(--warning); }
+        .callout-warning .callout-title { color: var(--warning); }
+
+        /* Tables */
+        .table-wrapper {
+            overflow-x: auto;
+            margin: 1.25rem 0;
+            border-radius: 8px;
+            border: 1px solid var(--line);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: var(--surface-2);
+            color: var(--text);
+            font-weight: 700;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--line);
+        }
+
+        td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--line);
+            color: var(--text-secondary);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* Code Blocks */
+        pre {
+            background: #060911;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 1.1rem;
+            overflow-x: auto;
+            font-family: var(--font-mono);
+            font-size: 0.88rem;
+            color: #e2e8f0;
+            margin: 1rem 0 1.5rem;
+            position: relative;
+        }
+
+        code {
+            font-family: var(--font-mono);
+            font-size: 0.86rem;
+            background: var(--surface-2);
+            color: var(--brand);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            border: 1px solid var(--line);
+        }
+
+        pre code {
+            background: transparent;
+            color: inherit;
+            padding: 0;
+            border: none;
+        }
+
+        .badge-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.25rem 0.65rem;
+            background: var(--brand-tint);
+            border: 1px solid rgba(253, 181, 40, 0.3);
+            border-radius: 999px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            color: var(--brand);
+            text-transform: uppercase;
+        }
+
+        /* Responsive UI */
+        @media (max-width: 900px) {
+            .docs-container {
+                grid-template-columns: 1fr;
+            }
+            .docs-sidebar {
+                display: none;
+            }
+            .docs-content {
+                padding: 2rem 1.5rem 4rem;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <header>
+        <a href="/" class="brand">
+            <span class="brand-mark">M</span>
+            <div class="brand-text">
+                <strong>ZeroPanel</strong>
+                <small>DOCS</small>
+            </div>
+        </a>
+        <div class="header-actions">
+            <a href="/" class="btn-nav">Home</a>
+            <a href="docs.html" class="btn-nav btn-nav-primary">Docs</a>
+        </div>
+    </header>
+
+    <div class="docs-container">
+        <!-- Sidebar Navigation -->
+        <aside class="docs-sidebar">
+            <div class="docs-search">
+                <input type="text" id="menu-search" placeholder="Search documentation..." onkeyup="filterDocsNav()">
+            </div>
+            
+            <div class="nav-group-title">Getting Started</div>
+            <ul class="nav-menu">
+                <li><a href="#introduction" class="active">Introduction</a></li>
+                <li><a href="#requirements">Requirements</a></li>
+                <li><a href="#installation">Installation</a></li>
+                <li><a href="#quick-start">Quick Start</a></li>
+            </ul>
+
+            <div class="nav-group-title">Operations &amp; Setup</div>
+            <ul class="nav-menu">
+                <li><a href="#basic-setup">Basic Setup</a></li>
+                <li><a href="#admin-management">Admin Setup &amp; Recovery</a></li>
+                <li><a href="#creating-plans">Hosting Plans Setup</a></li>
+                <li><a href="#provisioning-clients">Client Provisioning</a></li>
+                <li><a href="#cloudflare-dns">Cloudflare DNS Setup</a></li>
+                <li><a href="#dns-domain-setup">Domain &amp; Subdomain DNS</a></li>
+            </ul>
+
+            <div class="nav-group-title">Architecture &amp; Data</div>
+            <ul class="nav-menu">
+                <li><a href="#current-build">Current Build Features</a></li>
+                <li><a href="#how-it-works">How It Works</a></li>
+                <li><a href="#data-layout">Data Layout</a></li>
+                <li><a href="#service-command">Service Command</a></li>
+                <li><a href="#server-migration">Server Migration</a></li>
+                <li><a href="#local-development">Local &amp; Docker Dev</a></li>
+                <li><a href="#thesis-direction">Thesis Integration</a></li>
+                <li><a href="#next-steps">Implementation Roadmap</a></li>
+            </ul>
+
+            <div class="nav-group-title">API Reference</div>
+            <ul class="nav-menu">
+                <li><a href="#client-api">Client Area API</a></li>
+                <li><a href="#admin-api">Admin API</a></li>
+                <li><a href="#reseller-api">Reseller API</a></li>
+            </ul>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="docs-content">
+
+            <!-- INTRODUCTION -->
+            <section id="introduction" class="docs-section">
+                <span class="badge-pill">Overview</span>
+                <h1>Introduction</h1>
+                <p>ZeroPanel is a lightweight, self-hosted, hPanel-style shared hosting control panel. It provides a complete web hosting control plane designed for real account stacks, queued jobs, DNS management, SSL certificates, email services, databases, file managers, and backups.</p>
+                
+                <div class="callout">
+                    <div class="callout-title">Core Philosophy</div>
+                    <p>ZeroPanel uses a zero-external-framework Python HTTP API backed by SQLite WAL mode. Desired infrastructure state is written to SQLite, while a dedicated local Node Agent processes privileged operations asynchronously.</p>
+                </div>
+
+                <h3>Key Platform Highlights</h3>
+                <ul>
+                    <li><strong>Account Isolation:</strong> One dedicated Docker Compose stack per customer account (OpenLiteSpeed, MariaDB, phpMyAdmin, Filebrowser, SFTP, Mail).</li>
+                    <li><strong>Audited Control Plane:</strong> Single SQLite database (`Zeropanel.sqlite3`) tracking users, websites, databases, mailboxes, and job logs.</li>
+                    <li><strong>Built-in Security:</strong> Signed JWT session tokens, mandatory TOTP multi-factor authentication, and short-lived launch tokens for sub-services.</li>
+                    <li><strong>Dual-Port Panel Architecture:</strong> Separate listening ports for Client (`8000`) and Admin (`8001`) to isolate administrative API routes.</li>
+                </ul>
+            </section>
+
+            <!-- REQUIREMENTS -->
+            <section id="requirements" class="docs-section">
+                <span class="badge-pill">Prerequisites</span>
+                <h1>Requirements</h1>
+                <p>Before installing ZeroPanel, ensure your server or development environment satisfies the following system specifications:</p>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Component</th>
+                                <th>Minimum Requirement</th>
+                                <th>Recommended</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Operating System</strong></td>
+                                <td>Linux (Ubuntu 22.04 / 24.04 LTS, Debian 12) or macOS</td>
+                                <td>Ubuntu 24.04 LTS Server</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Python</strong></td>
+                                <td>Python 3.10+</td>
+                                <td>Python 3.12+</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Container Engine</strong></td>
+                                <td>Docker Engine 24.0+ &amp; Docker Compose v2</td>
+                                <td>Docker Engine 26.0+</td>
+                            </tr>
+                            <tr>
+                                <td><strong>System Tools</strong></td>
+                                <td>`git`, `make`, `curl`, `tar`, `sqlite3`</td>
+                                <td>`git`, `make`, `curl`, `rsync`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Network Ports</strong></td>
+                                <td>`8000` (Client), `8001` (Admin)</td>
+                                <td>Public IPs for 80, 443, 53 (DNS), 587 (SMTP), 993 (IMAP)</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- INSTALLATION -->
+            <section id="installation" class="docs-section">
+                <span class="badge-pill">Setup</span>
+                <h1>Installation</h1>
+                <p>Choose one of the following methods to install ZeroPanel on your host system.</p>
+
+                <h3>Option A: Automated One-Line Install (Recommended)</h3>
+                <p>Fresh clone and auto-installation using `git`:</p>
+                <pre><code>git clone https://github.com/servermango/Zeropanel.git ZeroPanel &amp;&amp; cd ZeroPanel &amp;&amp; bash scripts/install.sh</code></pre>
+
+                <h3>Option B: Archive Install (If Git is unavailable)</h3>
+                <pre><code>mkdir ZeroPanel &amp;&amp; curl -fsSL https://codeload.github.com/servermango/Zeropanel/tar.gz/refs/heads/main | tar -xz -C ZeroPanel --strip-components=1 &amp;&amp; cd ZeroPanel &amp;&amp; bash scripts/install.sh</code></pre>
+
+                <h3>Option C: Manual Makefile Step-by-Step</h3>
+                <pre><code>cd ZeroPanel
+
+# 1. Install system prerequisites, Python venv, Docker tools &amp; pre-pull images
+make install
+
+# 2. Check Python, Docker, and listening ports
+make dev-init
+
+# 3. Start the client and admin panel services (seeds dev data on first run)
+make dev-up</code></pre>
+            </section>
+
+            <!-- QUICK START -->
+            <section id="quick-start" class="docs-section">
+                <span class="badge-pill">Getting Started</span>
+                <h1>Quick Start</h1>
+                <p>Once installation finishes, ZeroPanel runs as a local background daemon or development server.</p>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Interface</th>
+                                <th>URL</th>
+                                <th>Default Credentials</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Client Portal</strong></td>
+                                <td>`http://127.0.0.1:8000/`</td>
+                                <td>`owner@example.mango.test` / `ChangeMe-DevOnly-123!`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Admin Panel</strong></td>
+                                <td>`http://127.0.0.1:8001/admin`</td>
+                                <td>`admin@mango.test` / `ChangeMe-DevOnly-123!`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Client Signup</strong></td>
+                                <td>`http://127.0.0.1:8000/signup`</td>
+                                <td>Self-service client registration</td>
+                            </tr>
+                            <tr>
+                                <td><strong>System Status</strong></td>
+                                <td>`http://127.0.0.1:8000/status`</td>
+                                <td>Public platform feature state page</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout callout-info">
+                    <div class="callout-title">Development 2FA Code</div>
+                    <p>In development mode (`MP_DEV_AUTH_TEST_MODE=true`), the universal TOTP verification code is <code>000000</code>.</p>
+                </div>
+            </section>
+
+            <!-- BASIC SETUP -->
+            <section id="basic-setup" class="docs-section">
+                <span class="badge-pill">Guide</span>
+                <h1>Basic Setup</h1>
+                <p>Follow these steps to configure your initial administrative credentials, define hosting plans, and provision your first customer accounts.</p>
+
+                <h2 id="admin-management">1. Admin Setup &amp; Recovery</h2>
+                <p>When starting ZeroPanel on a fresh database with zero admins, visiting `http://<server-ip>:8001/admin` automatically routes to the <strong>First-Admin Setup Page</strong> (`/admin/setup`).</p>
+                
+                <ul>
+                    <li>Fill in the admin email address and password.</li>
+                    <li>The system generates an initial TOTP authenticator secret and displays an `otpauth://` QR code.</li>
+                    <li>Scan the QR code in Google Authenticator / 1Password and verify a code before completing setup.</li>
+                    <li>Once an admin exists, public first-admin setup is permanently locked.</li>
+                </ul>
+
+                <h4>CLI Admin Recovery Tool</h4>
+                <p>If an administrator loses password or 2FA access, run `scripts/admin_recovery.py` directly on the server host:</p>
+                <pre><code># Reset admin password
+sudo python3 scripts/admin_recovery.py --email admin@example.com --set-password
+
+# Generate new TOTP secret &amp; display QR setup URI
+sudo python3 scripts/admin_recovery.py --email admin@example.com --enable-totp
+
+# Disable TOTP requirement for emergency login
+sudo python3 scripts/admin_recovery.py --email admin@example.com --disable-totp</code></pre>
+
+                <h2 id="creating-plans">2. Creating Hosting Plans</h2>
+                <p>Before customer accounts can be provisioned, define at least one active <strong>Hosting Plan</strong> in the Admin Panel under <strong>Plans</strong> (`/admin#plans`).</p>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Plan Field</th>
+                                <th>Description</th>
+                                <th>Example Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>Name &amp; Slug</strong></td>
+                                <td>Human readable label and identifier</td>
+                                <td>`Starter Plan` (`starter`)</td>
+                            </tr>
+                            <tr>
+                                <td><strong>CPU &amp; RAM Limit</strong></td>
+                                <td>Per-account container execution limits</td>
+                                <td>`1.0 CPU` / `512 MB RAM`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Storage &amp; Inodes</strong></td>
+                                <td>Disk quota in MB and file count limit</td>
+                                <td>`10000 MB` / `250000 inodes`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Website Count</strong></td>
+                                <td>Maximum allowed hosted domains</td>
+                                <td>`5 websites`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Databases &amp; Mailboxes</strong></td>
+                                <td>Max MySQL/PostgreSQL DBs and email accounts</td>
+                                <td>`5 DBs` / `10 mailboxes`</td>
+                            </tr>
+                            <tr>
+                                <td><strong>DNS Policy</strong></td>
+                                <td>DNS provider selection (Local PowerDNS / Cloudflare)</td>
+                                <td>`Cloudflare Managed`</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h2 id="provisioning-clients">3. Provisioning Customer Clients</h2>
+                <p>Customer accounts can be created through two primary workflows:</p>
+
+                <h4>Workflow A: Self-Service Signup Page (`/signup`)</h4>
+                <ol>
+                    <li>User visits `http://<server-ip>:8000/signup`.</li>
+                    <li>Enters email, password, and selects an available hosting plan.</li>
+                    <li>API executes `POST /api/public/signup`, generates customer credentials, sets up 2FA, and assigns an account ID (e.g., `u000001`).</li>
+                </ol>
+
+                <h4>Workflow B: Admin Dashboard Provisioning</h4>
+                <ol>
+                    <li>Admin opens <strong>Admin Panel &gt; Clients</strong>.</li>
+                    <li>Clicks <strong>Create Client Account</strong>.</li>
+                    <li>Enters user email, password, and selects the hosting plan.</li>
+                    <li>The system creates the user, generates account directory structure under `user_files/accounts/<account_id>/`, and queues container deployment.</li>
+                </ol>
+            </section>
+
+            <!-- CLOUDFLARE DNS -->
+            <section id="cloudflare-dns" class="docs-section">
+                <span class="badge-pill">DNS Integration</span>
+                <h1>Cloudflare as DNS - Setup Instructions</h1>
+                <p>ZeroPanel supports Cloudflare as an authoritative DNS provider for managed domains. Configure Cloudflare credentials in the Admin panel under <strong>DNS Settings</strong>.</p>
+
+                <h3>Cloudflare API Prerequisites</h3>
+                <ul>
+                    <li><strong>Account ID:</strong> Found in the right sidebar of the Cloudflare Dashboard on any domain's Overview page.</li>
+                    <li><strong>API Token:</strong> Generated under <strong>My Profile &gt; API Tokens</strong> in Cloudflare.</li>
+                </ul>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Required Token Permissions</div>
+                    <p>The Cloudflare API Token must include these explicit permissions:<br>
+                    • <strong>Zone &gt; Zone &gt; Edit</strong> (or Zone:Read for zone verification)<br>
+                    • <strong>Zone &gt; DNS &gt; Edit</strong> (for managing DNS records)<br>
+                    • <strong>Zone &gt; Page Rules &gt; Edit</strong> (Required: allows ZeroPanel to automatically create ACME HTTP-01 challenge bypass rules for SSL Auto-Issuance on Cloudflare-proxied domains)</p>
+                </div>
+
+                <h3>Automated ACME Challenge Page Rules</h3>
+                <p>When a website is added or connected to ZeroPanel using Cloudflare DNS, ZeroPanel automatically creates a Cloudflare Page Rule targeting <code>http://*example.com/.well-known/acme-challenge/*</code> with action <code>always_use_https: off</code>. This prevents Cloudflare from redirecting Let's Encrypt HTTP ACME challenges to HTTPS port 443 before Caddy has issued an SSL certificate, eliminating <strong>HTTP 525 (SSL Handshake Failed)</strong> deadlocks.</p>
+
+                <h3>Syncing Existing Websites</h3>
+                <p>To add missing Cloudflare Page Rules to existing websites, you can use any of the following methods:</p>
+                <ul>
+                    <li><strong>API Endpoint (Client Area):</strong> <code>POST /api/client/dns/sync-cloudflare-rules</code></li>
+                    <li><strong>API Endpoint (Admin Area):</strong> <code>POST /api/admin/dns/sync-cloudflare-rules</code></li>
+                    <li><strong>CLI Script:</strong> Run <code>python scripts/sync_cloudflare_rules.py</code> on your server</li>
+                </ul>
+            </section>
+
+            <!-- DOMAIN & SUBDOMAIN DNS SETUP -->
+            <section id="dns-domain-setup" class="docs-section">
+                <span class="badge-pill">DNS Routing</span>
+                <h1>Domain &amp; Subdomain DNS Setup</h1>
+                <p>To instruct users to set up a server domain or subdomain for ZeroPanel and tool access, create DNS A-records pointing to your server's IP address.</p>
+
+                <div class="callout callout-info">
+                    <div class="callout-title">Domain Setup Example</div>
+                    <p>For example, if you want your users to reach the panel from <strong>hosting.servermango.com</strong>, create the following DNS A-records pointing to your server's public IP address:</p>
+                </div>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>Name / Host</th>
+                                <th>Target / Value</th>
+                                <th>Purpose</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>A</code></td>
+                                <td><code>hosting.servermango.com</code> (or <code>@</code>)</td>
+                                <td><code>&lt;SERVER_IP&gt;</code></td>
+                                <td>Main panel and web traffic</td>
+                            </tr>
+                            <tr>
+                                <td><code>A</code></td>
+                                <td><code>*.files.hosting.servermango.com</code> (or <code>*.files</code>)</td>
+                                <td><code>&lt;SERVER_IP&gt;</code></td>
+                                <td>Per-account Filebrowser tool subdomain routing</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <p>Once configured, access ZeroPanel at:</p>
+                <ul>
+                    <li><strong>Admin Panel:</strong> <code>http://hosting.servermango.com:8001/admin</code></li>
+                    <li><strong>Client Panel:</strong> <code>http://hosting.servermango.com:8000/client</code> (or <code>http://hosting.servermango.com:8000/</code>)</li>
+                </ul>
+            </section>
+
+            <!-- CURRENT BUILD -->
+            <section id="current-build" class="docs-section">
+                <span class="badge-pill">Architecture</span>
+                <h1>Current Build Features</h1>
+                <ul>
+                    <li>Python standard-library HTTP API with zero framework overhead.</li>
+                    <li>SQLite WAL-mode schema with versioned development seed data.</li>
+                    <li>Public client signup (`/signup`), client portal (`/`), admin panel (`/admin`), and status page (`/status`).</li>
+                    <li>Full coverage for websites, MySQL, PostgreSQL, mailboxes, SFTP, cron jobs, backups, Git deployments, and audit logs.</li>
+                    <li>Node-agent job runner with simulated and Docker Compose execution modes.</li>
+                    <li>Account-stack generator for OpenLiteSpeed, Filebrowser, phpMyAdmin, MariaDB, cron, SFTP, and shared mail scaffolding.</li>
+                </ul>
+            </section>
+
+            <!-- SERVICE COMMAND -->
+            <section id="service-command" class="docs-section">
+                <span class="badge-pill">CLI Tooling</span>
+                <h1>Service Command</h1>
+                <p>ZeroPanel includes a portable service wrapper at <code>scripts/service</code> that manages background panel processes and agent workers without requiring `systemd`:</p>
+
+                <pre><code># Service lifecycle management
+bash scripts/service Zeropanel start
+bash scripts/service Zeropanel status
+bash scripts/service Zeropanel restart
+bash scripts/service Zeropanel stop
+
+# Makefile wrapper equivalent
+make service ACTION=start
+make service ACTION=status</code></pre>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Production startup</div>
+                    <p>On a production server, run the systemd service so the panel uses Docker mode and asynchronous agent jobs. This does not delete website content:</p>
+                    <pre><code>cd /root/Zeropanel
+sudo systemctl start Zeropanel.service
+sudo systemctl status Zeropanel.service --no-pager
+
+# The service must define:
+# MP_ENV=production
+# MP_AGENT_MODE=docker</code></pre>
+                    <p>Do not start a second manual <code>python -m Zeropanel.app</code> process on ports 8000/8001.</p>
+                </div>
+            </section>
+
+            <!-- HOW IT WORKS -->
+            <section id="how-it-works" class="docs-section">
+                <span class="badge-pill">Internals</span>
+                <h1>How It Works</h1>
+                <p>Request flow in one line:</p>
+                <div class="callout callout-info">
+                    <p><strong>Browser</strong> &rarr; <strong>Panel API</strong> (writes SQLite + enqueues job) &rarr; <strong>Local Agent</strong> (provisions files &amp; containers) &rarr; <strong>Status reported back to SQLite</strong> &rarr; <strong>UI displays result</strong></p>
+                </div>
+            </section>
+
+            <!-- DATA LAYOUT -->
+            <section id="data-layout" class="docs-section">
+                <span class="badge-pill">Filesystem</span>
+                <h1>Data Layout</h1>
+                <p>All persistent control-plane state and customer hosting data lives under <code>user_files/</code>:</p>
+                <pre><code>user_files/
+  accounts/                 # per-customer hosting files  (MP_ACCOUNT_ROOT)
+    u000001/
+      account.json
+      domains/&lt;domain&gt;/public_html/
+      databases/  mail/  backups/  ssl/  git/  .runtime/
+  data/                     # control-plane database       (MP_DATA_DIR)
+    Zeropanel.sqlite3</code></pre>
+            </section>
+
+            <!-- SERVER MIGRATION -->
+            <section id="server-migration" class="docs-section">
+                <span class="badge-pill">Maintenance</span>
+                <h1>Server Migration</h1>
+                <p>Because all database state and customer files live inside `user_files/`, migration to a new server takes 5 simple steps:</p>
+
+                <ol>
+                    <li><strong>Stop Services:</strong> <code>bash scripts/service Zeropanel stop</code> on old server.</li>
+                    <li><strong>Install on New Server:</strong> Run installation script on destination machine.</li>
+                    <li><strong>Transfer `user_files/`:</strong> <code>rsync -avzP /path/to/old/user_files/ root@new-server:/path/to/new/user_files/</code></li>
+                    <li><strong>Start Services &amp; Provision Stacks:</strong> <code>bash scripts/service Zeropanel start</code> &amp; run agent stack rebuild.</li>
+                    <li><strong>Update DNS:</strong> Point A-records to the new server IP.</li>
+                </ol>
+            </section>
+
+            <!-- LOCAL DEVELOPMENT -->
+            <section id="local-development" class="docs-section">
+                <span class="badge-pill">Developer</span>
+                <h1>Local &amp; Docker Development</h1>
+                <pre><code># Start lightweight dev server (Simulated Mode)
+make dev-up
+
+# Start full Docker hosting stack (OpenLiteSpeed, MariaDB, SFTP containers)
+make dev-up-docker
+
+# Run unit tests
+make test
+
+# Run API smoke test suite
+make dev-smoke</code></pre>
+            </section>
+
+            <!-- THESIS DIRECTION -->
+            <section id="thesis-direction" class="docs-section">
+                <span class="badge-pill">Research</span>
+                <h1>Thesis Integration Direction</h1>
+                <p>ZeroPanel is evaluated as a case study for Tariq Abdullah's <strong>Cloud Definition Language (CDL)</strong> M.Tech thesis research, exploring how shared-hosting platform intent can be compiled into explainable infrastructure artifacts.</p>
+            </section>
+
+            <!-- NEXT STEPS -->
+            <section id="next-steps" class="docs-section">
+                <span class="badge-pill">Roadmap</span>
+                <h1>Implementation Roadmap</h1>
+                <ul>
+                    <li><strong>Phase 1 (Implemented):</strong> Shared interfaces and control-plane schema.</li>
+                    <li><strong>Phase 2 (Implemented):</strong> Local PowerDNS adapter, ACME provider, and mail edge scaffolding.</li>
+                    <li><strong>Phase 3 (Implemented):</strong> Hardening, auth validation, and client dashboard metrics integration.</li>
+                </ul>
+            <!-- CLIENT AREA API REFERENCE -->
+            <section id="client-api" class="docs-section">
+                <span class="badge-pill">Developer API</span>
+                <h1>Client Area API Reference &amp; Parameters</h1>
+                <p>ZeroPanel provides a clean REST API for managing websites, DNS records, databases, mailboxes, cron jobs, files, SSL, and monitoring resource usage using API keys or Bearer JWT tokens.</p>
+
+                <h3>1. API Key Guide — Client Panel</h3>
+
+                <h4>How to Generate a Client API Key</h4>
+                <p>Client API keys are <strong>scoped to a hosting account</strong>, not just a user. There are two ways to create one:</p>
+                <ul>
+                    <li><strong>In the UI:</strong> Log in to the Client Area (port <code>8000</code>), go to <strong>Account Settings &gt; API Tokens</strong>, click <strong>Generate Token</strong>, and enter a descriptive name.</li>
+                    <li><strong>Via API (authenticated session or existing token):</strong>
+                        <div class="code-block-wrapper">
+                            <pre><code>POST /api/client/api-tokens
+Content-Type: application/json
+Authorization: Bearer mp_EXISTING_TOKEN
+
+{"name": "My Automation Key"}</code></pre>
+                        </div>
+                        Response:
+                        <div class="code-block-wrapper">
+                            <pre><code>{"id": 3, "name": "My Automation Key", "token": "mp_a1b2c3d4e5f6..."}</code></pre>
+                        </div>
+                    </li>
+                </ul>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Plan Requirement: API Access Must Be Enabled</div>
+                    <p>Client API tokens will be <strong>rejected at authentication time</strong> with <code>403 api_access_disabled_for_plan</code> unless the hosting account's plan has <strong>API Access</strong> enabled (<code>allow_api_access = true</code>). An admin must enable this flag on the plan. The API also blocks token <em>creation</em> at <code>POST /api/client/api-tokens</code> if the plan flag is off.</p>
+                </div>
+
+                <h4>Token Format</h4>
+                <p>Client tokens are prefixed with <code>mp_</code> (without <code>admin</code> or <code>reseller</code> in the name), e.g. <code>mp_a1b2c3...</code>. The token is derived from <code>secrets.token_hex(32)</code> and SHA-256 hashed before storage — only shown once on creation.</p>
+
+                <h4>Token Lifetime</h4>
+                <p>Client tokens have <strong>no expiry by default</strong> (the <code>expires_at</code> field is NULL unless set). Use <code>DELETE /api/client/api-tokens/{id}</code> to revoke them.</p>
+
+                <h4>Authentication Methods</h4>
+                <div class="code-block-wrapper">
+                    <pre><code># Option A: Bearer Header (Recommended)
+Authorization: Bearer mp_YOUR_API_KEY
+
+# Option B: X-API-Key Header
+X-API-Key: mp_YOUR_API_KEY
+
+# Option C: Query Parameter
+GET /api/client/websites?api_key=mp_YOUR_API_KEY
+
+# Optional: Scope to a specific hosting account (multi-account users)
+X-Hosting-Account-ID: 2</code></pre>
+                </div>
+
+                <h4>Managing Client API Tokens via API</h4>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Method &amp; Endpoint</th><th>Description</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>GET /api/client/api-tokens</code></td><td>List all tokens for the current hosting account</td></tr>
+                            <tr><td><code>POST /api/client/api-tokens</code></td><td>Generate a new token — requires <code>{"name": "label"}</code> body</td></tr>
+                            <tr><td><code>DELETE /api/client/api-tokens/{id}</code></td><td>Revoke a token by ID</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>2. Code Snippets</h3>
+                <h4>cURL Example</h4>
+                <div class="code-block-wrapper">
+                    <pre><code># Create a new website
+curl -X POST "http://your-server:8000/api/client/websites" \
+     -H "Authorization: Bearer mp_YOUR_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"domain": "mysite.com", "php_version": "8.3"}'</code></pre>
+                </div>
+
+                <h4>Python Example</h4>
+                <div class="code-block-wrapper">
+                    <pre><code>import requests
+
+API_KEY = "mp_YOUR_API_KEY"
+BASE_URL = "http://your-server:8000"
+headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+# Add a new DNS A-record
+payload = {
+    "domain_id": 1,
+    "name": "sub",
+    "type": "A",
+    "value": "127.0.0.1",
+    "ttl": 300,
+    "proxied": True
+}
+res = requests.post(f"{BASE_URL}/api/client/dns-records", headers=headers, json=payload)
+print(res.json())</code></pre>
+                </div>
+
+                <h3>3. Complete Client Endpoint &amp; Parameter Reference</h3>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Method &amp; Endpoint</th>
+                                <th>Description</th>
+                                <th>Parameters &amp; Payload Fields</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Overview & Monitoring -->
+                            <tr>
+                                <td><code>GET /api/client/home</code></td>
+                                <td>Account overview, quotas, and resource summary</td>
+                                <td><em>None</em> (Optional query: <code>account_id</code>)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/resource-usage</code></td>
+                                <td>CPU, Memory, Disk, and Inode trend metrics</td>
+                                <td>Query: <code>range</code> (<code>30m</code> | <code>24h</code> | <code>7d</code> | <code>30d</code>)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/recalculate-usage</code></td>
+                                <td>Trigger immediate disk and inode usage recalculation</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/analytics</code></td>
+                                <td>Web access and bandwidth analytics</td>
+                                <td>Query: <code>website_id</code> (int), <code>range</code> (<code>24h</code> | <code>7d</code> | <code>30d</code>)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/php-info</code></td>
+                                <td>Fetch PHP configuration for a website</td>
+                                <td>Query: <code>website_id</code> (required, int)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/sync-jobs</code></td>
+                                <td>List background stack sync jobs for account</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Websites -->
+                            <tr>
+                                <td><code>GET /api/client/websites</code></td>
+                                <td>List all websites on account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/websites</code></td>
+                                <td>Create a new website</td>
+                                <td>
+                                    <code>domain</code> (string, required)<br>
+                                    <code>php_version</code> (string: <code>"8.1"</code>, <code>"8.2"</code>, <code>"8.3"</code>)<br>
+                                    <code>document_root</code> (string, optional)<br>
+                                    <code>index_enabled</code> (bool, default true)<br>
+                                    <code>modsec_enabled</code> (bool, default true)<br>
+                                    <code>analytics_enabled</code> (bool, default true)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/websites/{id}</code></td>
+                                <td>Update website settings</td>
+                                <td>
+                                    <code>php_version</code> (string)<br>
+                                    <code>index_enabled</code> (bool)<br>
+                                    <code>modsec_enabled</code> (bool)<br>
+                                    <code>analytics_enabled</code> (bool)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/websites/{id}</code></td>
+                                <td>Delete website and document root</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/websites/{id}/connection-check</code></td>
+                                <td>Test website OLS &amp; PHP-FPM connectivity</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/php-versions</code></td>
+                                <td>List supported server PHP versions</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Domains & DNS -->
+                            <tr>
+                                <td><code>GET /api/client/domains</code></td>
+                                <td>List account domains</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/dns/check-domain</code></td>
+                                <td>Check domain DNS availability &amp; Cloudflare zone status</td>
+                                <td><code>domain</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/dns/sync-cloudflare-rules</code></td>
+                                <td>Sync and ensure Cloudflare ACME challenge page rules for websites</td>
+                                <td><code>website_id</code> (int, optional)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/nameservers</code></td>
+                                <td>Update domain registrar nameservers</td>
+                                <td><code>nameservers</code> (array of strings, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/dns/rebuild</code></td>
+                                <td>Rebuild and publish authoritative DNS zone</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/dns/verify-nameservers</code></td>
+                                <td>Verify nameservers resolution via public DNS</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/domains/{id}/dns/export</code></td>
+                                <td>Export DNS zone file in BIND format</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/domains/{id}/dns/migrate-provider</code></td>
+                                <td>Migrate DNS provider (Local vs Cloudflare)</td>
+                                <td>
+                                    <code>provider_key</code> (string: <code>"local-dev-dns"</code>, <code>"cloudflare"</code>)<br>
+                                    <code>cloudflare_account_id</code> (int, required if Cloudflare)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/dns-records</code></td>
+                                <td>List DNS records</td>
+                                <td>Query: <code>domain_id</code> (optional int filter)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/dns-records</code></td>
+                                <td>Add a DNS record</td>
+                                <td>
+                                    <code>domain_id</code> (int, required)<br>
+                                    <code>name</code> (string, required e.g., <code>"sub"</code> or <code>"@"</code>)<br>
+                                    <code>type</code> (string: <code>"A"</code>, <code>"AAAA"</code>, <code>"CNAME"</code>, <code>"MX"</code>, <code>"TXT"</code>, <code>"NS"</code>, <code>"SRV"</code>)<br>
+                                    <code>value</code> / <code>content</code> (string, required)<br>
+                                    <code>ttl</code> (int, default 300)<br>
+                                    <code>priority</code> (int, optional for MX/SRV)<br>
+                                    <code>proxied</code> (bool, optional for Cloudflare)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/dns-records/{id}</code></td>
+                                <td>Update existing DNS record</td>
+                                <td><code>name</code>, <code>type</code>, <code>value</code>, <code>ttl</code>, <code>priority</code>, <code>proxied</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/dns-records/{id}</code></td>
+                                <td>Delete a DNS record</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Databases -->
+                            <tr>
+                                <td><code>GET /api/client/databases</code></td>
+                                <td>List MySQL / MariaDB databases</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/databases</code></td>
+                                <td>Create a MySQL database</td>
+                                <td><code>name</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/databases/{id}</code></td>
+                                <td>Delete a MySQL database</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/database-users</code></td>
+                                <td>List MySQL database users</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/database-users</code></td>
+                                <td>Create a MySQL user</td>
+                                <td>
+                                    <code>username</code> (string, required)<br>
+                                    <code>password</code> (string, minimum 8 characters)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/database-users/{id}</code></td>
+                                <td>Change MySQL user password</td>
+                                <td><code>password</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/database-users/{id}</code></td>
+                                <td>Delete a MySQL user</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/database-grants</code></td>
+                                <td>Grant MySQL user database privileges</td>
+                                <td>
+                                    <code>database_id</code> (int, required)<br>
+                                    <code>user_id</code> (int, required)<br>
+                                    <code>privileges</code> (string, default <code>"ALL"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/database-grants/{id}</code></td>
+                                <td>Revoke database user grant</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/pg-databases</code></td>
+                                <td>List PostgreSQL databases</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/pg-databases</code></td>
+                                <td>Create a PostgreSQL database</td>
+                                <td><code>name</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/pg-databases/{id}</code></td>
+                                <td>Delete a PostgreSQL database</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Email / Mailboxes -->
+                            <tr>
+                                <td><code>GET /api/client/mailboxes</code></td>
+                                <td>List email mailboxes</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/mailboxes</code></td>
+                                <td>Create an email mailbox</td>
+                                <td>
+                                    <code>email</code> (string, required e.g., <code>"user@domain.com"</code>)<br>
+                                    <code>password</code> (string, minimum 8 characters)<br>
+                                    <code>quota_mb</code> (int, default 1024)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/client/mailboxes/{id}</code></td>
+                                <td>Update mailbox password/quota</td>
+                                <td>
+                                    <code>password</code> (string, optional)<br>
+                                    <code>quota_mb</code> (int, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/mailboxes/{id}</code></td>
+                                <td>Delete an email mailbox</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/mail-forwarders</code></td>
+                                <td>List email forwarders</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/mail-forwarders</code></td>
+                                <td>Create an email forwarder</td>
+                                <td>
+                                    <code>source_email</code> (string, required)<br>
+                                    <code>destination_email</code> (string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/mail-forwarders/{id}</code></td>
+                                <td>Delete an email forwarder</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- SSH & FTP -->
+                            <tr>
+                                <td><code>GET /api/client/ssh</code></td>
+                                <td>Get SSH access status &amp; connection details</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssh/toggle</code></td>
+                                <td>Enable or disable SSH shell access</td>
+                                <td><code>enabled</code> (bool, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssh/password</code></td>
+                                <td>Change account SSH / SFTP password</td>
+                                <td><code>password</code> (string, minimum 8 characters)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/ftp-accounts</code></td>
+                                <td>List custom FTP accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ftp-accounts</code></td>
+                                <td>Create a custom FTP account</td>
+                                <td>
+                                    <code>username</code> (string, required)<br>
+                                    <code>password</code> (string, minimum 8 characters)<br>
+                                    <code>path</code> (string, relative directory path)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/ftp-accounts/{id}</code></td>
+                                <td>Delete an FTP account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/files/launch</code></td>
+                                <td>Generate single sign-on URL for File Manager</td>
+                                <td>Query: <code>path</code> (optional directory path)</td>
+                            </tr>
+
+                            <!-- Cron Jobs, SSL, Security & Tools -->
+                            <tr>
+                                <td><code>GET /api/client/cron-jobs</code></td>
+                                <td>List scheduled cron jobs</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/cron-jobs</code></td>
+                                <td>Create a scheduled cron job</td>
+                                <td>
+                                    <code>schedule</code> (string, standard 5-part cron syntax e.g. <code>"0 * * * *"</code>)<br>
+                                    <code>command</code> (string, required e.g. <code>"php /home/public_html/cron.php"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/cron-jobs/{id}</code></td>
+                                <td>Delete a cron job</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssl/issue</code></td>
+                                <td>Issue Let's Encrypt SSL certificate for a website</td>
+                                <td><code>website_id</code> (int, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ssl/custom</code></td>
+                                <td>Install custom SSL certificate</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>certificate</code> (PEM string, required)<br>
+                                    <code>private_key</code> (PEM string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/backups</code></td>
+                                <td>List website backup archives</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/backups</code></td>
+                                <td>Create a full website backup archive</td>
+                                <td><code>website_id</code> (int, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/hotlink-protection</code></td>
+                                <td>Configure image hotlink protection</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>enabled</code> (bool, required)<br>
+                                    <code>allowed_domains</code> (array of strings)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/ip-blocking</code></td>
+                                <td>Configure IP blocking rules</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>blocked_ips</code> (array of IP strings)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/directory-privacy</code></td>
+                                <td>Password protect a website directory (.htpasswd)</td>
+                                <td>
+                                    <code>website_id</code> (int, required)<br>
+                                    <code>path</code> (string, relative directory path)<br>
+                                    <code>username</code> (string, required)<br>
+                                    <code>password</code> (string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/client/api-tokens</code></td>
+                                <td>List generated Client API keys</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/client/api-tokens</code></td>
+                                <td>Generate a new Client API key</td>
+                                <td><code>name</code> (string, required descriptive label)</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/client/api-tokens/{id}</code></td>
+                                <td>Revoke/delete a Client API key</td>
+                                <td><em>None</em></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- ADMIN API -->
+            <section id="admin-api" class="docs-section">
+                <span class="badge-pill">Admin Panel</span>
+                <h1>Admin API</h1>
+                <p>The Admin API is available on port <code>8001</code> and is accessible only to authenticated admin accounts. All endpoints are prefixed with <code>/api/admin/</code>. Authenticate using a long-lived API token generated from the Admin panel.</p>
+
+                <h3>API Key Guide — Admin Panel</h3>
+
+                <h4>How to Generate an Admin API Key</h4>
+                <p>Admin API keys are <strong>scoped to the individual admin account</strong> that created them. There are two ways to create one:</p>
+                <ul>
+                    <li><strong>In the UI:</strong> Log in to the Admin Panel (port <code>8001</code>), go to <strong>Settings &gt; API Tokens</strong>, click <strong>Generate Token</strong>, enter a name and optional permission scopes.</li>
+                    <li><strong>Via API (requires an active admin session or existing <code>admins.manage</code> token):</strong>
+                        <div class="code-block-wrapper">
+                            <pre><code>POST /api/admin/api-tokens
+Content-Type: application/json
+Authorization: Bearer mp_admin_EXISTING_TOKEN
+
+{"name": "CI/CD Pipeline Key", "permissions": ["clients.manage", "hosting.manage"]}</code></pre>
+                        </div>
+                        Response (token is shown <strong>only once</strong>):
+                        <div class="code-block-wrapper">
+                            <pre><code>{"id": 5, "name": "CI/CD Pipeline Key", "token": "mp_admin_a1b2c3d4...", "permissions": ["clients.manage", "hosting.manage"]}</code></pre>
+                        </div>
+                    </li>
+                </ul>
+
+                <div class="callout callout-warning">
+                    <div class="callout-title">Requires <code>admins.manage</code> Permission</div>
+                    <p>Creating or deleting Admin API tokens via <code>POST /api/admin/api-tokens</code> requires the acting admin to hold the <code>admins.manage</code> permission (or the wildcard <code>*</code> / <code>all</code>). <code>super_admin</code> accounts always pass this check. <code>system_admin</code> and <code>support_admin</code> roles do not hold this permission by default.</p>
+                </div>
+
+                <h4>Token Format</h4>
+                <p>Admin tokens are prefixed with <code>mp_admin_</code> (e.g. <code>mp_admin_a1b2c3...</code>). The prefix is used at authentication time to route the request to the correct token table. The raw hex suffix is SHA-256 hashed before storage — only shown once on creation.</p>
+
+                <h4>Token Lifetime</h4>
+                <p>Admin tokens have <strong>no expiry by default</strong> (the <code>expires_at</code> column is NULL unless explicitly set). Revoke with <code>DELETE /api/admin/api-tokens/{id}</code>. <code>last_used_at</code> is updated on every successful request.</p>
+
+                <h4>Authentication Method</h4>
+                <div class="code-block-wrapper">
+                    <pre><code># Bearer header (only supported method for admin tokens)
+Authorization: Bearer mp_admin_YOUR_API_KEY
+
+# X-API-Key header also accepted
+X-API-Key: mp_admin_YOUR_API_KEY
+
+# Query parameter also accepted
+GET /api/admin/dashboard?api_key=mp_admin_YOUR_API_KEY</code></pre>
+                </div>
+
+                <h4>Permission Scopes (for API Token Access Control)</h4>
+                <p>When creating an Admin API token you can restrict it to a subset of operations by passing a <code>permissions</code> array. The available permission strings are:</p>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Permission</th><th>Grants Access To</th><th>Default for Role</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>*</code> or <code>all</code></td><td>Full admin access (wildcard)</td><td><code>super_admin</code></td></tr>
+                            <tr><td><code>clients.manage</code></td><td>Create, update, delete, impersonate clients</td><td><code>system_admin</code></td></tr>
+                            <tr><td><code>clients.read</code></td><td>Read-only access to client data</td><td><code>support_admin</code></td></tr>
+                            <tr><td><code>hosting.manage</code></td><td>Provision, suspend, unsuspend, change plans</td><td><code>system_admin</code></td></tr>
+                            <tr><td><code>hosting.read</code></td><td>Read-only access to hosting accounts</td><td><code>support_admin</code></td></tr>
+                            <tr><td><code>dns.manage</code></td><td>DNS settings, domain operations</td><td><code>system_admin</code></td></tr>
+                            <tr><td><code>dns.read</code></td><td>Read-only DNS data</td><td><code>support_admin</code></td></tr>
+                            <tr><td><code>system.manage</code></td><td>Storage, networking, nodes, agent, status page</td><td><code>system_admin</code></td></tr>
+                            <tr><td><code>admins.manage</code></td><td>Create admins, manage API tokens, manage 2FA</td><td><em>super_admin only</em></td></tr>
+                            <tr><td><code>plans.manage</code></td><td>Create and update hosting plans and reseller plans</td><td><code>system_admin</code></td></tr>
+                            <tr><td><code>impersonate</code></td><td>Login-as a client or reseller</td><td><em>super_admin only</em></td></tr>
+                            <tr><td><code>billing.manage</code></td><td>Billing-related operations</td><td><code>system_admin</code></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p>A token's effective permission is the <strong>intersection</strong> of the token's own <code>permissions</code> array and the admin's role permissions. Granting <code>["*"]</code> on a <code>support_admin</code> token still limits it to the role's base permissions.</p>
+
+                <h4>Managing Admin API Tokens via API</h4>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Method &amp; Endpoint</th><th>Description</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>GET /api/admin/api-tokens</code></td><td>List tokens belonging to the authenticated admin</td></tr>
+                            <tr><td><code>POST /api/admin/api-tokens</code></td><td>Create a new token — <code>admins.manage</code> required</td></tr>
+                            <tr><td><code>DELETE /api/admin/api-tokens/{id}</code></td><td>Revoke a token by ID — <code>admins.manage</code> required</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3>Admin API Endpoint Reference</h3>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Method &amp; Endpoint</th>
+                                <th>Description</th>
+                                <th>Parameters &amp; Payload Fields</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Authentication -->
+                            <tr>
+                                <td><code>POST /api/admin/auth/login</code></td>
+                                <td>Authenticate admin and obtain a session token</td>
+                                <td>
+                                    <code>email</code> (string, required)<br>
+                                    <code>password</code> (string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/auth/totp/verify</code></td>
+                                <td>Verify TOTP 2FA code to complete login</td>
+                                <td><code>code</code> (string, 6-digit TOTP)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/auth/logout</code></td>
+                                <td>Invalidate the current admin session</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Dashboard -->
+                            <tr>
+                                <td><code>GET /api/admin/dashboard</code></td>
+                                <td>Admin dashboard overview with counts, jobs, and system stats</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/users</code></td>
+                                <td>List all client users</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/account-stacks</code></td>
+                                <td>List all account Docker Compose stacks with runtime state</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Clients -->
+                            <tr>
+                                <td><code>GET /api/admin/clients</code></td>
+                                <td>List all clients with hosting account details</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/clients</code></td>
+                                <td>Create a new client account</td>
+                                <td>
+                                    <code>email</code> (string, required)<br>
+                                    <code>password</code> (string, min 8 chars)<br>
+                                    <code>full_name</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/clients/{id}</code></td>
+                                <td>Update client email, name, or status</td>
+                                <td>
+                                    <code>email</code> (string, optional)<br>
+                                    <code>full_name</code> (string, optional)<br>
+                                    <code>status</code> (<code>"active"</code> | <code>"suspended"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/clients/{id}</code></td>
+                                <td>Delete a client and all associated resources</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/clients/{id}/login-as</code></td>
+                                <td>Impersonate a client and get a redirect URL to their panel</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Hosting Accounts -->
+                            <tr>
+                                <td><code>GET /api/admin/hosting-accounts</code></td>
+                                <td>List all hosting accounts with plan and node details</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/hosting-accounts</code></td>
+                                <td>Provision a new hosting account for a client</td>
+                                <td>
+                                    <code>user_id</code> (int, required)<br>
+                                    <code>plan_id</code> (int, required)<br>
+                                    <code>node_id</code> (int, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/hosting-accounts/{id}/suspend</code></td>
+                                <td>Suspend a hosting account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/hosting-accounts/{id}/unsuspend</code></td>
+                                <td>Unsuspend a previously suspended hosting account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/hosting-accounts/{id}/plan</code></td>
+                                <td>Change a hosting account's plan</td>
+                                <td><code>plan_id</code> (int, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/hosting-accounts/{id}/dns-provider</code></td>
+                                <td>Override DNS provider for a specific hosting account</td>
+                                <td>
+                                    <code>dns_provider</code> (string: <code>"local-dev-dns"</code> | <code>"cloudflare"</code>)<br>
+                                    <code>dns_provider_account_id</code> (int, optional)
+                                </td>
+                            </tr>
+
+                            <!-- Plans -->
+                            <tr>
+                                <td><code>GET /api/admin/plans</code></td>
+                                <td>List all hosting plans</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/plans</code></td>
+                                <td>Create a new hosting plan</td>
+                                <td>
+                                    <code>name</code> (string, required)<br>
+                                    <code>storage_mb</code> (int)<br>
+                                    <code>memory_mb</code> (int)<br>
+                                    <code>cpu_limit</code> (float)<br>
+                                    <code>max_websites</code> (int)<br>
+                                    <code>max_databases</code> (int)<br>
+                                    <code>max_mailboxes</code> (int)<br>
+                                    <code>max_cron_jobs</code> (int)<br>
+                                    <code>dns_default_provider</code> (string)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/plans/{id}</code></td>
+                                <td>Update an existing hosting plan</td>
+                                <td>
+                                    Same fields as POST plus:<br>
+                                    <code>apply_to_existing_accounts</code> (bool)<br>
+                                    <code>migrate_existing_domains</code> (bool)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/plans/{id}/recalculate_usage</code></td>
+                                <td>Queue usage recalculation job for a specific plan</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/plans/recalculate_usage</code></td>
+                                <td>Queue usage recalculation for all plans (or specific plan)</td>
+                                <td><code>plan_id</code> (int, optional)</td>
+                            </tr>
+
+                            <!-- Nodes -->
+                            <tr>
+                                <td><code>GET /api/admin/nodes</code></td>
+                                <td>List all registered server nodes</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/nodes</code></td>
+                                <td>Register a new server node</td>
+                                <td>
+                                    <code>name</code> (string, required)<br>
+                                    <code>hostname</code> (string, required)<br>
+                                    <code>quota_backend</code> (string, default <code>"dev-simulator"</code>)
+                                </td>
+                            </tr>
+
+                            <!-- Admins -->
+                            <tr>
+                                <td><code>GET /api/admin/admins</code></td>
+                                <td>List all admin accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/admins</code></td>
+                                <td>Create a new admin account</td>
+                                <td>
+                                    <code>email</code> (string, required)<br>
+                                    <code>password</code> (string, min 8 chars)<br>
+                                    <code>full_name</code> (string, optional)<br>
+                                    <code>role</code> (<code>"support_admin"</code> | <code>"system_admin"</code> | <code>"super_admin"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/admins/{id}/reset-password</code></td>
+                                <td>Reset an admin account's password</td>
+                                <td><code>password</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/admins/{id}/disable-2fa</code></td>
+                                <td>Disable TOTP 2FA for an admin account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/admins/{id}/enable-2fa</code></td>
+                                <td>Enable and re-generate TOTP secret for an admin</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- API Tokens -->
+                            <tr>
+                                <td><code>GET /api/admin/api-tokens</code></td>
+                                <td>List Admin API tokens for the authenticated admin</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/api-tokens</code></td>
+                                <td>Generate a new Admin API token</td>
+                                <td>
+                                    <code>name</code> (string, required)<br>
+                                    <code>permissions</code> (array of strings, default <code>["*"]</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/api-tokens/{id}</code></td>
+                                <td>Revoke an Admin API token</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Reseller Plans -->
+                            <tr>
+                                <td><code>GET /api/admin/reseller-plans</code></td>
+                                <td>List all reseller plans</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/reseller-plans</code></td>
+                                <td>Create a new reseller plan</td>
+                                <td>
+                                    <code>name</code> (string, required)<br>
+                                    <code>max_storage_mb</code> (int, default 50000)<br>
+                                    <code>max_clients</code> (int, default 10)<br>
+                                    <code>max_hosting_accounts</code> (int, default 20)<br>
+                                    <code>max_ram_mb</code> (int, default 8192)<br>
+                                    <code>max_websites</code> (int, default 50)<br>
+                                    <code>max_databases</code> (int, default 50)<br>
+                                    <code>max_subplans</code> (int, default 10)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/reseller-plans/{id}</code></td>
+                                <td>Update a reseller plan</td>
+                                <td>Same fields as POST</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/reseller-plans/{id}</code></td>
+                                <td>Delete a reseller plan</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Reseller Users -->
+                            <tr>
+                                <td><code>GET /api/admin/reseller-users</code></td>
+                                <td>List all reseller users</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/reseller-users</code></td>
+                                <td>Create a new reseller user</td>
+                                <td>
+                                    <code>email</code> (string, required)<br>
+                                    <code>password</code> (string, min 8 chars)<br>
+                                    <code>full_name</code> (string, optional)<br>
+                                    <code>reseller_plan_id</code> (int, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/reseller-users/{id}</code></td>
+                                <td>Update reseller user status, name, or plan</td>
+                                <td>
+                                    <code>status</code> (<code>"active"</code> | <code>"suspended"</code>)<br>
+                                    <code>full_name</code> (string, optional)<br>
+                                    <code>reseller_plan_id</code> (int, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/reseller-users/{id}</code></td>
+                                <td>Delete a reseller user account</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/reseller-users/{id}/login-as</code></td>
+                                <td>Impersonate a reseller and get a redirect URL to their panel</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- DNS & Domains -->
+                            <tr>
+                                <td><code>GET /api/admin/dns-settings</code></td>
+                                <td>Get global DNS provider configuration</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/dns-settings</code></td>
+                                <td>Update global DNS provider settings</td>
+                                <td>DNS provider configuration payload</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/domains</code></td>
+                                <td>List all domains across all accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/domains</code></td>
+                                <td>Add a domain for a client account</td>
+                                <td>
+                                    <code>user_id</code> (int, required)<br>
+                                    <code>domain</code> (string, required)<br>
+                                    <code>account_id</code> (int, optional)<br>
+                                    <code>register</code> (bool, trigger registrar registration)<br>
+                                    <code>registrar_provider_id</code> (int, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/domains/{id}/dns/rebuild</code></td>
+                                <td>Rebuild and publish the authoritative DNS zone for a domain</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/domains/{id}/dns/verify-nameservers</code></td>
+                                <td>Verify nameserver propagation via public DNS</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/domains/{id}/dns/export</code></td>
+                                <td>Export DNS zone in BIND format</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/domains/{id}/dns/migrate-provider</code></td>
+                                <td>Migrate a domain to a different DNS provider</td>
+                                <td>
+                                    <code>dns_provider</code> (string: <code>"local-dev-dns"</code> | <code>"cloudflare"</code>)<br>
+                                    <code>dns_provider_account_id</code> (int, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/domains/dns/bulk-migrate-provider</code></td>
+                                <td>Bulk migrate all (or selected) domains to a new DNS provider</td>
+                                <td>
+                                    <code>dns_provider</code> (string, required)<br>
+                                    <code>domain_ids</code> (array of ints, optional)<br>
+                                    <code>all</code> (bool, migrate all domains)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/domains/{id}/registrar-nameservers</code></td>
+                                <td>Update domain nameservers via the registrar API</td>
+                                <td><code>nameservers</code> (array of 2–4 nameserver strings)</td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/registrars</code></td>
+                                <td>List all configured domain registrar providers</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/registrars/{key}</code></td>
+                                <td>Configure a registrar provider (e.g. <code>resellerclub</code>)</td>
+                                <td>
+                                    <code>api_key</code> (string, required)<br>
+                                    <code>settings</code> (object, provider-specific)<br>
+                                    <code>reseller_id</code> (string, required for ResellerClub)
+                                </td>
+                            </tr>
+
+                            <!-- Cloudflare DNS Accounts & Rules -->
+                            <tr>
+                                <td><code>POST /api/admin/dns/sync-cloudflare-rules</code></td>
+                                <td>Sync and ensure missing Cloudflare ACME challenge page rules system-wide</td>
+                                <td><code>website_id</code> (int, optional)<br><code>account_id</code> (int, optional)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/dns-providers/cloudflare/accounts</code></td>
+                                <td>Add a Cloudflare account for DNS management</td>
+                                <td>
+                                    <code>display_name</code> (string, required)<br>
+                                    <code>api_token</code> (string, required)<br>
+                                    <code>account_name</code> (string, optional)<br>
+                                    <code>external_account_id</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/dns-providers/cloudflare/accounts/{id}</code></td>
+                                <td>Update a Cloudflare account configuration</td>
+                                <td>
+                                    <code>display_name</code> (string)<br>
+                                    <code>api_token</code> (string, optional – rotates token)<br>
+                                    <code>status</code> (<code>"active"</code> | <code>"disabled"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/dns-providers/cloudflare/accounts/{id}</code></td>
+                                <td>Remove a Cloudflare account (must not be in use by any plan)</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/dns-providers/cloudflare/accounts/{id}/migrate-local</code></td>
+                                <td>Migrate all domains in a Cloudflare account to local PowerDNS</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/dns-providers/{id}/test</code></td>
+                                <td>Test DNS provider connectivity and credentials</td>
+                                <td><code>provider_account_id</code> (int, optional)</td>
+                            </tr>
+
+                            <!-- Storage -->
+                            <tr>
+                                <td><code>GET /api/admin/storage/df</code></td>
+                                <td>Get server disk filesystem usage summary</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/storage/live</code></td>
+                                <td>Get live disk I/O read/write metrics</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/storage/live/stream</code></td>
+                                <td>Server-Sent Events stream of live disk I/O metrics</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/storage/quotas</code></td>
+                                <td>List per-account storage quota usage</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/storage/paths</code></td>
+                                <td>Get size breakdown by major filesystem paths</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/storage/cleanup</code></td>
+                                <td>Run storage cleanup for Docker, logs, and temp files</td>
+                                <td>
+                                    <code>clean_docker</code> (bool, default true)<br>
+                                    <code>clean_logs</code> (bool, default true)<br>
+                                    <code>clean_tmp</code> (bool, default true)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/storage/alerts</code></td>
+                                <td>Get storage alert threshold settings</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/storage/alerts</code></td>
+                                <td>Update storage alert threshold settings</td>
+                                <td>Storage alert configuration payload</td>
+                            </tr>
+
+                            <!-- Networking -->
+                            <tr>
+                                <td><code>GET /api/admin/network/overview</code></td>
+                                <td>Network overview including interface stats</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/network/live</code></td>
+                                <td>Live network I/O throughput metrics</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/network/live/stream</code></td>
+                                <td>Server-Sent Events stream of live network I/O</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/network/ips</code></td>
+                                <td>List all registered server IP addresses</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/network/ips</code></td>
+                                <td>Add a new server IP address</td>
+                                <td>IP address configuration payload</td>
+                            </tr>
+                            <tr>
+                                <td><code>PUT /api/admin/network/ips/{id}</code></td>
+                                <td>Update a server IP address record</td>
+                                <td>IP address configuration payload</td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/network/ips/{id}</code></td>
+                                <td>Remove a server IP address record</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/network/assign-account-ip</code></td>
+                                <td>Assign (or clear) a dedicated IP for a hosting account</td>
+                                <td>
+                                    <code>account_id</code> (int, required)<br>
+                                    <code>ip_id</code> (int, optional – omit to clear)
+                                </td>
+                            </tr>
+
+                            <!-- Jobs & Agent -->
+                            <tr>
+                                <td><code>GET /api/admin/jobs</code></td>
+                                <td>List recent background agent jobs (last 100)</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/job-events</code></td>
+                                <td>List recent job event log entries (last 100)</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/jobs/{id}/retry</code></td>
+                                <td>Retry a failed or queued agent job</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/agent/run-once</code></td>
+                                <td>Trigger the agent to process one pending job</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/agent/run-all</code></td>
+                                <td>Trigger the agent to process all pending jobs</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Security & Audit -->
+                            <tr>
+                                <td><code>GET /api/admin/security/audit</code></td>
+                                <td>Run and return a live server security audit report</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/audit-logs</code></td>
+                                <td>List audit log entries (last 100)</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- System -->
+                            <tr>
+                                <td><code>GET /api/admin/system/default-page</code></td>
+                                <td>Get the default landing page HTML content</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/system/default-page</code></td>
+                                <td>Set custom default landing page HTML content</td>
+                                <td><code>default_page_content</code> (string HTML, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/system/default-page/reset</code></td>
+                                <td>Reset the default landing page to the system default</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Status Page -->
+                            <tr>
+                                <td><code>GET /api/admin/status</code></td>
+                                <td>Get the public status page payload including health checks</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/status/incidents</code></td>
+                                <td>Create a new status incident</td>
+                                <td>
+                                    <code>title</code> (string, required)<br>
+                                    <code>severity</code> (<code>"minor"</code> | <code>"major"</code> | <code>"critical"</code>)<br>
+                                    <code>state</code> (<code>"investigating"</code> | <code>"identified"</code> | <code>"monitoring"</code> | <code>"resolved"</code>)<br>
+                                    <code>message</code> (string, optional)<br>
+                                    <code>published</code> (bool, default true)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/admin/status/incidents</code></td>
+                                <td>List all status incidents with their update history</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/status/incidents/{id}</code></td>
+                                <td>Update an incident's title, severity, state, or visibility</td>
+                                <td>
+                                    <code>title</code> (string)<br>
+                                    <code>severity</code> (string)<br>
+                                    <code>state</code> (string)<br>
+                                    <code>published</code> (bool)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/admin/status/incidents/{id}</code></td>
+                                <td>Delete a status incident and all its updates</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/status/incidents/{id}/updates</code></td>
+                                <td>Add an update to an existing incident</td>
+                                <td>
+                                    <code>state</code> (string, required)<br>
+                                    <code>message</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/status/maintenance</code></td>
+                                <td>Schedule a maintenance window</td>
+                                <td>
+                                    <code>title</code> (string, required)<br>
+                                    <code>state</code> (<code>"scheduled"</code> | <code>"in_progress"</code> | <code>"completed"</code>)<br>
+                                    <code>starts_at</code> (datetime string)<br>
+                                    <code>ends_at</code> (datetime string)<br>
+                                    <code>message</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/status/maintenance/{id}</code></td>
+                                <td>Update the state or message of a maintenance window</td>
+                                <td>
+                                    <code>state</code> (string, optional)<br>
+                                    <code>message</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/status/components</code></td>
+                                <td>Update a status page component's health status</td>
+                                <td>
+                                    <code>component_id</code> (int or string)<br>
+                                    <code>status</code> (<code>"operational"</code> | <code>"degraded"</code> | <code>"partial_outage"</code> | <code>"major_outage"</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/admin/status/components/{id}</code></td>
+                                <td>Update a specific status component by ID</td>
+                                <td><code>status</code> (string, required)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/admin/status/checks/{id}/run</code></td>
+                                <td>Manually trigger a status health check</td>
+                                <td><em>None</em></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- RESELLER API -->
+            <section id="reseller-api" class="docs-section">
+                <span class="badge-pill">Reseller Panel</span>
+                <h1>Reseller API</h1>
+                <p>The Reseller API is available on port <code>8002</code> (or the configured reseller port) and is accessible to reseller accounts. All endpoints are prefixed with <code>/api/reseller/</code>. Authenticate using a long-lived Reseller API token.</p>
+
+                <h3>API Key Guide — Reseller Panel</h3>
+
+                <h4>How to Generate a Reseller API Key</h4>
+                <p>Reseller API keys are <strong>scoped to the reseller user account</strong>. There are two ways to create one:</p>
+                <ul>
+                    <li><strong>In the UI:</strong> Log in to the Reseller Panel (port <code>8002</code>), go to <strong>Settings &gt; API Tokens</strong> (shown under the Admins page), click <strong>Generate Token</strong>, and enter a name.</li>
+                    <li><strong>Via API (requires an active reseller session or existing reseller token):</strong>
+                        <div class="code-block-wrapper">
+                            <pre><code>POST /api/reseller/api-tokens
+Content-Type: application/json
+Authorization: Bearer mp_reseller_EXISTING_TOKEN
+
+{"name": "Provisioning Bot", "permissions": ["*"]}</code></pre>
+                        </div>
+                        Response (token is shown <strong>only once</strong>):
+                        <div class="code-block-wrapper">
+                            <pre><code>{"token_id": 2, "token": "mp_reseller_a1b2c3d4...", "name": "Provisioning Bot"}</code></pre>
+                        </div>
+                    </li>
+                </ul>
+
+                <h4>Token Format</h4>
+                <p>Reseller tokens are prefixed with <code>mp_reseller_</code> (e.g. <code>mp_reseller_a1b2c3...</code>). The prefix routes the token to the <code>reseller_api_tokens</code> table at authentication time. The raw 20-byte hex suffix is SHA-256 hashed before storage — only shown once on creation.</p>
+
+                <h4>Token Lifetime</h4>
+                <p>Reseller tokens are created with an expiry of <strong>365 days from creation</strong> (<code>expires_at = now + 31536000</code>). After expiry the server returns <code>401 reseller_api_token_expired</code>. Generate a new token to replace an expired one.</p>
+
+                <h4>Authentication Methods</h4>
+                <div class="code-block-wrapper">
+                    <pre><code># Bearer header (recommended)
+Authorization: Bearer mp_reseller_YOUR_API_KEY
+
+# X-API-Key header also accepted
+X-API-Key: mp_reseller_YOUR_API_KEY
+
+# Query parameter also accepted
+GET /api/reseller/dashboard?api_key=mp_reseller_YOUR_API_KEY</code></pre>
+                </div>
+
+                <h4>Permission Scopes</h4>
+                <p>When creating a Reseller API token you can pass a <code>permissions</code> array to narrow its scope. Reseller tokens do not map to named roles — the <code>permissions</code> field is stored as a JSON array and compared directly. Use <code>["*"]</code> for full reseller access.</p>
+                <div class="callout">
+                    <div class="callout-title">Reseller Scope Is Always Enforced</div>
+                    <p>Regardless of the token's permission array, all reseller routes are automatically scoped to <em>resources owned by that reseller</em>. A reseller token can never read or modify another reseller's clients, plans, or accounts. The <code>reseller_id</code> from the authenticated token is injected into every query.</p>
+                </div>
+
+                <h4>Managing Reseller API Tokens via API</h4>
+                <div class="table-wrapper">
+                    <table>
+                        <thead><tr><th>Method &amp; Endpoint</th><th>Description</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>GET /api/reseller/api-tokens</code></td><td>List all tokens for the authenticated reseller</td></tr>
+                            <tr><td><code>POST /api/reseller/api-tokens</code></td><td>Create a new token — any authenticated reseller can do this</td></tr>
+                            <tr><td><code>DELETE /api/reseller/api-tokens/{id}</code></td><td>Revoke a token by ID</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="callout">
+                    <div class="callout-title">Admin API Fallback</div>
+                    <p>Unmatched reseller routes automatically fall through to the Admin API handler (with the reseller acting as a scoped admin). This means most admin-level read operations are also accessible via the <code>/api/reseller/</code> prefix.</p>
+                </div>
+
+                <h3>Reseller API Endpoint Reference</h3>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Method &amp; Endpoint</th>
+                                <th>Description</th>
+                                <th>Parameters &amp; Payload Fields</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Authentication -->
+                            <tr>
+                                <td><code>POST /api/reseller/auth/login</code></td>
+                                <td>Authenticate reseller and obtain a session token</td>
+                                <td>
+                                    <code>email</code> (string, required)<br>
+                                    <code>password</code> (string, required)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/auth/totp/verify</code></td>
+                                <td>Verify TOTP 2FA code to complete reseller login</td>
+                                <td><code>code</code> (string, 6-digit TOTP)</td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/auth/logout</code></td>
+                                <td>Invalidate the current reseller session</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Dashboard -->
+                            <tr>
+                                <td><code>GET /api/reseller/dashboard</code></td>
+                                <td>Reseller dashboard overview with sub-client, account, and storage stats</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/users</code></td>
+                                <td>List all sub-clients created by this reseller</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/account-stacks</code></td>
+                                <td>List all hosting accounts belonging to reseller's sub-clients</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/job-events</code></td>
+                                <td>List recent background job events (last 50)</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Sub-Clients -->
+                            <tr>
+                                <td><code>GET /api/reseller/clients</code></td>
+                                <td>List all sub-clients with their hosting accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/clients</code></td>
+                                <td>Create a new sub-client under this reseller</td>
+                                <td>
+                                    <code>email</code> (string, required)<br>
+                                    <code>password</code> (string, min 8 chars)<br>
+                                    <code>full_name</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>PATCH /api/reseller/clients/{id}</code></td>
+                                <td>Update a sub-client's status or name</td>
+                                <td>
+                                    <code>status</code> (<code>"active"</code> | <code>"suspended"</code>)<br>
+                                    <code>full_name</code> (string, optional)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/reseller/clients/{id}</code></td>
+                                <td>Delete a sub-client account</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Sub-Plans -->
+                            <tr>
+                                <td><code>GET /api/reseller/plans</code></td>
+                                <td>List all hosting plans created by this reseller</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/plans</code></td>
+                                <td>Create a new sub-plan (limits enforced by the reseller's master plan)</td>
+                                <td>
+                                    <code>name</code> (string, required)<br>
+                                    <code>storage_mb</code> (int, ≤ master plan limit)<br>
+                                    <code>memory_mb</code> (int, ≤ master plan limit)<br>
+                                    <code>max_websites</code> (int, ≤ master plan limit)<br>
+                                    <code>max_databases</code> (int, ≤ master plan limit)<br>
+                                    <code>max_mailboxes</code> (int)<br>
+                                    <code>max_cron_jobs</code> (int)
+                                </td>
+                            </tr>
+
+                            <!-- Hosting Accounts -->
+                            <tr>
+                                <td><code>POST /api/reseller/hosting-accounts</code></td>
+                                <td>Provision a hosting account for a sub-client using a reseller sub-plan</td>
+                                <td>
+                                    <code>user_id</code> (int, must belong to this reseller)<br>
+                                    <code>plan_id</code> (int, must be a reseller sub-plan)
+                                </td>
+                            </tr>
+
+                            <!-- Storage -->
+                            <tr>
+                                <td><code>GET /api/reseller/storage/df</code></td>
+                                <td>Get aggregated storage usage across all reseller sub-accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/storage/live</code></td>
+                                <td>Live disk I/O metrics scoped to reseller accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/storage/quotas</code></td>
+                                <td>Per-account storage quota usage for reseller sub-accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/storage/paths</code></td>
+                                <td>Size breakdown by major filesystem paths</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/storage/cleanup</code></td>
+                                <td>Run storage cleanup for Docker, logs, and temp files</td>
+                                <td>
+                                    <code>clean_docker</code> (bool, default true)<br>
+                                    <code>clean_logs</code> (bool, default true)<br>
+                                    <code>clean_tmp</code> (bool, default true)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/storage/alerts</code></td>
+                                <td>Get storage alert threshold settings</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Networking -->
+                            <tr>
+                                <td><code>GET /api/reseller/network/overview</code></td>
+                                <td>Network overview for reseller-scoped accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/network/live</code></td>
+                                <td>Live network I/O metrics scoped to reseller accounts</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/network/ips</code></td>
+                                <td>List all server IP addresses</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- DNS & Domains -->
+                            <tr>
+                                <td><code>GET /api/reseller/dns-settings</code></td>
+                                <td>Get global DNS provider configuration</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/domains</code></td>
+                                <td>List all domains belonging to reseller sub-clients</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/dns-providers/cloudflare/accounts</code></td>
+                                <td>List Cloudflare DNS accounts visible to this reseller</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/registrars</code></td>
+                                <td>List domain registrar providers</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- Security & Profile -->
+                            <tr>
+                                <td><code>GET /api/reseller/security/audit</code></td>
+                                <td>Run and return a live server security audit report</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/admins</code></td>
+                                <td>Get the reseller's own profile and API token list</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- API Tokens -->
+                            <tr>
+                                <td><code>GET /api/reseller/api-tokens</code></td>
+                                <td>List Reseller API tokens</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>POST /api/reseller/api-tokens</code></td>
+                                <td>Generate a new Reseller API token</td>
+                                <td>
+                                    <code>name</code> (string, required)<br>
+                                    <code>permissions</code> (array of strings, default <code>["*"]</code>)
+                                </td>
+                            </tr>
+                            <tr>
+                                <td><code>DELETE /api/reseller/api-tokens/{id}</code></td>
+                                <td>Revoke a Reseller API token</td>
+                                <td><em>None</em></td>
+                            </tr>
+
+                            <!-- System -->
+                            <tr>
+                                <td><code>GET /api/reseller/status</code></td>
+                                <td>Get the current system and service status payload</td>
+                                <td><em>None</em></td>
+                            </tr>
+                            <tr>
+                                <td><code>GET /api/reseller/default-page</code></td>
+                                <td>Get the default landing page content</td>
+                                <td><em>None</em></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <script>
+        // Sidebar Navigation Active Link Highlight on Scroll
+        const sections = document.querySelectorAll('.docs-section');
+        const navLinks = document.querySelectorAll('.nav-menu li a');
+
+        window.addEventListener('scroll', () => {
+            let current = '';
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop - 100;
+                if (pageYOffset >= sectionTop) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            navLinks.forEach(link => {
+                link.classList.remove('active');
+                if (link.getAttribute('href') === `#${current}`) {
+                    link.classList.add('active');
+                }
+            });
+        });
+
+        // Filter Sidebar Nav via Search Input
+        function filterDocsNav() {
+            const input = document.getElementById('menu-search').value.toLowerCase();
+            const items = document.querySelectorAll('.nav-menu li');
+            items.forEach(item => {
+                const text = item.textContent.toLowerCase();
+                item.style.display = text.includes(input) ? '' : 'none';
+            });
+        }
+    </script>
+</body>
+</html>

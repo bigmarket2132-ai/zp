@@ -1,0 +1,80 @@
+import unittest
+import tempfile
+from pathlib import Path
+from Zeropanel.error_pages import DEFAULT_ERROR_PAGES, generate_error_page_html
+from Zeropanel.stack import ensure_account_layout, render_ols_vhconf, sync_account_suspension_marker
+
+
+class TestErrorPages(unittest.TestCase):
+    def test_default_error_pages_dictionary(self):
+        for code in ["403", "404", "500", "502", "503"]:
+            self.assertIn(code, DEFAULT_ERROR_PAGES)
+            html = DEFAULT_ERROR_PAGES[code]
+            self.assertIn(f"Error {code}", html)
+            self.assertIn("ZeroPanel Web Server", html)
+
+    def test_ensure_account_layout_generates_error_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            account = {"id": 10, "username": "u000010", "base_path": tmp, "status": "active"}
+            websites = [{"id": 1, "domain": "example.com", "document_root": f"{tmp}/domains/example.com/public_html", "php_version": "8.3", "status": "active", "ssl_status": "missing"}]
+
+            plan = {
+                "id": 1, "name": "Basic", "cpu_limit": "1", "memory_mb": 1024, "storage_mb": 10000,
+                "inode_limit": 100000, "max_websites": 10, "max_databases": 10, "max_mailboxes": 10,
+                "max_cron_jobs": 10, "daily_email_limit": 100, "backup_retention_days": 7
+            }
+            node = {"id": 1, "name": "node-1", "hostname": "localhost", "public_host": "localhost", "quota_backend": "dev-simulator"}
+            paths = ensure_account_layout(account, plan, node, websites=websites)
+            errors_dir = paths["stack"] / "errors"
+            services = (paths["stack"] / "services-entrypoint.sh").read_text()
+            self.assertNotIn("etimes=", services)
+            self.assertNotIn("kill -KILL", services)
+
+            self.assertTrue(errors_dir.exists())
+            for code in ["403", "404", "500", "502", "503"]:
+                err_file = errors_dir / f"{code}.html"
+                self.assertTrue(err_file.exists(), f"{code}.html should exist in errors dir")
+                content = err_file.read_text(encoding="utf-8")
+                self.assertIn(f"Error {code}", content)
+            self.assertFalse((Path(tmp) / ".Zeropanel-suspended").exists())
+
+            sync_account_suspension_marker(account, True)
+            self.assertTrue((Path(tmp) / ".Zeropanel-suspended").is_file())
+            sync_account_suspension_marker(account, False)
+            self.assertFalse((Path(tmp) / ".Zeropanel-suspended").exists())
+
+    def test_render_ols_vhconf_includes_errorpage_directives(self):
+        account = {"id": 10, "username": "u000010", "base_path": "/tmp/u000010"}
+        website = {"domain": "example.com", "document_root": "/tmp/u000010/domains/example.com/public_html"}
+
+        vhconf = render_ols_vhconf(account, website)
+
+        self.assertIn("errorpage 403", vhconf)
+        self.assertIn("errorpage 404", vhconf)
+        self.assertIn("errorpage 502", vhconf)
+
+    def test_render_ols_vhconf_uses_selected_php_runtime(self):
+        account = {"id": 10, "username": "u000010", "base_path": "/tmp/u000010"}
+        website = {
+            "domain": "example.com",
+            "document_root": "/tmp/u000010/domains/example.com/public_html",
+            "php_version": "8.4",
+        }
+
+        vhconf = render_ols_vhconf(account, website)
+
+        self.assertIn("path                    /usr/local/lsws/lsphp84/bin/lsphp", vhconf)
+        self.assertNotIn("/usr/local/lsws/lsphp82/bin/lsphp", vhconf)
+        self.assertIn("url                     /_Zeropanel_errors/404.html", vhconf)
+        self.assertIn("context /_Zeropanel_errors/", vhconf)
+        self.assertIn("location                /usr/local/lsws/Zeropanel_errors/", vhconf)
+        self.assertIn(".Zeropanel-suspended -f", vhconf)
+        self.assertIn("pcKeepAliveTimeout      1", vhconf)
+        self.assertIn("LSAPI_MAX_PROCESS_TIME=120", vhconf)
+        self.assertIn("_requestguard.sock", vhconf)
+        self.assertIn("extMaxIdleTime          30", vhconf)
+        self.assertIn("/_Zeropanel_errors/suspended.html", vhconf)
+
+
+if __name__ == "__main__":
+    unittest.main()
